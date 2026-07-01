@@ -1,5 +1,7 @@
 'use client';
+import { useState } from 'react';
 import { TradingSignal } from '@/types';
+import { useStore } from '@/store/useStore';
 import { formatDistanceToNow } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 
@@ -10,9 +12,21 @@ interface Props {
 }
 
 export function SignalCard({ signal, onClick, compact }: Props) {
-  const isLong = signal.direction === 'LONG';
-  const tp1 = signal.takeProfits?.[0];
-  const tp2 = signal.takeProfits?.[1];
+  const isLong    = signal.direction === 'LONG';
+  const tp1       = signal.takeProfits?.[0];
+  const tp2       = signal.takeProfits?.[1];
+  const addTrade  = useStore((s) => s.addTrade);
+  const hasTrade  = useStore((s) => s.trades.some((t) => t.symbol === signal.symbol && !t.result));
+  const justAdded = useStore((s) => s.trades.some((t) => t.signalId === signal.id));
+  const [flash, setFlash] = useState(false);
+
+  const handleAddTrade = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (hasTrade || justAdded) return;
+    addTrade(signal);
+    setFlash(true);
+    setTimeout(() => setFlash(false), 2000);
+  };
 
   const strengthColor =
     signal.strength === 'STRONG'
@@ -85,6 +99,25 @@ export function SignalCard({ signal, onClick, compact }: Props) {
               <p key={i} className="text-[#A0A0C0] text-xs">• {r}</p>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ── Add to Journal button ── */}
+      {!compact && (
+        <div className="pt-2 mt-2 border-t border-[#1E1E2E]">
+          <button
+            onClick={handleAddTrade}
+            disabled={hasTrade || justAdded}
+            className={`w-full py-2 rounded-xl text-xs font-semibold transition-colors ${
+              flash
+                ? 'bg-green-400/20 text-green-400 border border-green-400/40'
+                : justAdded || hasTrade
+                ? 'bg-[#1A1A26] text-[#404060] border border-[#1E1E2E] cursor-not-allowed'
+                : 'bg-[#F0B90B]/10 text-[#F0B90B] border border-[#F0B90B]/30 active:opacity-70'
+            }`}
+          >
+            {flash ? '✓ 已加入交易紀錄' : justAdded ? '已在紀錄中' : hasTrade ? `${signal.symbol.replace('USDT', '')} 已有持倉中` : '+ 加入交易紀錄'}
+          </button>
         </div>
       )}
     </div>
