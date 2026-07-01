@@ -8,210 +8,251 @@ function simpleId(): string {
 }
 
 function scoreToStrength(score: number): SignalStrength {
-  if (score >= 12) return 'STRONG';
-  if (score >= 7)  return 'MODERATE';
+  if (score >= 16) return 'STRONG';
+  if (score >= 9)  return 'MODERATE';
   return 'WEAK';
 }
 
-// Dynamic proximity: wider for volatile/cheap coins
-function proximity(price: number): number {
-  if (price < 1)    return 0.025; // small caps: ±2.5%
-  if (price < 100)  return 0.018;
-  return 0.015; // BTC/ETH: ±1.5%
+// ATR (Average True Range) — used for dynamic stop placement
+function calcAtr(candles: Candle[], period = 14): number {
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const h = candles[i].high;
+    const l = candles[i].low;
+    const pc = candles[i - 1].close;
+    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  const slice = trs.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
 
-function isNear(price: number, level: number): boolean {
-  return Math.abs(price - level) / price <= proximity(price);
+// Volume ratio: current bar vs 20-bar average
+function calcVolRatio(candles: Candle[]): number {
+  const avg = candles.slice(-21, -1).reduce((a, c) => a + c.volume, 0) / 20;
+  return avg > 0 ? candles[candles.length - 1].volume / avg : 1;
 }
 
-const MIN_SCORE = 7;
-const MIN_RR    = 1.5;
+// EMA slope — compares EMA value now vs N candles ago
+function calcEmaSlope(candles: Candle[], period: number, lookback = 5): 'up' | 'down' | 'flat' {
+  const closes = candles.map((c) => c.close);
+  const k = 2 / (period + 1);
+  let val = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  const hist: number[] = [];
+  for (let i = period; i < closes.length; i++) {
+    val = closes[i] * k + val * (1 - k);
+    hist.push(val);
+  }
+  if (hist.length < lookback + 1) return 'flat';
+  const pct = (hist[hist.length - 1] - hist[hist.length - 1 - lookback]) / hist[hist.length - 1 - lookback];
+  if (pct > 0.002) return 'up';
+  if (pct < -0.002) return 'down';
+  return 'flat';
+}
+
+// ════════════════════════════════════════════════════════════
+// Strategy rules:
+//   LONG  → price > EMA200 AND (EMA20 > EMA50 OR EMA50 rising)
+//   SHORT → price < EMA200 AND (EMA20 < EMA50 OR EMA50 falling)
+//   Minimum score  : 9
+//   Minimum RR     : 2.0
+//   Stop loss      : ATR × 1.5 below/above entry (or OB/SR if tighter)
+// ════════════════════════════════════════════════════════════
+const MIN_SCORE = 9;
+const MIN_RR    = 2.0;
 
 export function generateSignals(
   symbol: string,
   timeframe: Timeframe,
   candles: Candle[],
 ): TradingSignal[] {
-  if (candles.length < 50) return [];
+  if (candles.length < 55) return [];
 
-  const currentCandle = candles[candles.length - 1];
-  const prevCandle    = candles[candles.length - 2];
-  const currentPrice  = currentCandle.close;
+  const cur       = candles[candles.length - 1];
+  const prev      = candles[candles.length - 2];
+  const price     = cur.close;
 
-  const indicators  = computeIndicators(candles);
-  const structure   = analyzeMarketStructure(candles);
-  const orderBlocks = findOrderBlocks(candles).filter((ob) => !ob.mitigated);
-  const fvgs        = findFairValueGaps(candles).filter((f) => !f.filled);
-  const srLevels    = findSRLevels(candles);
+  const ind        = computeIndicators(candles);
+  const prevInd    = computeIndicators(candles.slice(0, -1));
+  const structure  = analyzeMarketStructure(candles);
+  const obs        = findOrderBlocks(candles).filter((ob) => !ob.mitigated);
+  const fvgs       = findFairValueGaps(candles).filter((f) => !f.filled);
+  const srLevels   = findSRLevels(candles);
+
+  const atrVal     = calcAtr(candles);
+  const volRatio   = calcVolRatio(candles);
+  const ema50Slope = calcEmaSlope(candles, 50);
 
   const signals: TradingSignal[] = [];
 
-  // ──────────────────────────────────────────────────────────────────
-  // LONG SIGNAL SCORING
-  // ──────────────────────────────────────────────────────────────────
+  // ── Macro trend flags ────────────────────────────────────
+  const aboveEma200    = price > ind.ema200;
+  const ema20AboveEma50 = ind.ema20 > ind.ema50;
+
+  // Hard gate: only evaluate a direction when macro trend agrees
+  const allowLong  = aboveEma200 && (ema20AboveEma50 || ema50Slope === 'up');
+  const allowShort = !aboveEma200 && (!ema20AboveEma50 || ema50Slope === 'down');
+
+  const support    = nearestSupport(srLevels, price);
+  const resistance = nearestResistance(srLevels, price);
+
+  // ── LONG SCORING ─────────────────────────────────────────
   let longScore = 0;
   const longReasons: string[] = [];
   let longOB:  OrderBlock | undefined;
   let longFVG: FairValueGap | undefined;
   let longSR:  SRLevel | undefined;
 
-  // Market structure
-  if (structure.trend === 'bullish')                 { longScore += 2; longReasons.push('趨勢向上 (看漲結構)'); }
-  if (structure.lastBOS?.direction === 'bullish')    { longScore += 3; longReasons.push('突破結構 BOS ↑'); }
-  if (structure.lastChoCH?.direction === 'bullish')  { longScore += 4; longReasons.push('結構轉換 ChoCH → 看漲'); }
+  if (allowLong) {
+    // Trend alignment (guaranteed by gate — scores the quality)
+    longScore += 3; longReasons.push('EMA200 上方（多頭趨勢）');
+    if (ema20AboveEma50) { longScore += 2; longReasons.push('EMA20 > EMA50（短期強勢）'); }
+    if (ema50Slope === 'up') { longScore += 1; longReasons.push('EMA50 斜率向上'); }
 
-  // Order Block — price touching or inside bullish OB
-  const nearBullOB = orderBlocks.find(
-    (ob) => ob.type === 'bullish' && currentPrice >= ob.low && currentPrice <= ob.high * 1.01,
-  );
-  if (nearBullOB) {
-    longScore += 3 + nearBullOB.strength;
-    longReasons.push(`看漲訂單塊 OB (強度 ${nearBullOB.strength})`);
-    longOB = nearBullOB;
+    // Market structure
+    if (structure.trend === 'bullish')                { longScore += 2; longReasons.push('結構做多（HH HL）'); }
+    if (structure.lastBOS?.direction === 'bullish')   { longScore += 2; longReasons.push('BOS 突破向上'); }
+    if (structure.lastChoCH?.direction === 'bullish') { longScore += 3; longReasons.push('ChoCH 轉多'); }
+    // Penalise: recent bearish ChoCH means momentum just flipped down
+    if (structure.lastChoCH?.direction === 'bearish') longScore -= 2;
+
+    // Order Block — highest conviction SMC setup
+    const bullOB = obs.find(
+      (ob) => ob.type === 'bullish' && price >= ob.low * 0.999 && price <= ob.high * 1.005,
+    );
+    if (bullOB) {
+      longScore += 3 + Math.min(bullOB.strength, 2);
+      longReasons.push(`看漲 OB（強度 ${bullOB.strength}）`);
+      longOB = bullOB;
+    }
+
+    // Fair Value Gap
+    const bullFVG = fvgs.find(
+      (f) => f.type === 'bullish' && price >= f.bottom * 0.999 && price <= f.top * 1.001,
+    );
+    if (bullFVG) {
+      longScore += 2; longReasons.push('看漲 FVG 回補'); longFVG = bullFVG;
+    }
+
+    // Support level (more touches = stronger)
+    if (support && Math.abs(price - support.price) / price <= 0.015) {
+      longScore += Math.min(support.touchCount, 4);
+      longReasons.push(`支撐 $${support.price.toFixed(4)}（${support.touchCount} 次）`);
+      longSR = support;
+    }
+
+    // RSI — buy dips in uptrend, NOT breakouts
+    if (ind.rsi < 35)       { longScore += 4; longReasons.push(`RSI 超賣 ${ind.rsi.toFixed(1)}`); }
+    else if (ind.rsi < 50)  { longScore += 2; longReasons.push(`RSI 回調 ${ind.rsi.toFixed(1)}`); }
+    else if (ind.rsi > 70)  longScore -= 3; // penalise chasing overbought
+
+    // MACD
+    if (ind.macdHistogram > 0 && ind.macd > ind.macdSignal) {
+      longScore += 2; longReasons.push('MACD 黃金交叉');
+    }
+    if (ind.macdHistogram > 0 && ind.macdHistogram > prevInd.macdHistogram) {
+      longScore += 1; longReasons.push('MACD 動能增強');
+    }
+
+    // Volume surge confirms breakout/reversal
+    if (volRatio >= 1.5) { longScore += 2; longReasons.push(`量能放大 ${volRatio.toFixed(1)}×`); }
+
+    // Candle body confirmation
+    if ((cur.close - cur.open) / cur.open > 0.003) {
+      longScore += 1; longReasons.push('看漲實體K線');
+    }
   }
 
-  // FVG — price inside bullish fair value gap
-  const inBullFVG = fvgs.find(
-    (f) => f.type === 'bullish' && currentPrice >= f.bottom && currentPrice <= f.top,
-  );
-  if (inBullFVG) {
-    longScore += 2;
-    longReasons.push('位於看漲 FVG 公平價值缺口內');
-    longFVG = inBullFVG;
-  }
-
-  // SNR support
-  const support = nearestSupport(srLevels, currentPrice);
-  if (support && isNear(currentPrice, support.price)) {
-    longScore += Math.min(1 + support.touchCount, 5); // cap at +5
-    longReasons.push(`支撐位 $${support.price.toFixed(4)} (觸碰 ${support.touchCount} 次)`);
-    longSR = support;
-  }
-
-  // RSI
-  if (indicators.rsi < 30)      { longScore += 4; longReasons.push(`RSI 超賣 (${indicators.rsi.toFixed(1)})`); }
-  else if (indicators.rsi < 40) { longScore += 2; longReasons.push(`RSI 偏低 (${indicators.rsi.toFixed(1)})`); }
-  else if (indicators.rsi > 70)   longScore -= 2;
-
-  // MACD
-  if (indicators.macdHistogram > 0 && indicators.macd > indicators.macdSignal) {
-    longScore += 2;
-    longReasons.push('MACD 黃金交叉 ↑');
-  }
-  // Histogram expanding (momentum building)
-  const prevInd = candles.length > 3 ? computeIndicators(candles.slice(0, -1)) : null;
-  if (prevInd && indicators.macdHistogram > 0 && indicators.macdHistogram > prevInd.macdHistogram) {
-    longScore += 1;
-    longReasons.push('MACD 動能增強');
-  }
-
-  // EMA alignment
-  if (currentPrice > indicators.ema200) { longScore += 2; longReasons.push('價格在 EMA200 上方'); }
-  if (currentPrice > indicators.ema50)  { longScore += 1; longReasons.push('價格在 EMA50 上方'); }
-  if (currentPrice > indicators.ema20)    longScore += 1;
-
-  // Bullish candle confirmation
-  if (currentCandle.close > currentCandle.open && currentCandle.close > prevCandle.close) {
-    longScore += 1;
-    longReasons.push('看漲K線確認');
-  }
-
-  // ──────────────────────────────────────────────────────────────────
-  // SHORT SIGNAL SCORING
-  // ──────────────────────────────────────────────────────────────────
+  // ── SHORT SCORING ────────────────────────────────────────
   let shortScore = 0;
   const shortReasons: string[] = [];
   let shortOB:  OrderBlock | undefined;
   let shortFVG: FairValueGap | undefined;
   let shortSR:  SRLevel | undefined;
 
-  if (structure.trend === 'bearish')                { shortScore += 2; shortReasons.push('趨勢向下 (看跌結構)'); }
-  if (structure.lastBOS?.direction === 'bearish')   { shortScore += 3; shortReasons.push('突破結構 BOS ↓'); }
-  if (structure.lastChoCH?.direction === 'bearish') { shortScore += 4; shortReasons.push('結構轉換 ChoCH → 看跌'); }
+  if (allowShort) {
+    // Trend alignment
+    shortScore += 3; shortReasons.push('EMA200 下方（空頭趨勢）');
+    if (!ema20AboveEma50)   { shortScore += 2; shortReasons.push('EMA20 < EMA50（短期弱勢）'); }
+    if (ema50Slope === 'down') { shortScore += 1; shortReasons.push('EMA50 斜率向下'); }
 
-  const nearBearOB = orderBlocks.find(
-    (ob) => ob.type === 'bearish' && currentPrice <= ob.high && currentPrice >= ob.low * 0.99,
-  );
-  if (nearBearOB) {
-    shortScore += 3 + nearBearOB.strength;
-    shortReasons.push(`看跌訂單塊 OB (強度 ${nearBearOB.strength})`);
-    shortOB = nearBearOB;
+    // Market structure
+    if (structure.trend === 'bearish')                 { shortScore += 2; shortReasons.push('結構做空（LH LL）'); }
+    if (structure.lastBOS?.direction === 'bearish')    { shortScore += 2; shortReasons.push('BOS 向下突破'); }
+    if (structure.lastChoCH?.direction === 'bearish')  { shortScore += 3; shortReasons.push('ChoCH 轉空'); }
+    if (structure.lastChoCH?.direction === 'bullish')  shortScore -= 2;
+
+    // Order Block
+    const bearOB = obs.find(
+      (ob) => ob.type === 'bearish' && price <= ob.high * 1.001 && price >= ob.low * 0.995,
+    );
+    if (bearOB) {
+      shortScore += 3 + Math.min(bearOB.strength, 2);
+      shortReasons.push(`看跌 OB（強度 ${bearOB.strength}）`);
+      shortOB = bearOB;
+    }
+
+    // Fair Value Gap
+    const bearFVG = fvgs.find(
+      (f) => f.type === 'bearish' && price >= f.bottom * 0.999 && price <= f.top * 1.001,
+    );
+    if (bearFVG) {
+      shortScore += 2; shortReasons.push('看跌 FVG 回補'); shortFVG = bearFVG;
+    }
+
+    // Resistance level
+    if (resistance && Math.abs(price - resistance.price) / price <= 0.015) {
+      shortScore += Math.min(resistance.touchCount, 4);
+      shortReasons.push(`阻力 $${resistance.price.toFixed(4)}（${resistance.touchCount} 次）`);
+      shortSR = resistance;
+    }
+
+    // RSI — short bounces in downtrend, NOT capitulation
+    if (ind.rsi > 65)       { shortScore += 4; shortReasons.push(`RSI 超買 ${ind.rsi.toFixed(1)}`); }
+    else if (ind.rsi > 50)  { shortScore += 2; shortReasons.push(`RSI 反彈 ${ind.rsi.toFixed(1)}`); }
+    else if (ind.rsi < 30)  shortScore -= 3; // penalise shorting capitulation
+
+    // MACD
+    if (ind.macdHistogram < 0 && ind.macd < ind.macdSignal) {
+      shortScore += 2; shortReasons.push('MACD 死亡交叉');
+    }
+    if (ind.macdHistogram < 0 && ind.macdHistogram < prevInd.macdHistogram) {
+      shortScore += 1; shortReasons.push('MACD 跌勢加速');
+    }
+
+    // Volume
+    if (volRatio >= 1.5) { shortScore += 2; shortReasons.push(`量能放大 ${volRatio.toFixed(1)}×`); }
+
+    // Candle body
+    if ((cur.open - cur.close) / cur.open > 0.003) {
+      shortScore += 1; shortReasons.push('看跌實體K線');
+    }
   }
 
-  const inBearFVG = fvgs.find(
-    (f) => f.type === 'bearish' && currentPrice >= f.bottom && currentPrice <= f.top,
-  );
-  if (inBearFVG) {
-    shortScore += 2;
-    shortReasons.push('位於看跌 FVG 公平價值缺口內');
-    shortFVG = inBearFVG;
-  }
-
-  const resistance = nearestResistance(srLevels, currentPrice);
-  if (resistance && isNear(currentPrice, resistance.price)) {
-    shortScore += Math.min(1 + resistance.touchCount, 5);
-    shortReasons.push(`阻力位 $${resistance.price.toFixed(4)} (觸碰 ${resistance.touchCount} 次)`);
-    shortSR = resistance;
-  }
-
-  if (indicators.rsi > 70)      { shortScore += 4; shortReasons.push(`RSI 超買 (${indicators.rsi.toFixed(1)})`); }
-  else if (indicators.rsi > 60) { shortScore += 2; shortReasons.push(`RSI 偏高 (${indicators.rsi.toFixed(1)})`); }
-  else if (indicators.rsi < 30)   shortScore -= 2;
-
-  if (indicators.macdHistogram < 0 && indicators.macd < indicators.macdSignal) {
-    shortScore += 2;
-    shortReasons.push('MACD 死亡交叉 ↓');
-  }
-  if (prevInd && indicators.macdHistogram < 0 && indicators.macdHistogram < prevInd.macdHistogram) {
-    shortScore += 1;
-    shortReasons.push('MACD 跌勢動能增強');
-  }
-
-  if (currentPrice < indicators.ema200) { shortScore += 2; shortReasons.push('價格在 EMA200 下方'); }
-  if (currentPrice < indicators.ema50)  { shortScore += 1; shortReasons.push('價格在 EMA50 下方'); }
-  if (currentPrice < indicators.ema20)    shortScore += 1;
-
-  if (currentCandle.close < currentCandle.open && currentCandle.close < prevCandle.close) {
-    shortScore += 1;
-    shortReasons.push('看跌K線確認');
-  }
-
-  // ──────────────────────────────────────────────────────────────────
-  // BUILD SIGNALS
-  // ──────────────────────────────────────────────────────────────────
+  // ── BUILD SIGNALS ────────────────────────────────────────
+  // Only the stronger direction can fire; tie goes to neither.
+  const slBuffer = Math.max(atrVal * 1.5, price * 0.01);
 
   // LONG
-  if (longScore >= MIN_SCORE && longScore >= shortScore) {
+  if (longScore >= MIN_SCORE && longScore > shortScore) {
     const sl = longOB
-      ? longOB.low * 0.997
+      ? Math.min(longOB.low * 0.995, price - slBuffer)
       : longSR
-      ? longSR.price * 0.997
-      : currentPrice * 0.97;
+      ? Math.min(longSR.price * 0.995, price - slBuffer)
+      : price - slBuffer;
 
-    const tp1 = resistance ? resistance.price : currentPrice * (1 + defaultTP(timeframe));
-    const nextRes = srLevels.find((l) => l.type === 'resistance' && l.price > tp1 * 1.002);
-    const tp2     = nextRes ? nextRes.price : tp1 * (1 + defaultTP(timeframe) * 0.5);
+    const tp1    = resistance ? resistance.price : price + slBuffer * 2;
+    const nextR  = srLevels.find((l) => l.type === 'resistance' && l.price > tp1 * 1.005);
+    const tp2    = nextR ? nextR.price : tp1 + (tp1 - price) * 0.618;
 
-    const rr = parseFloat(((tp1 - currentPrice) / Math.max(currentPrice - sl, 0.0001)).toFixed(2));
+    const rr = parseFloat(((tp1 - price) / Math.max(price - sl, 1e-6)).toFixed(2));
     if (rr >= MIN_RR) {
       signals.push({
-        id: simpleId(),
-        symbol,
-        direction: 'LONG',
-        strength: scoreToStrength(longScore),
-        score: longScore,
-        entry: currentPrice,
-        takeProfits: [tp1, tp2],
-        stopLoss: sl,
-        riskReward: rr,
-        timeframe,
-        timestamp: Date.now(),
-        reasons: longReasons,
-        orderBlock: longOB,
-        fvg: longFVG,
-        srLevel: longSR ?? support ?? undefined,
-        indicators,
-        isRead: false,
+        id: simpleId(), symbol, direction: 'LONG',
+        strength: scoreToStrength(longScore), score: longScore,
+        entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
+        riskReward: rr, timeframe, timestamp: Date.now(),
+        reasons: longReasons, orderBlock: longOB, fvg: longFVG,
+        srLevel: longSR ?? support ?? undefined, indicators: ind, isRead: false,
       });
     }
   }
@@ -219,48 +260,27 @@ export function generateSignals(
   // SHORT
   if (shortScore >= MIN_SCORE && shortScore > longScore) {
     const sl = shortOB
-      ? shortOB.high * 1.003
+      ? Math.max(shortOB.high * 1.005, price + slBuffer)
       : shortSR
-      ? shortSR.price * 1.003
-      : currentPrice * 1.03;
+      ? Math.max(shortSR.price * 1.005, price + slBuffer)
+      : price + slBuffer;
 
-    const tp1 = support ? support.price : currentPrice * (1 - defaultTP(timeframe));
-    const nextSup = srLevels.find((l) => l.type === 'support' && l.price < tp1 * 0.998);
-    const tp2     = nextSup ? nextSup.price : tp1 * (1 - defaultTP(timeframe) * 0.5);
+    const tp1    = support ? support.price : price - slBuffer * 2;
+    const nextS  = srLevels.find((l) => l.type === 'support' && l.price < tp1 * 0.995);
+    const tp2    = nextS ? nextS.price : tp1 - (price - tp1) * 0.618;
 
-    const rr = parseFloat(((currentPrice - tp1) / Math.max(sl - currentPrice, 0.0001)).toFixed(2));
+    const rr = parseFloat(((price - tp1) / Math.max(sl - price, 1e-6)).toFixed(2));
     if (rr >= MIN_RR) {
       signals.push({
-        id: simpleId(),
-        symbol,
-        direction: 'SHORT',
-        strength: scoreToStrength(shortScore),
-        score: shortScore,
-        entry: currentPrice,
-        takeProfits: [tp1, tp2],
-        stopLoss: sl,
-        riskReward: rr,
-        timeframe,
-        timestamp: Date.now(),
-        reasons: shortReasons,
-        orderBlock: shortOB,
-        fvg: shortFVG,
-        srLevel: shortSR ?? resistance ?? undefined,
-        indicators,
-        isRead: false,
+        id: simpleId(), symbol, direction: 'SHORT',
+        strength: scoreToStrength(shortScore), score: shortScore,
+        entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
+        riskReward: rr, timeframe, timestamp: Date.now(),
+        reasons: shortReasons, orderBlock: shortOB, fvg: shortFVG,
+        srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
       });
     }
   }
 
   return signals;
-}
-
-// Default TP distance by timeframe (as fraction of price)
-function defaultTP(tf: Timeframe): number {
-  switch (tf) {
-    case '15m': return 0.015;
-    case '1h':  return 0.025;
-    case '4h':  return 0.04;
-    case '1d':  return 0.08;
-  }
 }
