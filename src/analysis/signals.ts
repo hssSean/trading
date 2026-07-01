@@ -223,26 +223,29 @@ export function generateSignals(
 
   // ── BUILD SIGNALS ─────────────────────────────────────────
   const slBuffer = Math.max(atrVal * 1.5, price * 0.01);
+  // Minimum TP distance to guarantee RR >= MIN_RR
+  const minTpDist = slBuffer * MIN_RR;
 
   // LONG — only fires when clearly stronger than short
   if (longScore >= MIN_SCORE && longScore > shortScore) {
     const sl  = longOB  ? Math.min(longOB.low  * 0.995, price - slBuffer)
               : longSR  ? Math.min(longSR.price * 0.995, price - slBuffer)
               : price - slBuffer;
-    const tp1 = resistance ? resistance.price : price + slBuffer * 2;
-    const nextR = srLevels.find((l) => l.type === 'resistance' && l.price > tp1 * 1.005);
-    const tp2   = nextR ? nextR.price : tp1 + (tp1 - price) * 0.618;
-    const rr    = parseFloat(((tp1 - price) / Math.max(price - sl, 1e-6)).toFixed(2));
-    if (rr >= MIN_RR) {
-      signals.push({
-        id: simpleId(), symbol, direction: 'LONG',
-        strength: scoreToStrength(longScore), score: longScore,
-        entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
-        riskReward: rr, timeframe, timestamp: Date.now(),
-        reasons: longReasons, orderBlock: longOB, fvg: longFVG,
-        srLevel: longSR ?? support ?? undefined, indicators: ind, isRead: false,
-      });
-    }
+    const risk   = Math.max(price - sl, 1e-6);
+    // Use resistance level if it gives sufficient RR; otherwise use minimum distance
+    const tp1Raw = resistance ? resistance.price : price + minTpDist;
+    const tp1    = Math.max(tp1Raw, price + risk * MIN_RR); // ensure RR >= MIN_RR
+    const nextR  = srLevels.find((l) => l.type === 'resistance' && l.price > tp1 * 1.005);
+    const tp2    = nextR ? nextR.price : tp1 + (tp1 - price) * 0.618;
+    const rr     = parseFloat(((tp1 - price) / risk).toFixed(2));
+    signals.push({
+      id: simpleId(), symbol, direction: 'LONG',
+      strength: scoreToStrength(longScore), score: longScore,
+      entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
+      riskReward: rr, timeframe, timestamp: Date.now(),
+      reasons: longReasons, orderBlock: longOB, fvg: longFVG,
+      srLevel: longSR ?? support ?? undefined, indicators: ind, isRead: false,
+    });
   }
 
   // SHORT — only fires when clearly stronger than long
@@ -250,20 +253,22 @@ export function generateSignals(
     const sl  = shortOB ? Math.max(shortOB.high * 1.005, price + slBuffer)
               : shortSR ? Math.max(shortSR.price * 1.005, price + slBuffer)
               : price + slBuffer;
-    const tp1 = support ? support.price : price - slBuffer * 2;
-    const nextS = srLevels.find((l) => l.type === 'support' && l.price < tp1 * 0.995);
-    const tp2   = nextS ? nextS.price : tp1 - (price - tp1) * 0.618;
-    const rr    = parseFloat(((price - tp1) / Math.max(sl - price, 1e-6)).toFixed(2));
-    if (rr >= MIN_RR) {
-      signals.push({
-        id: simpleId(), symbol, direction: 'SHORT',
-        strength: scoreToStrength(shortScore), score: shortScore,
-        entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
-        riskReward: rr, timeframe, timestamp: Date.now(),
-        reasons: shortReasons, orderBlock: shortOB, fvg: shortFVG,
-        srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
-      });
-    }
+    const risk   = Math.max(sl - price, 1e-6);
+    // Use support level if it gives sufficient RR; otherwise use minimum distance
+    const tp1Raw = support ? support.price : price - minTpDist;
+    const tp1    = Math.min(tp1Raw, price - risk * MIN_RR); // ensure RR >= MIN_RR
+    const nextS  = srLevels.find((l) => l.type === 'support' && l.price < tp1 * 0.995);
+    const tp2    = nextS ? nextS.price : tp1 - (price - tp1) * 0.618;
+    const rr     = parseFloat(((price - tp1) / risk).toFixed(2));
+    signals.push({
+      id: simpleId(), symbol, direction: 'SHORT',
+      strength: scoreToStrength(shortScore), score: shortScore,
+      entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
+      riskReward: rr, timeframe, timestamp: Date.now(),
+      reasons: shortReasons, orderBlock: shortOB, fvg: shortFVG,
+      srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
+    });
+  }
   }
 
   return signals;
