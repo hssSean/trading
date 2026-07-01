@@ -56,12 +56,13 @@ export async function GET(req: NextRequest) {
           const candles = await fetchCandles(symbol, tf, 200);
           const sigs = generateSignals(symbol, tf, candles);
           allSignals.push(...sigs);
-          // Track highest score even if below threshold
           sigs.forEach((s) => { if (s.score > topScore) topScore = s.score; });
         } catch {
           // skip failed timeframe
         }
       }
+      // topScore=0 means gates blocked all signals; report raw candle count for diagnostics
+      if (topScore === 0 && allSignals.length === 0) topScore = -1;
 
       const strong = allSignals
         .filter((s) => s.score >= minScore)
