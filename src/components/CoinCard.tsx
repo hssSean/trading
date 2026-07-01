@@ -1,11 +1,13 @@
 'use client';
 import Link from 'next/link';
+import { useStore } from '@/store/useStore';
 import { WatchedCoin } from '@/types';
 
 export function CoinCard({ coin }: { coin: WatchedCoin }) {
-  const isUp = coin.priceChangePercent24h >= 0;
-  const latest = coin.signals[0];
-  const unread = coin.signals.filter((s) => !s.isRead).length;
+  const isUp        = coin.priceChangePercent24h >= 0;
+  const latest      = coin.signals[0];
+  const unread      = coin.signals.filter((s) => !s.isRead).length;
+  const activeTrade = useStore((s) => s.trades.some((t) => t.symbol === coin.symbol && !t.result));
 
   return (
     <Link href={`/analysis/${coin.symbol}`} className="block card-hover mb-3">
@@ -16,7 +18,12 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
             <span className="text-[#F0B90B] text-xs font-bold">{coin.baseAsset.slice(0, 3)}</span>
           </div>
           <div>
-            <p className="text-[#EAEAF4] font-bold text-base">{coin.displayName}</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[#EAEAF4] font-bold text-base">{coin.displayName}</p>
+              {activeTrade && (
+                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-[#F0B90B]/20 text-[#F0B90B]">持倉中</span>
+              )}
+            </div>
             <p className="text-[#606080] text-xs mt-0.5">{coin.timeframes.join(' · ')}</p>
           </div>
         </div>
