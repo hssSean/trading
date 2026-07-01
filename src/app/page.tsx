@@ -26,6 +26,11 @@ async function runCoinAnalysis(symbol: string) {
       allSignals.push(...generateSignals(symbol, tf as Timeframe, candles));
     }
     store.addSignals(symbol, allSignals);
+    // Auto-add STRONG signals (score >= 16) to trade journal if no active trade
+    const best = allSignals.filter((s) => s.strength === 'STRONG').sort((a, b) => b.score - a.score)[0];
+    if (best && !store.hasActiveTrade(symbol)) {
+      store.addTrade(best);
+    }
   } catch (err) {
     console.error('[analyze]', symbol, err);
   } finally {

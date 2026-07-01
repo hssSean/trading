@@ -108,6 +108,28 @@ export interface AppSettings {
   soundEnabled: boolean;
 }
 
+export type TradeResult = 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | 'MANUAL_CLOSE';
+
+export interface TradeRecord {
+  id: string;
+  signalId: string;
+  symbol: string;
+  direction: SignalDirection;
+  timeframe: Timeframe;
+  strength: SignalStrength;
+  score: number;
+  entry: number;
+  stopLoss: number;
+  tp1: number;
+  tp2: number;
+  reasons: string[];
+  openedAt: number;
+  closedAt?: number;
+  result?: TradeResult;
+  exitPrice?: number;
+  pnlPercent?: number;
+}
+
 export interface AnalysisResult {
   symbol: string;
   timeframe: Timeframe;

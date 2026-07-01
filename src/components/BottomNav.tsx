@@ -6,12 +6,14 @@ import { useStore } from '@/store/useStore';
 const NAV = [
   { href: '/', label: '首頁', icon: '🏠' },
   { href: '/signals', label: '信號', icon: '📊' },
+  { href: '/trades', label: '紀錄', icon: '📋' },
   { href: '/settings', label: '設定', icon: '⚙️' },
 ];
 
 export function BottomNav() {
   const pathname = usePathname();
-  const unread = useStore((s) => s.allSignals.filter((sg) => !sg.isRead).length);
+  const unread        = useStore((s) => s.allSignals.filter((sg) => !sg.isRead).length);
+  const pendingTrades = useStore((s) => s.trades.filter((t) => !t.result).length);
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-[#12121A] border-t border-[#1E1E2E] flex safe-bottom z-50">
@@ -28,6 +30,11 @@ export function BottomNav() {
               {href === '/signals' && unread > 0 && (
                 <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[9px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-[3px]">
                   {unread > 99 ? '99+' : unread}
+                </span>
+              )}
+              {href === '/trades' && pendingTrades > 0 && (
+                <span className="absolute -top-1 -right-2 bg-[#F0B90B] text-[#0A0A0F] text-[9px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-[3px]">
+                  {pendingTrades}
                 </span>
               )}
             </span>

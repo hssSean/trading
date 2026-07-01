@@ -4,6 +4,13 @@ import { generateSignals } from '@/analysis/signals';
 import { sendSignalToLine, sendLineMessage } from '@/lib/line';
 import { Timeframe, TradingSignal } from '@/types';
 
+// In-memory cooldown: same symbol will not trigger LINE again for 6 hours
+const lineCooldown = new Map<string, number>();
+const COOLDOWN_MS  = 6 * 60 * 60 * 1000;
+
+// Only signals with score >= STRONG_THRESHOLD get sent via LINE
+const STRONG_THRESHOLD = 16;
+
 // Called by UptimeRobot / cron-job.org every hour
 // GET /api/analyze?secret=YOUR_SECRET&coins=BTCUSDT,ETHUSDT
 export async function GET(req: NextRequest) {
@@ -67,11 +74,19 @@ export async function GET(req: NextRequest) {
         .filter((s) => s.score >= minScore)
         .sort((a, b) => b.score - a.score);
 
-      if (strong.length > 0 && lineReady) {
-        const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(strong[0]));
+      // Only notify LINE for STRONG signals (score >= 16) and respect 6h cooldown
+      const topStrong = strong.find((s) => s.score >= STRONG_THRESHOLD);
+      const lastNotified = lineCooldown.get(symbol) ?? 0;
+      const onCooldown   = Date.now() - lastNotified < COOLDOWN_MS;
+
+      if (topStrong && lineReady && !onCooldown) {
+        const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(topStrong));
         lineSent  = ok;
         lineError = error;
-        if (ok) notified.push(symbol);
+        if (ok) {
+          notified.push(symbol);
+          lineCooldown.set(symbol, Date.now());
+        }
       }
 
       results.push({
@@ -84,6 +99,7 @@ export async function GET(req: NextRequest) {
         lineSent,
         ...(lineError ? { lineError } : {}),
         ...(topScore === 0 ? { note: 'gate blocked — no signals passed EMA200/RR filter' } : {}),
+        ...(topStrong && onCooldown ? { note: `LINE skipped — same coin cooldown (${Math.round((COOLDOWN_MS - (Date.now() - lastNotified)) / 60000)}min left)` } : {}),
       });
     } catch (err) {
       coinError = err instanceof Error ? err.message : String(err);
