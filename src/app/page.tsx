@@ -100,9 +100,9 @@ export default function HomePage() {
     }
   }, [hasHydrated, loadTopCoins, analyzeAll]);
 
-  // Auto-refresh every hour
+  // Auto-refresh every 30 seconds
   useEffect(() => {
-    const id = setInterval(() => { analyzeAll(); }, 60 * 60 * 1000);
+    const id = setInterval(() => { analyzeAll(); }, 30 * 1000);
     return () => clearInterval(id);
   }, [analyzeAll]);
 
