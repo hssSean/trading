@@ -23,3 +23,7 @@ npm-debug.log*
 *.pem
 .idea/
 .vscode/
+
+# project internals
+.expo/
+.claude/

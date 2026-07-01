@@ -73,3 +73,22 @@ export async function searchSymbols(query: string): Promise<string[]> {
     .slice(0, 20);
   return symbols;
 }
+
+// Stablecoin / leveraged token patterns to exclude
+const EXCLUDE = /^(USDC|BUSD|TUSD|USDP|FDUSD|DAI|EUR|GBP|AUD|BVOL|IBVOL|BEAR|BULL|UP|DOWN|3L|3S)/;
+
+export async function fetchTopCoinsByVolume(limit = 10): Promise<string[]> {
+  // Returns all 24h tickers — pick top USDT pairs by quote volume
+  const res = await client.get('/ticker/24hr');
+  const tickers: { symbol: string; quoteVolume: string }[] = res.data;
+
+  return tickers
+    .filter(
+      (t) =>
+        t.symbol.endsWith('USDT') &&
+        !EXCLUDE.test(t.symbol.replace('USDT', '')),
+    )
+    .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
+    .slice(0, limit)
+    .map((t) => t.symbol);
+}

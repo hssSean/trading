@@ -40,6 +40,7 @@ interface StoreState {
   allSignals: TradingSignal[];
   lineToken: string;
   lineUserId: string;
+  webhookSecret: string;
   _hasHydrated: boolean;
 
   setHasHydrated: (v: boolean) => void;
@@ -51,6 +52,7 @@ interface StoreState {
   clearSignals: (symbol?: string) => void;
   updateSettings: (patch: Partial<AppSettings>) => void;
   setLine: (token: string, userId: string) => void;
+  setWebhookSecret: (secret: string) => void;
 }
 
 // Safe localStorage wrapper — returns memory fallback during SSR
@@ -68,6 +70,7 @@ export const useStore = create<StoreState>()(
       allSignals: [],
       lineToken: '',
       lineUserId: '',
+      webhookSecret: 'abc123',
       _hasHydrated: false,
 
       setHasHydrated: (v) => set({ _hasHydrated: v }),
@@ -137,6 +140,8 @@ export const useStore = create<StoreState>()(
 
       setLine: (token, userId) =>
         set({ lineToken: token, lineUserId: userId }),
+
+      setWebhookSecret: (secret) => set({ webhookSecret: secret }),
     }),
     {
       name: 'crypto-trader-v2',
@@ -148,6 +153,7 @@ export const useStore = create<StoreState>()(
         allSignals: s.allSignals.slice(0, 100),
         lineToken: s.lineToken,
         lineUserId: s.lineUserId,
+        webhookSecret: s.webhookSecret,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);
