@@ -1,0 +1,137 @@
+'use client';
+import { TradingSignal } from '@/types';
+import { formatDistanceToNow } from 'date-fns';
+import { zhTW } from 'date-fns/locale';
+
+interface Props {
+  signal: TradingSignal;
+  onClick?: () => void;
+  compact?: boolean;
+}
+
+export function SignalCard({ signal, onClick, compact }: Props) {
+  const isLong = signal.direction === 'LONG';
+  const tp1 = signal.takeProfits?.[0];
+  const tp2 = signal.takeProfits?.[1];
+
+  const strengthColor =
+    signal.strength === 'STRONG'
+      ? 'text-green-400'
+      : signal.strength === 'MODERATE'
+      ? 'text-yellow-400'
+      : 'text-[#606080]';
+
+  const strengthLabel =
+    signal.strength === 'STRONG' ? '強 ★★★' : signal.strength === 'MODERATE' ? '中 ★★' : '弱 ★';
+
+  let timeAgo = '';
+  try {
+    timeAgo = formatDistanceToNow(signal.timestamp, { locale: zhTW, addSuffix: true });
+  } catch {
+    timeAgo = new Date(signal.timestamp).toLocaleString('zh-TW');
+  }
+
+  return (
+    <div
+      onClick={onClick}
+      className={`card mb-3 ${onClick ? 'cursor-pointer active:scale-[0.98] transition-transform' : ''} ${!signal.isRead ? 'border-[#F0B90B]' : ''}`}
+    >
+      {/* ── Header row ── */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={isLong ? 'badge-long' : 'badge-short'}>
+            {isLong ? '做多 ▲' : '做空 ▼'}
+          </span>
+          <span className="text-[#EAEAF4] font-bold text-sm">
+            {signal.symbol.replace('USDT', '/USDT')}
+          </span>
+          <span className="badge-tf">{signal.timeframe}</span>
+          {!signal.isRead && (
+            <span className="w-2 h-2 rounded-full bg-[#F0B90B] animate-pulse" />
+          )}
+        </div>
+        <div className="text-right shrink-0 ml-2">
+          <p className={`text-xs font-semibold ${strengthColor}`}>{strengthLabel}</p>
+          <p className="text-[#606080] text-[10px] mt-0.5">{timeAgo}</p>
+        </div>
+      </div>
+
+      {/* ── Price grid ── */}
+      <div className="grid grid-cols-2 gap-2 mb-3">
+        <PriceBox label="📌 入場價" value={tp1 ? signal.entry : null} highlight={signal.entry} color="blue" />
+        <PriceBox label="🛑 止損 SL" value={signal.stopLoss} color="red" />
+        {tp1 && <PriceBox label="🎯 止盈 TP1" value={tp1} color="green" />}
+        {tp2 && <PriceBox label="🎯 止盈 TP2" value={tp2} color="green" dim />}
+      </div>
+
+      {/* ── Stats row ── */}
+      <div className="flex gap-2 mb-3">
+        <StatChip label="風險回報比" value={`${signal.riskReward}:1`} />
+        <StatChip label="分析得分" value={`${signal.score}pt`} />
+        {tp1 && (
+          <StatChip
+            label={isLong ? '預期漲幅' : '預期跌幅'}
+            value={`${(Math.abs(tp1 - signal.entry) / signal.entry * 100).toFixed(1)}%`}
+          />
+        )}
+      </div>
+
+      {/* ── Reasons ── */}
+      {!compact && signal.reasons.length > 0 && (
+        <div className="pt-2 border-t border-[#1E1E2E]">
+          <p className="text-[#606080] text-[10px] mb-1.5 font-semibold uppercase tracking-wide">分析依據</p>
+          <div className="space-y-1">
+            {signal.reasons.slice(0, 5).map((r, i) => (
+              <p key={i} className="text-[#A0A0C0] text-xs">• {r}</p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PriceBox({
+  label,
+  value,
+  highlight,
+  color,
+  dim,
+}: {
+  label: string;
+  value: number | null | undefined;
+  highlight?: number;
+  color: 'blue' | 'green' | 'red';
+  dim?: boolean;
+}) {
+  const colorClass = {
+    blue: 'text-blue-400',
+    green: dim ? 'text-green-400/60' : 'text-green-400',
+    red: 'text-red-400',
+  }[color];
+
+  const displayValue = value ?? highlight;
+  return (
+    <div className="bg-[#1A1A26] rounded-xl p-3">
+      <p className="text-[#606080] text-[10px] mb-1">{label}</p>
+      <p className={`${colorClass} font-bold text-sm font-mono`}>
+        {displayValue != null ? `$${fmtPrice(displayValue)}` : '---'}
+      </p>
+    </div>
+  );
+}
+
+function StatChip({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex-1 bg-yellow-400/10 rounded-xl px-2 py-2 text-center min-w-0">
+      <p className="text-[#606080] text-[9px] truncate">{label}</p>
+      <p className="text-[#F0B90B] font-bold text-xs mt-0.5">{value}</p>
+    </div>
+  );
+}
+
+function fmtPrice(p: number): string {
+  if (p >= 1000) return p.toFixed(2);
+  if (p >= 1) return p.toFixed(4);
+  return p.toFixed(6);
+}

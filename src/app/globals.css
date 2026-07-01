@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --accent: #F0B90B;
+  --green: #00C087;
+  --red: #FF4B6E;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  background-color: #0A0A0F;
+  color: #EAEAF4;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overscroll-behavior: none;
+}
+
+/* Mobile-app scroll feel */
+.scroll-container {
+  -webkit-overflow-scrolling: touch;
+  overflow-y: auto;
+}
+
+/* Hide scrollbar on mobile */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2A2A3E; border-radius: 2px; }
+
+/* Safe area for iPhone notch / home bar */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 16px); }
+.safe-top { padding-top: env(safe-area-inset-top, 0px); }
+
+@layer utilities {
+  .card {
+    @apply bg-[#12121A] border border-[#1E1E2E] rounded-2xl p-4;
+  }
+  .card-hover {
+    @apply card active:scale-[0.98] transition-transform cursor-pointer;
+  }
+  .badge-long {
+    @apply bg-green-500/10 text-green-400 px-2 py-1 rounded-lg text-xs font-bold;
+  }
+  .badge-short {
+    @apply bg-red-500/10 text-red-400 px-2 py-1 rounded-lg text-xs font-bold;
+  }
+  .badge-tf {
+    @apply bg-[#1A1A26] text-[#606080] px-2 py-0.5 rounded text-xs;
+  }
+  .btn-primary {
+    @apply bg-[#F0B90B] text-[#0A0A0F] font-bold rounded-full px-4 py-2 active:opacity-80 transition-opacity;
+  }
+  .chip {
+    @apply bg-[#1A1A26] border border-[#1E1E2E] rounded-full px-3 py-1.5 text-sm text-[#A0A0C0] cursor-pointer;
+  }
+  .chip-active {
+    @apply bg-yellow-400/10 border-[#F0B90B] text-[#F0B90B] font-semibold;
+  }
+  .input-field {
+    @apply w-full bg-[#1A1A26] text-[#EAEAF4] rounded-xl px-4 py-3 text-sm border border-[#1E1E2E] focus:border-[#F0B90B] outline-none placeholder:text-[#404060] transition-colors;
+  }
+}
