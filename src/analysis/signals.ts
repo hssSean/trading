@@ -269,7 +269,6 @@ export function generateSignals(
       srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
     });
   }
-  }
 
   return signals;
 }
