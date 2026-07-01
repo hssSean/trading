@@ -54,8 +54,8 @@ function calcEmaSlope(candles: Candle[], period: number, lookback = 5): 'up' | '
 // RR    : Minimum 2.0.
 // Stop  : ATR × 1.5 (dynamic).
 // ════════════════════════════════════════════════════════════
-const MIN_SCORE = 9;
-const MIN_RR    = 2.0;
+const MIN_SCORE = 7;
+const MIN_RR    = 1.8;
 
 export function generateSignals(
   symbol: string,

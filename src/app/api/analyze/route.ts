@@ -38,6 +38,7 @@ export async function GET(req: NextRequest) {
     lineSent: boolean;
     lineError?: string;
     error?: string;
+    note?: string;
   }[] = [];
   const notified: string[] = [];
 
@@ -61,8 +62,6 @@ export async function GET(req: NextRequest) {
           // skip failed timeframe
         }
       }
-      // topScore=0 means gates blocked all signals; report raw candle count for diagnostics
-      if (topScore === 0 && allSignals.length === 0) topScore = -1;
 
       const strong = allSignals
         .filter((s) => s.score >= minScore)
@@ -84,6 +83,7 @@ export async function GET(req: NextRequest) {
           : null,
         lineSent,
         ...(lineError ? { lineError } : {}),
+        ...(topScore === 0 ? { note: 'gate blocked — no signals passed EMA200/RR filter' } : {}),
       });
     } catch (err) {
       coinError = err instanceof Error ? err.message : String(err);
