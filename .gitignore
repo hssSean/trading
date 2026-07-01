@@ -27,3 +27,4 @@ npm-debug.log*
 # project internals
 .expo/
 .claude/
+.vercel
