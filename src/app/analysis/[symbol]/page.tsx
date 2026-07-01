@@ -67,6 +67,12 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           allSig.push(...generateSignals(symbol, t, c));
         }
         addSignals(symbol, allSig);
+        // Auto-add best STRONG signal to trade journal if no active trade
+        const best = allSig.filter((s) => s.strength === 'STRONG').sort((a, b) => b.score - a.score)[0];
+        const store = useStore.getState();
+        if (best && !store.hasActiveTrade(symbol)) {
+          store.addTrade(best);
+        }
       } catch (e: unknown) {
         if (e instanceof Error && e.name === 'CanceledError') return;
         setError('無法取得資料，請確認網路連線後重試');
