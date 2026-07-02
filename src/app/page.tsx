@@ -161,24 +161,32 @@ export default function HomePage() {
     return () => clearInterval(id);
   }, [loadTopCoins]);
 
-  // Pick up pending signals that server sent LINE for (best-effort: same warm instance)
+  // Pick up pending signals that server sent LINE for — poll every 30s
   useEffect(() => {
-    const pickupPending = () => {
+    const pickupPending = async () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      const secret = useStore.getState().webhookSecret;
-      fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' })
-        .then(r => r.json())
-        .then((data: { signals?: TradingSignal[] }) => {
-          const store = useStore.getState();
-          (data.signals ?? []).forEach(sig => {
-            if (!store.hasActiveTrade(sig.symbol)) store.addTrade(sig);
-          });
-        })
-        .catch(() => {});
+      const store = useStore.getState();
+      const secret = store.webhookSecret;
+      try {
+        const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
+        const data: { signals?: TradingSignal[] } = await res.json();
+        for (const sig of data.signals ?? []) {
+          // Auto-add coin to watchlist so it gets analyzed and TP/SL is auto-detected
+          if (!store.coins.find(c => c.symbol === sig.symbol)) {
+            store.addCoin(sig.symbol);
+            setTimeout(() => runCoinAnalysis(sig.symbol), 500);
+          }
+          if (!store.hasActiveTrade(sig.symbol)) store.addTrade(sig);
+        }
+      } catch { /* ignore network errors */ }
     };
     pickupPending();
     document.addEventListener('visibilitychange', pickupPending);
-    return () => document.removeEventListener('visibilitychange', pickupPending);
+    const pollId = setInterval(pickupPending, 30 * 1000);
+    return () => {
+      document.removeEventListener('visibilitychange', pickupPending);
+      clearInterval(pollId);
+    };
   }, []);
 
   useEffect(() => {
