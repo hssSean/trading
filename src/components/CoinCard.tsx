@@ -6,12 +6,20 @@ import { WatchedCoin } from '@/types';
 const STRENGTH_RANK: Record<string, number> = { WEAK: 0, MODERATE: 1, STRONG: 2 };
 
 export function CoinCard({ coin }: { coin: WatchedCoin }) {
-  const isUp           = coin.priceChangePercent24h >= 0;
-  const minStrength    = useStore((s) => s.settings.minSignalStrength);
-  const filtered       = coin.signals.filter((s) => STRENGTH_RANK[s.strength] >= STRENGTH_RANK[minStrength]);
-  const latest         = filtered[0];
-  const unread         = filtered.filter((s) => !s.isRead).length;
-  const activeTrade    = useStore((s) => s.trades.some((t) => t.symbol === coin.symbol && !t.result));
+  const isUp        = coin.priceChangePercent24h >= 0;
+  const minStrength = useStore((s) => s.settings.minSignalStrength);
+  const filtered    = coin.signals.filter((s) => STRENGTH_RANK[s.strength] >= STRENGTH_RANK[minStrength]);
+  const latest      = filtered[0];
+  const unread      = filtered.filter((s) => !s.isRead).length;
+  const openTrade   = useStore((s) => s.trades.find((t) => t.symbol === coin.symbol && !t.result));
+  const activeTrade = !!openTrade;
+
+  // Live PnL for open trade
+  const livePnl = openTrade && coin.currentPrice > 0
+    ? openTrade.direction === 'LONG'
+      ? (coin.currentPrice - openTrade.entry) / openTrade.entry * 100
+      : (openTrade.entry - coin.currentPrice) / openTrade.entry * 100
+    : null;
 
   return (
     <Link href={`/analysis/${coin.symbol}`} className="block card-hover mb-3">
@@ -22,10 +30,17 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
             <span className="text-[#F0B90B] text-xs font-bold">{coin.baseAsset.slice(0, 3)}</span>
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <p className="text-[#EAEAF4] font-bold text-base">{coin.displayName}</p>
               {activeTrade && (
                 <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-[#F0B90B]/20 text-[#F0B90B]">持倉中</span>
+              )}
+              {livePnl !== null && (
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                  livePnl >= 0 ? 'bg-green-400/15 text-green-400' : 'bg-red-400/15 text-red-400'
+                }`}>
+                  {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
+                </span>
               )}
             </div>
             <p className="text-[#606080] text-xs mt-0.5">{coin.timeframes.join(' · ')}</p>

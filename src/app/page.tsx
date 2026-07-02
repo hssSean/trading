@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
 import { CoinCard } from '@/components/CoinCard';
 import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, searchSymbols } from '@/api/binance';
@@ -145,17 +145,14 @@ export default function HomePage() {
   useEffect(() => {
     if (!hasHydrated || autoLoaded.current) return;
     autoLoaded.current = true;
-    const syms = useStore.getState().coins.map((c) => c.symbol);
-    const isDefault =
-      syms.length === DEFAULT_SYMBOLS.length &&
-      DEFAULT_SYMBOLS.every((s) => syms.includes(s));
-    if (isDefault) {
-      loadTopCoins(true);
-    } else {
-      const needsAnalysis = useStore.getState().coins.some((c) => c.lastAnalyzed === 0);
-      if (needsAnalysis) analyzeAll();
-    }
-  }, [hasHydrated, loadTopCoins, analyzeAll]);
+    // Always sync with server's top-15 (adds new coins, never removes existing ones)
+    loadTopCoins(true);
+    // Analyze pre-existing coins that haven't run yet
+    // (newly added coins are analyzed inside loadTopCoins)
+    useStore.getState().coins
+      .filter((c) => c.lastAnalyzed === 0)
+      .forEach((c, i) => setTimeout(() => runCoinAnalysis(c.symbol), i * 400 + 300));
+  }, [hasHydrated, loadTopCoins]);
 
   // ── Fast: price check + TP/SL detection every 30s ────────────
   useEffect(() => {
@@ -186,19 +183,22 @@ export default function HomePage() {
   // ── Pick up pending signals that server sent LINE for — poll every 30s
   useEffect(() => {
     const pickupPending = async () => {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      const store = useStore.getState();
-      const secret = store.webhookSecret;
+      if (document.visibilityState !== 'visible') return;
+      const secret = useStore.getState().webhookSecret;
       try {
         const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
         const data: { signals?: TradingSignal[] } = await res.json();
         for (const sig of data.signals ?? []) {
-          // Auto-add coin to watchlist so it gets analyzed and TP/SL is auto-detected
-          if (!store.coins.find(c => c.symbol === sig.symbol)) {
-            store.addCoin(sig.symbol);
+          // Fresh state per signal to avoid stale closure bugs
+          const s = useStore.getState();
+          if (!s.coins.find(c => c.symbol === sig.symbol)) {
+            s.addCoin(sig.symbol);
             setTimeout(() => runCoinAnalysis(sig.symbol), 500);
           }
-          if (!store.hasActiveTrade(sig.symbol)) store.addTrade(sig);
+          // Re-read after potential addCoin
+          if (!useStore.getState().hasActiveTrade(sig.symbol)) {
+            useStore.getState().addTrade(sig);
+          }
         }
       } catch { /* ignore network errors */ }
     };
@@ -249,6 +249,20 @@ export default function HomePage() {
   const unread           = coins.reduce((n, c) => n + c.signals.filter((s) => !s.isRead).length, 0);
   const autoCloseAlerts  = useStore((s) => s.autoCloseAlerts);
   const dismissAutoClose = useStore((s) => s.dismissAutoCloseAlert);
+  const minStrength      = useStore((s) => s.settings.minSignalStrength);
+
+  // Market sentiment: count coins with LONG vs SHORT signals (above minStrength)
+  const STRENGTH_RANK: Record<string, number> = { WEAK: 0, MODERATE: 1, STRONG: 2 };
+  const sentiment = useMemo(() => {
+    let longs = 0, shorts = 0;
+    coins.forEach(c => {
+      const top = c.signals.find(s => STRENGTH_RANK[s.strength] >= STRENGTH_RANK[minStrength]);
+      if (top?.direction === 'LONG') longs++;
+      else if (top?.direction === 'SHORT') shorts++;
+    });
+    return { longs, shorts };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coins, minStrength]);
 
   return (
     <div className="flex flex-col h-full">
@@ -323,8 +337,28 @@ export default function HomePage() {
           </div>
         ))}
 
+        {/* Market sentiment bar */}
+        {(sentiment.longs + sentiment.shorts) > 0 && (
+          <div className="mt-2 px-3 py-2 bg-[#12121A] border border-[#1E1E2E] rounded-2xl flex items-center gap-3">
+            <span className="text-green-400 text-xs font-bold shrink-0">▲ {sentiment.longs}</span>
+            <div className="flex-1 h-1.5 bg-[#1A1A26] rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-green-400 to-transparent"
+                style={{ width: `${Math.round(sentiment.longs / (sentiment.longs + sentiment.shorts) * 100)}%` }}
+              />
+            </div>
+            <div className="flex-1 h-1.5 bg-[#1A1A26] rounded-full overflow-hidden flex justify-end">
+              <div
+                className="h-full rounded-full bg-gradient-to-l from-red-400 to-transparent"
+                style={{ width: `${Math.round(sentiment.shorts / (sentiment.longs + sentiment.shorts) * 100)}%` }}
+              />
+            </div>
+            <span className="text-red-400 text-xs font-bold shrink-0">{sentiment.shorts} ▼</span>
+          </div>
+        )}
+
         {unread > 0 && (
-          <div className="mt-3 px-4 py-2.5 bg-yellow-400/10 border border-[#F0B90B]/30 rounded-2xl flex items-center gap-2">
+          <div className="mt-2 px-4 py-2.5 bg-yellow-400/10 border border-[#F0B90B]/30 rounded-2xl flex items-center gap-2">
             <span className="text-[#F0B90B]">🔔</span>
             <p className="text-[#F0B90B] text-xs font-semibold">{unread} 個未讀交易信號</p>
           </div>
