@@ -70,9 +70,7 @@ export default function SettingsPage() {
   const [guideOpen, setGuideOpen]   = useState(false);
   const [diagResult, setDiagResult] = useState<AnalyzeResult | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
-  const [cloudSaving, setCloudSaving] = useState(false);
-  const [cloudMsg,    setCloudMsg]    = useState('');
-  const [resetting,   setResetting]   = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [resetMsg,    setResetMsg]    = useState('');
 
   useEffect(() => {
@@ -91,34 +89,6 @@ export default function SettingsPage() {
     } finally {
       setResetting(false);
       setTimeout(() => setResetMsg(''), 4000);
-    }
-  };
-
-  const saveCloud = async () => {
-    setCloudSaving(true); setCloudMsg('');
-    try {
-      const store = useStore.getState();
-      const res = await fetch(`/api/sync?secret=${encodeURIComponent(secret.trim() || 'abc123')}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          watchlist:  store.coins.map(c => ({ symbol: c.symbol, timeframes: c.timeframes })),
-          trades:     store.trades,
-          lineToken:  store.lineToken,
-          lineUserId: store.lineUserId,
-        }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setCloudMsg(`已儲存至雲端 (${store.coins.length} 幣種 · ${store.trades.length} 筆紀錄)`);
-      } else {
-        setCloudMsg('儲存失敗：' + (data.error ?? '未知錯誤'));
-      }
-    } catch {
-      setCloudMsg('網路錯誤，請稍後再試');
-    } finally {
-      setCloudSaving(false);
-      setTimeout(() => setCloudMsg(''), 5000);
     }
   };
 
@@ -322,9 +292,12 @@ export default function SettingsPage() {
               WEBHOOK_SECRET={secret || 'abc123'}<br />
               CRON_SECRET=任意密碼<br />
               ANALYSIS_TIMEFRAMES=4h,1h<br />
-              MIN_SCORE=5
+              MIN_SCORE=5<br />
+              <span className="text-blue-400">NEXT_PUBLIC_SUPABASE_URL=你的url</span><br />
+              <span className="text-blue-400">NEXT_PUBLIC_SUPABASE_ANON_KEY=你的key</span><br />
+              <span className="text-blue-400">SUPABASE_SERVICE_ROLE_KEY=你的key</span>
             </p>
-            <p className="text-[#606080] text-[10px] mt-2">伺服器自動掃描 Binance 成交量前 15 名，無需設定 WATCH_COINS</p>
+            <p className="text-[#606080] text-[10px] mt-2">藍色為 Supabase 必填，用於登入驗證、交易紀錄同步及 TP/SL 自動偵測</p>
           </div>
         </Section>
 
@@ -437,32 +410,17 @@ export default function SettingsPage() {
         </Section>
 
         {/* Cloud Sync */}
-        <Section title="☁️ 雲端同步">
-          <p className="text-[#606080] text-xs mb-3 leading-5">
-            資料自動儲存至雲端（Redis），切換裝置或清除瀏覽器快取後重新開啟 App 會自動恢復。<br />
-            同步金鑰為你的 Webhook 密鑰，請確保設定了唯一密鑰以保護資料。
-          </p>
-          {cloudMsg && (
-            <div className={`mb-3 px-3 py-2 rounded-xl text-xs font-semibold ${
-              cloudMsg.includes('失敗') || cloudMsg.includes('錯誤') ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'
-            }`}>
-              {cloudMsg}
-            </div>
-          )}
-          <button
-            onClick={saveCloud}
-            disabled={cloudSaving}
-            className="w-full py-2.5 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm font-semibold"
-          >
-            {cloudSaving ? (
-              <span className="flex items-center justify-center gap-2">
-                <span className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-                儲存中…
-              </span>
-            ) : '立即備份到雲端'}
-          </button>
-          <p className="text-[#404060] text-xs mt-2">
-            自動同步：每次資料變動後 4 秒，以及每 10 分鐘定期備份
+        <Section title="☁️ 雲端同步（Supabase）">
+          <div className="bg-green-500/5 border border-green-500/20 rounded-xl px-4 py-3 mb-3">
+            <p className="text-green-400 text-xs font-semibold mb-1">✓ 自動同步已啟用</p>
+            <p className="text-[#606080] text-xs leading-5">
+              交易紀錄、自選幣種、LINE 設定均自動同步至 Supabase。<br />
+              任何裝置登入同一帳號，資料即時一致。
+            </p>
+          </div>
+          <p className="text-[#404060] text-xs leading-5">
+            同步時機：資料變動後 4 秒自動儲存，以及每 10 分鐘定期備份。<br />
+            首次登入新裝置時自動從雲端載入所有紀錄。
           </p>
         </Section>
 

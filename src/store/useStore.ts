@@ -67,7 +67,7 @@ interface StoreState {
   setLine: (token: string, userId: string) => void;
   setWebhookSecret: (secret: string) => void;
   setUserId: (id: string) => void;
-  updateTrade: (id: string, patch: Partial<Pick<TradeRecord, 'entryNotes' | 'entryChartUrl' | 'exitChartUrl'>>) => void;
+  updateTrade: (id: string, patch: Partial<Pick<TradeRecord, 'entryNotes'>>) => void;
   // Trade journal
   addTrade: (signal: TradingSignal) => void;
   addManualTrade: (params: { symbol: string; direction: 'LONG' | 'SHORT'; entry: number; stopLoss: number; tp1: number; tp2: number; timeframe?: Timeframe; score?: number }) => void;

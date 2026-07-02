@@ -87,7 +87,7 @@ export default function TradesPage() {
   const filtered = filter === 'PENDING' ? pending : filter === 'CLOSED' ? closed : trades;
 
   const exportCsv = () => {
-    const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,入場備註,入場截圖,出場截圖';
+    const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,分析依據,個人備註';
     const rows = trades.map(t =>
       [
         t.id, t.symbol, t.direction, t.timeframe, t.strength, t.score,
@@ -97,9 +97,8 @@ export default function TradesPage() {
         t.result ? RESULT_LABEL[t.result] : '持倉中',
         t.exitPrice ?? '',
         t.pnlPercent ?? '',
+        `"${(t.reasons ?? []).join(' | ').replace(/"/g, '""')}"`,
         `"${(t.entryNotes ?? '').replace(/"/g, '""')}"`,
-        t.entryChartUrl ?? '',
-        t.exitChartUrl  ?? '',
       ].join(',')
     );
     const csv  = [header, ...rows].join('\n');
@@ -366,53 +365,45 @@ export default function TradesPage() {
                   </div>
                 )}
 
-                {/* Entry notes */}
+                {/* Auto-generated entry reasons from signal analysis */}
+                {trade.reasons && trade.reasons.length > 0 && (
+                  <div className="mt-2 bg-[#0D1820] border border-blue-400/10 rounded-xl px-3 py-2">
+                    <p className="text-[#405060] text-[9px] mb-1 font-semibold uppercase tracking-wide">分析依據</p>
+                    {trade.reasons.map((r, i) => (
+                      <p key={i} className="text-[#5A8090] text-[10px] leading-[1.5]">• {r}</p>
+                    ))}
+                  </div>
+                )}
+
+                {/* Personal notes (editable) */}
                 {editingNote === trade.id ? (
                   <div className="mt-2">
                     <textarea
                       value={noteText}
                       onChange={e => setNoteText(e.target.value)}
-                      placeholder="記錄入場原因、市場觀察…"
-                      rows={3}
+                      placeholder="個人備註、市場觀察…"
+                      rows={2}
                       className="w-full bg-[#1A1A26] border border-[#1E1E2E] rounded-xl px-3 py-2 text-xs text-[#EAEAF4] resize-none outline-none mb-2"
                     />
                     <div className="flex gap-2">
                       <button onClick={() => { updateTrade(trade.id, { entryNotes: noteText }); setEditingNote(null); }}
-                        className="flex-1 py-1.5 rounded-lg bg-[#F0B90B] text-[#0A0A0F] text-xs font-bold">儲存備註</button>
+                        className="flex-1 py-1.5 rounded-lg bg-[#F0B90B] text-[#0A0A0F] text-xs font-bold">儲存</button>
                       <button onClick={() => setEditingNote(null)}
                         className="px-3 py-1.5 rounded-lg bg-[#1A1A26] text-[#606080] text-xs">取消</button>
                     </div>
                   </div>
                 ) : (
-                  <div className="mt-2 flex items-start gap-2">
+                  <div className="mt-1.5 flex items-start gap-2">
                     <div className="flex-1 min-w-0">
                       {trade.entryNotes
                         ? <p className="text-[#A0A0C0] text-xs leading-5 bg-[#1A1A26] rounded-xl px-3 py-2">{trade.entryNotes}</p>
-                        : <button onClick={() => { setEditingNote(trade.id); setNoteText(trade.entryNotes ?? ''); }}
-                            className="text-[#404060] text-xs">＋ 新增備註</button>
+                        : <button onClick={() => { setEditingNote(trade.id); setNoteText(''); }}
+                            className="text-[#404060] text-xs">＋ 個人備註</button>
                       }
                     </div>
                     {trade.entryNotes && (
                       <button onClick={() => { setEditingNote(trade.id); setNoteText(trade.entryNotes ?? ''); }}
                         className="text-[#404060] text-xs shrink-0">✏️</button>
-                    )}
-                  </div>
-                )}
-
-                {/* Chart screenshots */}
-                {(trade.entryChartUrl || trade.exitChartUrl) && (
-                  <div className="flex gap-2 mt-2">
-                    {trade.entryChartUrl && (
-                      <a href={trade.entryChartUrl} target="_blank" rel="noopener noreferrer" className="flex-1">
-                        <img src={trade.entryChartUrl} alt="入場圖" className="w-full h-20 object-cover rounded-xl border border-[#1E1E2E]" />
-                        <p className="text-[#404060] text-[9px] text-center mt-0.5">入場圖</p>
-                      </a>
-                    )}
-                    {trade.exitChartUrl && (
-                      <a href={trade.exitChartUrl} target="_blank" rel="noopener noreferrer" className="flex-1">
-                        <img src={trade.exitChartUrl} alt="出場圖" className="w-full h-20 object-cover rounded-xl border border-[#1E1E2E]" />
-                        <p className="text-[#404060] text-[9px] text-center mt-0.5">出場圖</p>
-                      </a>
                     )}
                   </div>
                 )}
@@ -431,6 +422,14 @@ export default function TradesPage() {
                 <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#1E1E2E]">
                   <span className="text-[#404060] text-xs">{fmtDate(trade.openedAt)}</span>
                   <div className="flex gap-2 flex-wrap justify-end">
+                    <a
+                      href={`https://www.tradingview.com/chart/?symbol=BINANCE:${trade.symbol}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs px-2 py-1 rounded-xl text-blue-400 border border-blue-400/20 active:opacity-70"
+                    >
+                      圖表
+                    </a>
                     {isPending && (
                       <>
                         <button

@@ -3,8 +3,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { SignalCard } from '@/components/SignalCard';
-import { CandlestickChart, CandlestickChartRef } from '@/components/CandlestickChart';
-import { uploadChartScreenshot } from '@/lib/supabase';
+import { CandlestickChart } from '@/components/CandlestickChart';
 import { fetchCandles, fetchTicker24h } from '@/api/binance';
 import { computeIndicators } from '@/analysis/indicators';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
@@ -31,35 +30,14 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
   const [htfLabel, setHtfLabel] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [unlockFlash, setUnlockFlash]   = useState(false);
-  const [snapMsg, setSnapMsg]           = useState('');
-  const abortRef  = useRef<AbortController | null>(null);
-  const chartRef  = useRef<CandlestickChartRef>(null);
+  const [unlockFlash, setUnlockFlash] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   const handleUnlock = () => {
     const store  = useStore.getState();
     fetch(`/api/analyze?secret=${encodeURIComponent(store.webhookSecret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
     setUnlockFlash(true);
     setTimeout(() => setUnlockFlash(false), 2500);
-  };
-
-  const handleSnapshot = async (tag: 'entry' | 'exit') => {
-    const canvas = chartRef.current?.takeScreenshot();
-    if (!canvas) { setSnapMsg('截圖失敗，請稍後再試'); return; }
-    const store = useStore.getState();
-    const uid   = store.userId;
-    const trade = store.trades.find(t => t.symbol === symbol && !t.result);
-    if (!trade) { setSnapMsg('找不到此幣種的進行中交易'); setTimeout(() => setSnapMsg(''), 3000); return; }
-    if (!uid)   { setSnapMsg('請先登入帳號'); setTimeout(() => setSnapMsg(''), 3000); return; }
-    setSnapMsg('上傳中…');
-    const url = await uploadChartScreenshot(uid, trade.id, tag, canvas);
-    if (url) {
-      store.updateTrade(trade.id, tag === 'entry' ? { entryChartUrl: url } : { exitChartUrl: url });
-      setSnapMsg(tag === 'entry' ? '✓ 入場截圖已儲存' : '✓ 出場截圖已儲存');
-    } else {
-      setSnapMsg('上傳失敗，請確認 Supabase Storage 已設定');
-    }
-    setTimeout(() => setSnapMsg(''), 4000);
   };
 
   const analyze = useCallback(
@@ -263,31 +241,12 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           </div>
         )}
         <CandlestickChart
-          ref={chartRef}
           candles={chartCandles}
           signals={coin?.signals ?? []}
           srLevels={srLevels}
           orderBlocks={orderBlocks}
           height={280}
         />
-        {/* Screenshot buttons */}
-        {chartCandles.length > 0 && (
-          <div className="flex gap-2 px-3 pb-2">
-            <button onClick={() => handleSnapshot('entry')}
-              className="flex-1 text-xs py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-400 font-semibold">
-              📸 截圖（入場）
-            </button>
-            <button onClick={() => handleSnapshot('exit')}
-              className="flex-1 text-xs py-1.5 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-400 font-semibold">
-              📸 截圖（出場）
-            </button>
-          </div>
-        )}
-        {snapMsg && (
-          <p className={`text-xs text-center pb-2 font-semibold ${snapMsg.startsWith('✓') ? 'text-green-400' : 'text-yellow-400'}`}>
-            {snapMsg}
-          </p>
-        )}
       </div>
 
       {/* ── Main content ── */}
