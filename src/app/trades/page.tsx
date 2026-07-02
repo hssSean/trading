@@ -42,10 +42,11 @@ function unlockCoin(symbol: string) {
 }
 
 export default function TradesPage() {
-  const trades      = useStore(s => s.trades);
-  const coins       = useStore(s => s.coins);
-  const closeTrade  = useStore(s => s.closeTrade);
-  const deleteTrade = useStore(s => s.deleteTrade);
+  const trades          = useStore(s => s.trades);
+  const coins           = useStore(s => s.coins);
+  const closeTrade      = useStore(s => s.closeTrade);
+  const deleteTrade     = useStore(s => s.deleteTrade);
+  const addManualTrade  = useStore(s => s.addManualTrade);
 
   const [closeModal, setCloseModal] = useState<{
     id: string; symbol: string; direction: 'LONG' | 'SHORT';
@@ -57,6 +58,14 @@ export default function TradesPage() {
   const [unlockMsg,  setUnlockMsg]  = useState<Record<string, boolean>>({});
   const [syncing,    setSyncing]    = useState(false);
   const [syncMsg,    setSyncMsg]    = useState('');
+  const [showManual, setShowManual] = useState(false);
+  const [mSymbol,    setMSymbol]    = useState('');
+  const [mDir,       setMDir]       = useState<'LONG' | 'SHORT'>('LONG');
+  const [mEntry,     setMEntry]     = useState('');
+  const [mTP1,       setMTP1]       = useState('');
+  const [mTP2,       setMTP2]       = useState('');
+  const [mSL,        setMSL]        = useState('');
+  const [mError,     setMError]     = useState('');
   const now = Date.now();
 
   const closed  = trades.filter(t => !!t.result);
@@ -135,6 +144,21 @@ export default function TradesPage() {
     }
   }, []);
 
+  const handleManualCreate = () => {
+    setMError('');
+    const sym = mSymbol.trim().toUpperCase().replace('/', '');
+    const symbol = sym.endsWith('USDT') ? sym : sym + 'USDT';
+    const entry = parseFloat(mEntry), tp1 = parseFloat(mTP1), tp2 = parseFloat(mTP2), sl = parseFloat(mSL);
+    if (!symbol) { setMError('請輸入幣種代號'); return; }
+    if (isNaN(entry) || entry <= 0) { setMError('請輸入有效的進場價格'); return; }
+    if (isNaN(tp1) || tp1 <= 0) { setMError('請輸入有效的 TP1'); return; }
+    if (isNaN(sl)  || sl  <= 0) { setMError('請輸入有效的止損價格'); return; }
+    if (trades.some(t => t.symbol === symbol && !t.result)) { setMError('此幣種已有進行中的交易'); return; }
+    addManualTrade({ symbol, direction: mDir, entry, stopLoss: sl, tp1, tp2: isNaN(tp2) || tp2 <= 0 ? tp1 : tp2 });
+    setShowManual(false);
+    setMSymbol(''); setMDir('LONG'); setMEntry(''); setMTP1(''); setMTP2(''); setMSL(''); setMError('');
+  };
+
   const autoFill = (result: TradeResult) => {
     setExitResult(result);
     if (!closeModal) return;
@@ -165,8 +189,11 @@ export default function TradesPage() {
                 </span>
               ) : '同步紀錄'}
             </button>
+            <button onClick={() => setShowManual(true)} className="btn-primary text-xs px-3 py-1.5">
+              + 新增
+            </button>
             <button onClick={exportCsv} className="text-[#F0B90B] text-xs font-semibold px-3 py-1.5 border border-[#F0B90B]/40 rounded-full active:opacity-70">
-              匯出 CSV
+              匯出
             </button>
           </div>
         </div>
@@ -356,6 +383,67 @@ export default function TradesPage() {
         )}
         <div className="h-4" />
       </div>
+
+      {/* Manual create trade modal */}
+      {showManual && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-end" onClick={e => e.target === e.currentTarget && setShowManual(false)}>
+          <div className="w-full max-w-xl mx-auto bg-[#12121A] rounded-t-3xl p-6 pb-10 border-t border-[#1E1E2E]">
+            <div className="w-12 h-1 bg-[#1E1E2E] rounded-full mx-auto mb-5" />
+            <h2 className="text-[#EAEAF4] text-lg font-extrabold mb-1">手動新增交易</h2>
+            <p className="text-[#606080] text-xs mb-4">依照 LINE 推播內容輸入，用於補錄遺漏的紀錄</p>
+
+            <p className="text-[#606080] text-xs mb-1">幣種代號</p>
+            <input
+              value={mSymbol}
+              onChange={e => { setMSymbol(e.target.value.toUpperCase()); setMError(''); }}
+              placeholder="例如：SYN 或 SYNUSDT"
+              className="input-field mb-3"
+            />
+
+            <p className="text-[#606080] text-xs mb-1">方向</p>
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              {(['LONG', 'SHORT'] as const).map(d => (
+                <button key={d} onClick={() => setMDir(d)}
+                  className={`py-2.5 rounded-xl text-sm font-bold border transition-colors ${mDir === d
+                    ? d === 'LONG' ? 'bg-green-400/20 text-green-400 border-green-400' : 'bg-red-400/20 text-red-400 border-red-400'
+                    : 'border-[#1E1E2E] text-[#606080]'}`}>
+                  {d === 'LONG' ? '▲ 做多' : '▼ 做空'}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <p className="text-[#606080] text-xs mb-1">進場價</p>
+                <input value={mEntry} onChange={e => setMEntry(e.target.value)} placeholder="Entry" type="number" className="input-field" />
+              </div>
+              <div>
+                <p className="text-[#606080] text-xs mb-1">止損 SL</p>
+                <input value={mSL} onChange={e => setMSL(e.target.value)} placeholder="Stop Loss" type="number" className="input-field" />
+              </div>
+              <div>
+                <p className="text-[#606080] text-xs mb-1">TP1</p>
+                <input value={mTP1} onChange={e => setMTP1(e.target.value)} placeholder="Take Profit 1" type="number" className="input-field" />
+              </div>
+              <div>
+                <p className="text-[#606080] text-xs mb-1">TP2（選填）</p>
+                <input value={mTP2} onChange={e => setMTP2(e.target.value)} placeholder="Take Profit 2" type="number" className="input-field" />
+              </div>
+            </div>
+
+            {mError && <p className="text-red-400 text-xs mb-3">{mError}</p>}
+
+            <div className="flex gap-3">
+              <button onClick={() => setShowManual(false)} className="flex-1 py-3 rounded-xl bg-[#1A1A26] text-[#A0A0C0] font-semibold border border-[#1E1E2E]">
+                取消
+              </button>
+              <button onClick={handleManualCreate} className="flex-1 py-3 rounded-xl btn-primary font-semibold">
+                新增紀錄
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Manual close modal */}
       {closeModal && (

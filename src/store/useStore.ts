@@ -67,6 +67,7 @@ interface StoreState {
   setWebhookSecret: (secret: string) => void;
   // Trade journal
   addTrade: (signal: TradingSignal) => void;
+  addManualTrade: (params: { symbol: string; direction: 'LONG' | 'SHORT'; entry: number; stopLoss: number; tp1: number; tp2: number; timeframe?: Timeframe; score?: number }) => void;
   closeTrade: (id: string, result: TradeResult, exitPrice: number) => void;
   deleteTrade: (id: string) => void;
   hasActiveTrade: (symbol: string) => boolean;
@@ -185,6 +186,30 @@ export const useStore = create<StoreState>()(
           openedAt: Date.now(),
         };
         set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
+      },
+
+      addManualTrade: ({ symbol, direction, entry, stopLoss, tp1, tp2, timeframe = '1h', score = 0 }) => {
+        const existing = get().trades;
+        if (existing.some((t) => t.symbol === symbol && !t.result)) return;
+        const trade: TradeRecord = {
+          id: `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          signalId: `manual-${Date.now()}`,
+          symbol,
+          direction,
+          timeframe,
+          strength: 'STRONG',
+          score,
+          entry,
+          stopLoss,
+          tp1,
+          tp2,
+          reasons: ['手動建立'],
+          openedAt: Date.now(),
+        };
+        set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
+        if (!get().coins.some((c) => c.symbol === symbol)) {
+          get().addCoin(symbol);
+        }
       },
 
       closeTrade: (id, result, exitPrice) => {
