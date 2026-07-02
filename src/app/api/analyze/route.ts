@@ -148,12 +148,15 @@ export async function GET(req: NextRequest) {
           const htfTf = HTF_MAP[tf as Timeframe];
           if (htfTf) {
             try {
-              if (!candleCache.has(htfTf)) candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 100));
+              if (!candleCache.has(htfTf)) candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 250));
               const htfC   = candleCache.get(htfTf)!;
               const htfInd = computeIndicators(htfC);
               const htfPx  = htfC[htfC.length - 1].close;
-              const near   = Math.abs(htfPx - htfInd.ema200) / htfInd.ema200 < 0.015;
-              if (!near) htfBias = htfPx > htfInd.ema200 ? 'LONG' : 'SHORT';
+              const e200   = htfInd.ema200;
+              if (!isNaN(e200) && e200 > 0) {
+                const near = Math.abs(htfPx - e200) / e200 < 0.015;
+                if (!near) htfBias = htfPx > e200 ? 'LONG' : 'SHORT';
+              }
             } catch { /* no bias if HTF unavailable */ }
           }
 
@@ -167,6 +170,16 @@ export async function GET(req: NextRequest) {
       const unified   = unifySignalDirection(allSignals);
       const strong    = unified.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
       const topStrong = strong.find(s => s.score >= STRONG_THRESHOLD);
+
+      // Multi-TF confluence gate ─────────────────────────────────
+      // Count distinct TFs producing signals in the master direction.
+      // Requires ≥2 TFs to agree before LINE is sent.
+      const longTFSet  = new Set(allSignals.filter(s => s.direction === 'LONG').map(s => s.timeframe));
+      const shortTFSet = new Set(allSignals.filter(s => s.direction === 'SHORT').map(s => s.timeframe));
+      const masterDir  = topStrong?.direction ?? null;
+      const agreeTFs   = masterDir === 'LONG' ? longTFSet.size
+                       : masterDir === 'SHORT' ? shortTFSet.size : 0;
+      const confluenceMet = agreeTFs >= 2;
 
       // Read lock from Redis (persistent across cold starts)
       const last      = await getLock(symbol);
@@ -182,8 +195,10 @@ export async function GET(req: NextRequest) {
       else if (sameCandle) skipReason = `LINE skipped — same 4h candle (${topStrong?.direction})`;
       else if (onCooldown && last)
         skipReason = `LINE skipped — cooldown (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min left)`;
+      else if (topStrong && !confluenceMet)
+        skipReason = `LINE skipped — 多框架未確認 (${agreeTFs}/2 TF 同向)`;
 
-      if (topStrong && lineReady && !locked && !sameCandle && !onCooldown) {
+      if (topStrong && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet) {
         const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(topStrong));
         lineSent  = ok;
         lineError = error;
@@ -208,11 +223,17 @@ export async function GET(req: NextRequest) {
       }
 
       results.push({
-        symbol, signalCount: strong.length, topScore,
+        symbol,
+        signalCount: strong.length,
+        topScore,
         topSignal: strong[0]
           ? { direction: strong[0].direction, strength: strong[0].strength, score: strong[0].score, entry: strong[0].entry }
           : null,
-        lineSent, locked,
+        lineSent,
+        locked,
+        confluenceMet,
+        agreeTFs,
+        tfsAnalyzed: timeframes.filter(tf => candleCache.has(tf)),
         ...(lineError  ? { lineError }       : {}),
         ...(skipReason ? { note: skipReason } : {}),
       });

@@ -62,11 +62,14 @@ async function runCoinAnalysis(symbol: string) {
       const htfTf = HTF_MAP[tf as Timeframe];
       if (htfTf) {
         try {
-          const htfC    = await fetchCandles(symbol, htfTf, 100);
+          const htfC    = await fetchCandles(symbol, htfTf, 250);
           const htfInd  = computeIndicators(htfC);
           const htfPrice = htfC[htfC.length - 1].close;
-          const near    = Math.abs(htfPrice - htfInd.ema200) / htfInd.ema200 < 0.015;
-          if (!near) bias = htfPrice > htfInd.ema200 ? 'LONG' : 'SHORT';
+          const e200    = htfInd.ema200;
+          if (!isNaN(e200) && e200 > 0) {
+            const near = Math.abs(htfPrice - e200) / e200 < 0.015;
+            if (!near) bias = htfPrice > e200 ? 'LONG' : 'SHORT';
+          }
         } catch { /* skip */ }
       }
       allSignals.push(...generateSignals(symbol, tf as Timeframe, candles, bias));

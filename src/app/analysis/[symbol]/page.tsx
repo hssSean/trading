@@ -73,16 +73,19 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         let biasLabel = '';
         if (htfTf) {
           try {
-            const htfCandles = await fetchCandles(symbol, htfTf, 100);
+            const htfCandles = await fetchCandles(symbol, htfTf, 250);
             const htfInd     = computeIndicators(htfCandles);
             const htfPrice   = htfCandles[htfCandles.length - 1].close;
-            const aboveHtfEma200 = htfPrice > htfInd.ema200;
-            const nearHtfEma200  = Math.abs(htfPrice - htfInd.ema200) / htfInd.ema200 < 0.015;
-            if (!nearHtfEma200) {
-              bias      = aboveHtfEma200 ? 'LONG' : 'SHORT';
-              biasLabel = aboveHtfEma200 ? `${htfTf.toUpperCase()} 大框偏多 ▲` : `${htfTf.toUpperCase()} 大框偏空 ▼`;
-            } else {
-              biasLabel = `${htfTf.toUpperCase()} 大框盤整`;
+            const htfE200    = htfInd.ema200;
+            if (!isNaN(htfE200) && htfE200 > 0) {
+              const aboveHtfEma200 = htfPrice > htfE200;
+              const nearHtfEma200  = Math.abs(htfPrice - htfE200) / htfE200 < 0.015;
+              if (!nearHtfEma200) {
+                bias      = aboveHtfEma200 ? 'LONG' : 'SHORT';
+                biasLabel = aboveHtfEma200 ? `${htfTf.toUpperCase()} 大框偏多 ▲` : `${htfTf.toUpperCase()} 大框偏空 ▼`;
+              } else {
+                biasLabel = `${htfTf.toUpperCase()} 大框盤整`;
+              }
             }
           } catch { /* htf fetch failed, no bias */ }
         }
