@@ -71,12 +71,18 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         const htfTf = htfMap[timeframe] ?? null;
         let bias: 'LONG' | 'SHORT' | null = null;
         let biasLabel = '';
+
+        // Candle cache to avoid duplicate fetches across TF loop
+        const candleCache = new Map<string, Candle[]>();
+        candleCache.set(timeframe, candles);
+
         if (htfTf) {
           try {
             const htfCandles = await fetchCandles(symbol, htfTf, 250);
-            const htfInd     = computeIndicators(htfCandles);
-            const htfPrice   = htfCandles[htfCandles.length - 1].close;
-            const htfE200    = htfInd.ema200;
+            candleCache.set(htfTf, htfCandles);
+            const htfInd   = computeIndicators(htfCandles);
+            const htfPrice = htfCandles[htfCandles.length - 1].close;
+            const htfE200  = htfInd.ema200;
             if (!isNaN(htfE200) && htfE200 > 0) {
               const aboveHtfEma200 = htfPrice > htfE200;
               const nearHtfEma200  = Math.abs(htfPrice - htfE200) / htfE200 < 0.015;
@@ -99,14 +105,36 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           priceChangePercent24h: ticker.priceChangePercent,
         });
 
-        // Generate signals for all coin timeframes (pass htfBias for current tf)
+        // Generate signals for all coin timeframes — compute proper HTF bias per TF
         const currentCoins = useStore.getState().coins;
         const thisCoin = currentCoins.find((c) => c.symbol === symbol);
         const coinTfs = thisCoin?.timeframes ?? [timeframe];
-        const allSig = [];
+        const allSig: ReturnType<typeof generateSignals> = [];
         for (const t of coinTfs) {
-          const c = t === timeframe ? candles : await fetchCandles(symbol, t, 200);
-          allSig.push(...generateSignals(symbol, t, c, t === timeframe ? bias : undefined));
+          try {
+            if (!candleCache.has(t)) candleCache.set(t, await fetchCandles(symbol, t, 200));
+            const c = candleCache.get(t)!;
+
+            // Compute HTF bias specific to this TF
+            let tBias: 'LONG' | 'SHORT' | null = null;
+            const tHtfTf = htfMap[t as Timeframe] ?? null;
+            if (tHtfTf) {
+              if (!candleCache.has(tHtfTf)) {
+                try { candleCache.set(tHtfTf, await fetchCandles(symbol, tHtfTf, 250)); } catch { /* skip */ }
+              }
+              const htfC = candleCache.get(tHtfTf);
+              if (htfC) {
+                const htfI  = computeIndicators(htfC);
+                const htfPx = htfC[htfC.length - 1].close;
+                const e200  = htfI.ema200;
+                if (!isNaN(e200) && e200 > 0) {
+                  const near = Math.abs(htfPx - e200) / e200 < 0.015;
+                  if (!near) tBias = htfPx > e200 ? 'LONG' : 'SHORT';
+                }
+              }
+            }
+            allSig.push(...generateSignals(symbol, t, c, tBias));
+          } catch { /* skip failed TF */ }
         }
         addSignals(symbol, unifySignalDirection(allSig));
       } catch (e: unknown) {
@@ -379,7 +407,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             <div className="card text-center py-8">
               <p className="text-2xl mb-2">🔍</p>
               <p className="text-[#A0A0C0] font-semibold text-sm">此時間週期暫無符合條件的信號</p>
-              <p className="text-[#606080] text-xs mt-1">需要：得分 ≥7 且風險回報比 ≥1.5:1</p>
+              <p className="text-[#606080] text-xs mt-1">需要：得分 ≥9 且風險回報比 ≥2.0:1</p>
             </div>
           )
         )}

@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useStore } from '@/store/useStore';
 import { CoinCard } from '@/components/CoinCard';
@@ -13,11 +13,10 @@ const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
 
 const DEFAULT_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 
-async function runCoinAnalysis(symbol: string) {
+// ── Fast: price update + TP/SL detection (no candle fetch) ───────
+async function checkCoinPrice(symbol: string) {
   const store = useStore.getState();
-  const coin = store.coins.find((c) => c.symbol === symbol);
-  if (!coin) return;
-  store.updateCoin(symbol, { isLoading: true });
+  if (!store.coins.find((c) => c.symbol === symbol)) return;
   try {
     const ticker = await fetchTicker24h(symbol);
     const currentPrice = ticker.price;
@@ -27,10 +26,8 @@ async function runCoinAnalysis(symbol: string) {
       priceChangePercent24h: ticker.priceChangePercent,
     });
 
-    // ── Auto-detect pending trade results ──────────────────────
-    // Re-read store after updateCoin to get latest trades
-    const freshStore = useStore.getState();
-    const pending = freshStore.trades.filter(t => t.symbol === symbol && !t.result);
+    const fresh = useStore.getState();
+    const pending = fresh.trades.filter((t) => t.symbol === symbol && !t.result);
     for (const trade of pending) {
       let autoResult: 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | null = null;
       let autoExit = 0;
@@ -47,28 +44,38 @@ async function runCoinAnalysis(symbol: string) {
         const pnl = trade.direction === 'LONG'
           ? (autoExit - trade.entry) / trade.entry * 100
           : (trade.entry - autoExit) / trade.entry * 100;
-        freshStore.closeTrade(trade.id, autoResult, autoExit);
-        freshStore.addAutoCloseAlert({ symbol, result: autoResult, pnlPercent: parseFloat(pnl.toFixed(2)), closedAt: Date.now() });
-        // Unlock LINE so this coin can receive new signals
-        fetch(`/api/analyze?secret=${encodeURIComponent(freshStore.webhookSecret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
+        fresh.closeTrade(trade.id, autoResult, autoExit);
+        fresh.addAutoCloseAlert({ symbol, result: autoResult, pnlPercent: parseFloat(pnl.toFixed(2)), closedAt: Date.now() });
+        fetch(`/api/analyze?secret=${encodeURIComponent(fresh.webhookSecret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
       }
     }
+  } catch { /* ignore */ }
+}
 
-    const allSignals = [];
+// ── Full: candle analysis + signal generation ────────────────────
+async function runCoinAnalysis(symbol: string) {
+  const store = useStore.getState();
+  const coin = store.coins.find((c) => c.symbol === symbol);
+  if (!coin) return;
+  store.updateCoin(symbol, { isLoading: true });
+  try {
+    // Price update + TP/SL detection
+    await checkCoinPrice(symbol);
+
+    const allSignals: TradingSignal[] = [];
     for (const tf of coin.timeframes) {
       const candles = await fetchCandles(symbol, tf as Timeframe, 200);
-      // HTF bias for this timeframe
       let bias: 'LONG' | 'SHORT' | null = null;
       const htfTf = HTF_MAP[tf as Timeframe];
       if (htfTf) {
         try {
-          const htfC    = await fetchCandles(symbol, htfTf, 250);
-          const htfInd  = computeIndicators(htfC);
-          const htfPrice = htfC[htfC.length - 1].close;
-          const e200    = htfInd.ema200;
+          const htfC   = await fetchCandles(symbol, htfTf, 250);
+          const htfInd = computeIndicators(htfC);
+          const htfPx  = htfC[htfC.length - 1].close;
+          const e200   = htfInd.ema200;
           if (!isNaN(e200) && e200 > 0) {
-            const near = Math.abs(htfPrice - e200) / e200 < 0.015;
-            if (!near) bias = htfPrice > e200 ? 'LONG' : 'SHORT';
+            const near = Math.abs(htfPx - e200) / e200 < 0.015;
+            if (!near) bias = htfPx > e200 ? 'LONG' : 'SHORT';
           }
         } catch { /* skip */ }
       }
@@ -83,9 +90,10 @@ async function runCoinAnalysis(symbol: string) {
 }
 
 export default function HomePage() {
-  const coins       = useStore((s) => s.coins);
-  const addCoin     = useStore((s) => s.addCoin);
-  const hasHydrated = useStore((s) => s._hasHydrated);
+  const coins                = useStore((s) => s.coins);
+  const addCoin              = useStore((s) => s.addCoin);
+  const hasHydrated          = useStore((s) => s._hasHydrated);
+  const analysisIntervalMins = useStore((s) => s.settings.analysisIntervalMinutes);
 
   const [refreshing, setRefreshing]       = useState(false);
   const [showAdd, setShowAdd]             = useState(false);
@@ -111,13 +119,13 @@ export default function HomePage() {
     if (!silent) setAutoLoading(true);
     setAutoMsg('');
     try {
-      const top = await fetchTopCoinsByVolume(10);
+      const top = await fetchTopCoinsByVolume(15); // match server's 15-coin scan
       const store = useStore.getState();
       const existing = new Set(store.coins.map((c) => c.symbol));
       const toAdd = top.filter((s) => !existing.has(s));
       toAdd.forEach((s) => store.addCoin(s));
       if (!silent) {
-        setAutoMsg('已載入成交量前 10 名，新增 ' + toAdd.length + ' 個幣種');
+        setAutoMsg('已載入成交量前 15 名，新增 ' + toAdd.length + ' 個幣種');
         setTimeout(() => setAutoMsg(''), 4000);
       }
       for (const s of toAdd) {
@@ -149,19 +157,33 @@ export default function HomePage() {
     }
   }, [hasHydrated, loadTopCoins, analyzeAll]);
 
-  // Analysis refresh every 30 seconds
+  // ── Fast: price check + TP/SL detection every 30s ────────────
   useEffect(() => {
-    const id = setInterval(() => { analyzeAll(); }, 30 * 1000);
+    const checkAll = async () => {
+      const syms = useStore.getState().coins.map((c) => c.symbol);
+      for (const s of syms) {
+        await checkCoinPrice(s);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const id = setInterval(checkAll, 30 * 1000);
     return () => clearInterval(id);
-  }, [analyzeAll]);
+  }, []);
 
-  // Coin list refresh every 6 hours — quietly adds new top coins
+  // ── Full signal analysis (controlled by settings interval) ────
+  useEffect(() => {
+    const ms = Math.max(analysisIntervalMins * 60 * 1000, 60 * 1000); // min 1 minute
+    const id = setInterval(() => { analyzeAll(); }, ms);
+    return () => clearInterval(id);
+  }, [analyzeAll, analysisIntervalMins]);
+
+  // ── Coin list refresh every 6 hours — quietly adds new top coins
   useEffect(() => {
     const id = setInterval(() => { loadTopCoins(true); }, 6 * 60 * 60 * 1000);
     return () => clearInterval(id);
   }, [loadTopCoins]);
 
-  // Pick up pending signals that server sent LINE for — poll every 30s
+  // ── Pick up pending signals that server sent LINE for — poll every 30s
   useEffect(() => {
     const pickupPending = async () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
@@ -224,9 +246,9 @@ export default function HomePage() {
     setSearchResults([]);
   };
 
-  const unread            = coins.reduce((n, c) => n + c.signals.filter((s) => !s.isRead).length, 0);
-  const autoCloseAlerts   = useStore((s) => s.autoCloseAlerts);
-  const dismissAutoClose  = useStore((s) => s.dismissAutoCloseAlert);
+  const unread           = coins.reduce((n, c) => n + c.signals.filter((s) => !s.isRead).length, 0);
+  const autoCloseAlerts  = useStore((s) => s.autoCloseAlerts);
+  const dismissAutoClose = useStore((s) => s.dismissAutoCloseAlert);
 
   return (
     <div className="flex flex-col h-full">

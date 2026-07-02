@@ -3,11 +3,15 @@ import Link from 'next/link';
 import { useStore } from '@/store/useStore';
 import { WatchedCoin } from '@/types';
 
+const STRENGTH_RANK: Record<string, number> = { WEAK: 0, MODERATE: 1, STRONG: 2 };
+
 export function CoinCard({ coin }: { coin: WatchedCoin }) {
-  const isUp        = coin.priceChangePercent24h >= 0;
-  const latest      = coin.signals[0];
-  const unread      = coin.signals.filter((s) => !s.isRead).length;
-  const activeTrade = useStore((s) => s.trades.some((t) => t.symbol === coin.symbol && !t.result));
+  const isUp           = coin.priceChangePercent24h >= 0;
+  const minStrength    = useStore((s) => s.settings.minSignalStrength);
+  const filtered       = coin.signals.filter((s) => STRENGTH_RANK[s.strength] >= STRENGTH_RANK[minStrength]);
+  const latest         = filtered[0];
+  const unread         = filtered.filter((s) => !s.isRead).length;
+  const activeTrade    = useStore((s) => s.trades.some((t) => t.symbol === coin.symbol && !t.result));
 
   return (
     <Link href={`/analysis/${coin.symbol}`} className="block card-hover mb-3">

@@ -23,8 +23,13 @@ interface AnalyzeResult {
     symbol: string;
     signalCount: number;
     topScore: number;
-    topSignal: { direction: string; score: number; entry: number } | null;
+    topSignal: { direction: string; strength?: string; score: number; entry: number } | null;
     lineSent: boolean;
+    locked?: boolean;
+    confluenceMet?: boolean;
+    agreeTFs?: number;
+    tfsAnalyzed?: string[];
+    note?: string;
     lineError?: string;
     error?: string;
   }[];
@@ -81,19 +86,20 @@ export default function SettingsPage() {
     setDiagLoading(true);
     setDiagResult(null);
     try {
-      const coinList = coins.map((c) => c.symbol).join(',');
-      const url = `/api/analyze?secret=${encodeURIComponent(secret.trim() || 'abc123')}&coins=${coinList}`;
+      // No ?coins= → server uses its own dynamic top-15 list (same as cron)
+      const url = `/api/analyze?secret=${encodeURIComponent(secret.trim() || 'abc123')}`;
       const res = await fetch(url);
       const data = await res.json();
       setDiagResult(data);
-    } catch (e) {
+    } catch {
       setDiagResult({ ok: false });
     } finally {
       setDiagLoading(false);
     }
   };
 
-  const monitorUrl = `${appUrl}/api/analyze?secret=${encodeURIComponent(secret || 'abc123')}&coins=${coins.map((c) => c.symbol).join(',')}`;
+  // No ?coins= so the cron uses the server's dynamic top-15 scan (not the client watchlist)
+  const monitorUrl = `${appUrl}/api/analyze?secret=${encodeURIComponent(secret || 'abc123')}`;
 
   const copyUrl = () => {
     navigator.clipboard.writeText(monitorUrl);
@@ -161,7 +167,8 @@ export default function SettingsPage() {
           </div>
 
           <p className="text-[#606080] text-xs mb-2 leading-5">
-            複製下方 URL 到 <span className="text-[#F0B90B]">cron-job.org</span>（免費，每小時觸發）或 UptimeRobot：
+            Vercel 每小時自動觸發。若需更高頻率，可將下方 URL 加到{' '}
+            <span className="text-[#F0B90B]">cron-job.org</span>（免費）：
           </p>
           <div className="bg-[#1A1A26] rounded-xl p-3 mb-2">
             <p className="text-[#A0A0C0] text-xs font-mono break-all leading-5">{monitorUrl || '請先部署到 Vercel'}</p>
@@ -189,26 +196,36 @@ export default function SettingsPage() {
           {diagResult && (
             <div className="bg-[#1A1A26] rounded-xl p-3 text-xs space-y-2">
               <p className="text-[#F0B90B] font-bold">
-                {diagResult.ok ? '✅ 分析完成' : '❌ 分析失敗'} · 門檻得分：{diagResult.minScore} · LINE {diagResult.lineReady ? '✓' : '✗ 未設定'}
+                {diagResult.ok ? '✅ 分析完成' : '❌ 分析失敗'} · LINE {diagResult.lineReady ? '✓ 已設定' : '✗ 未設定'}
               </p>
               <p className="text-[#A0A0C0]">已通知：{diagResult.notified?.join(', ') || '無'}</p>
               {diagResult.results?.map((r) => (
-                <div key={r.symbol} className={`rounded-lg px-3 py-2 border ${r.lineSent ? 'border-green-500/30 bg-green-500/5' : 'border-[#2A2A3E] bg-[#12121A]'}`}>
+                <div key={r.symbol} className={`rounded-lg px-3 py-2 border ${
+                  r.lineSent ? 'border-green-500/30 bg-green-500/5' :
+                  r.locked   ? 'border-yellow-500/30 bg-yellow-500/5' :
+                  'border-[#2A2A3E] bg-[#12121A]'
+                }`}>
                   <div className="flex items-center justify-between">
-                    <span className="font-semibold text-[#EAEAF4]">{r.symbol}</span>
-                    <span className={r.lineSent ? 'text-green-400' : 'text-[#606080]'}>
-                      {r.lineSent ? '✅ LINE 已發送' : '— 未發送'}
+                    <span className="font-semibold text-[#EAEAF4]">{r.symbol.replace('USDT', '')}</span>
+                    <span className={r.lineSent ? 'text-green-400' : r.locked ? 'text-yellow-400' : 'text-[#606080]'}>
+                      {r.lineSent ? '✅ LINE 已發送' : r.locked ? '🔒 持倉鎖定' : '—'}
                     </span>
                   </div>
-                  <p className="text-[#606080] mt-1">
-                    最高得分 <span className={r.topScore >= (diagResult.minScore ?? 5) ? 'text-green-400' : 'text-red-400'}>{r.topScore}</span>
-                    {r.topSignal ? ` · ${r.topSignal.direction} · 入場 $${r.topSignal.entry}` : ' · 無信號'}
-                  </p>
+                  {r.topSignal && (
+                    <p className="text-[#A0A0C0] mt-1">
+                      {r.topSignal.direction === 'LONG' ? '▲ 做多' : '▼ 做空'} ·{' '}
+                      <span className={r.topScore >= 16 ? 'text-green-400 font-bold' : 'text-yellow-400'}>{r.topScore}分</span>
+                      {r.agreeTFs !== undefined && (
+                        <span className={r.confluenceMet ? ' · text-green-400' : ''}>
+                          {' '}· {r.agreeTFs}/2 TF 同向{r.confluenceMet ? ' ✓' : ' ✗'}
+                        </span>
+                      )}
+                    </p>
+                  )}
+                  {!r.topSignal && <p className="text-[#606080] mt-1">無信號（得分 {r.topScore}）</p>}
+                  {r.note && <p className="text-yellow-400/80 mt-1">{r.note}</p>}
                   {r.lineError && <p className="text-red-400 mt-1">LINE 錯誤：{r.lineError}</p>}
                   {r.error && <p className="text-red-400 mt-1">錯誤：{r.error}</p>}
-                  {!r.lineSent && !r.lineError && r.topScore < (diagResult.minScore ?? 5) && (
-                    <p className="text-yellow-400/70 mt-1">得分不足（需 ≥{diagResult.minScore}）</p>
-                  )}
                 </div>
               ))}
             </div>
@@ -221,10 +238,10 @@ export default function SettingsPage() {
               LINE_USER_ID=你的userId<br />
               WEBHOOK_SECRET={secret || 'abc123'}<br />
               CRON_SECRET=任意密碼<br />
-              WATCH_COINS=BTCUSDT,ETHUSDT,SOLUSDT<br />
               ANALYSIS_TIMEFRAMES=4h,1h<br />
               MIN_SCORE=5
             </p>
+            <p className="text-[#606080] text-[10px] mt-2">伺服器自動掃描 Binance 成交量前 15 名，無需設定 WATCH_COINS</p>
           </div>
         </Section>
 
@@ -266,6 +283,28 @@ export default function SettingsPage() {
               >
                 <p className="font-semibold text-sm">{label}</p>
                 <p className={`text-xs mt-0.5 ${settings.minSignalStrength === value ? 'text-yellow-400/70' : 'text-[#606080]'}`}>{desc}</p>
+              </button>
+            ))}
+          </div>
+        </Section>
+
+        {/* Analysis interval */}
+        <Section title="⏱ 本地信號分析間隔">
+          <p className="text-[#606080] text-xs mb-3 leading-5">
+            客戶端每隔多久重新分析一次信號（價格更新仍每 30 秒一次）。伺服器每小時獨立掃描與推播，不受此設定影響。
+          </p>
+          <div className="flex gap-2">
+            {INTERVALS.map((v) => (
+              <button
+                key={v}
+                onClick={() => updateSettings({ analysisIntervalMinutes: v })}
+                className={`flex-1 py-2.5 rounded-xl text-sm font-semibold border transition-all ${
+                  settings.analysisIntervalMinutes === v
+                    ? 'border-[#F0B90B] bg-yellow-400/10 text-[#F0B90B]'
+                    : 'border-[#1E1E2E] bg-[#1A1A26] text-[#606080]'
+                }`}
+              >
+                {v}m
               </button>
             ))}
           </div>
