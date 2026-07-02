@@ -4,7 +4,12 @@ import { useStore } from '@/store/useStore';
 import { CoinCard } from '@/components/CoinCard';
 import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, searchSymbols } from '@/api/binance';
 import { generateSignals } from '@/analysis/signals';
-import { Timeframe } from '@/types';
+import { computeIndicators } from '@/analysis/indicators';
+import { Timeframe, TradingSignal } from '@/types';
+
+const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
+  '15m': '1h', '1h': '4h', '4h': '1d',
+};
 
 const DEFAULT_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 
@@ -15,22 +20,58 @@ async function runCoinAnalysis(symbol: string) {
   store.updateCoin(symbol, { isLoading: true });
   try {
     const ticker = await fetchTicker24h(symbol);
+    const currentPrice = ticker.price;
     store.updateCoin(symbol, {
-      currentPrice: ticker.price,
+      currentPrice,
       priceChange24h: ticker.priceChange,
       priceChangePercent24h: ticker.priceChangePercent,
     });
+
+    // ── Auto-detect pending trade results ──────────────────────
+    // Re-read store after updateCoin to get latest trades
+    const freshStore = useStore.getState();
+    const pending = freshStore.trades.filter(t => t.symbol === symbol && !t.result);
+    for (const trade of pending) {
+      let autoResult: 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | null = null;
+      let autoExit = 0;
+      if (trade.direction === 'LONG') {
+        if      (currentPrice >= trade.tp2)       { autoResult = 'WIN_TP2'; autoExit = trade.tp2; }
+        else if (currentPrice >= trade.tp1)       { autoResult = 'WIN_TP1'; autoExit = trade.tp1; }
+        else if (currentPrice <= trade.stopLoss)  { autoResult = 'LOSS';    autoExit = trade.stopLoss; }
+      } else {
+        if      (currentPrice <= trade.tp2)       { autoResult = 'WIN_TP2'; autoExit = trade.tp2; }
+        else if (currentPrice <= trade.tp1)       { autoResult = 'WIN_TP1'; autoExit = trade.tp1; }
+        else if (currentPrice >= trade.stopLoss)  { autoResult = 'LOSS';    autoExit = trade.stopLoss; }
+      }
+      if (autoResult) {
+        const pnl = trade.direction === 'LONG'
+          ? (autoExit - trade.entry) / trade.entry * 100
+          : (trade.entry - autoExit) / trade.entry * 100;
+        freshStore.closeTrade(trade.id, autoResult, autoExit);
+        freshStore.addAutoCloseAlert({ symbol, result: autoResult, pnlPercent: parseFloat(pnl.toFixed(2)), closedAt: Date.now() });
+        // Unlock LINE so this coin can receive new signals
+        fetch(`/api/analyze?secret=${encodeURIComponent(freshStore.webhookSecret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
+      }
+    }
+
     const allSignals = [];
     for (const tf of coin.timeframes) {
       const candles = await fetchCandles(symbol, tf as Timeframe, 200);
-      allSignals.push(...generateSignals(symbol, tf as Timeframe, candles));
+      // HTF bias for this timeframe
+      let bias: 'LONG' | 'SHORT' | null = null;
+      const htfTf = HTF_MAP[tf as Timeframe];
+      if (htfTf) {
+        try {
+          const htfC    = await fetchCandles(symbol, htfTf, 100);
+          const htfInd  = computeIndicators(htfC);
+          const htfPrice = htfC[htfC.length - 1].close;
+          const near    = Math.abs(htfPrice - htfInd.ema200) / htfInd.ema200 < 0.015;
+          if (!near) bias = htfPrice > htfInd.ema200 ? 'LONG' : 'SHORT';
+        } catch { /* skip */ }
+      }
+      allSignals.push(...generateSignals(symbol, tf as Timeframe, candles, bias));
     }
     store.addSignals(symbol, allSignals);
-    // Auto-add STRONG signals (score >= 16) to trade journal if no active trade
-    const best = allSignals.filter((s) => s.strength === 'STRONG').sort((a, b) => b.score - a.score)[0];
-    if (best && !store.hasActiveTrade(symbol)) {
-      store.addTrade(best);
-    }
   } catch (err) {
     console.error('[analyze]', symbol, err);
   } finally {
@@ -105,11 +146,37 @@ export default function HomePage() {
     }
   }, [hasHydrated, loadTopCoins, analyzeAll]);
 
-  // Auto-refresh every 30 seconds
+  // Analysis refresh every 30 seconds
   useEffect(() => {
     const id = setInterval(() => { analyzeAll(); }, 30 * 1000);
     return () => clearInterval(id);
   }, [analyzeAll]);
+
+  // Coin list refresh every 6 hours — quietly adds new top coins
+  useEffect(() => {
+    const id = setInterval(() => { loadTopCoins(true); }, 6 * 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [loadTopCoins]);
+
+  // Pick up pending signals that server sent LINE for (best-effort: same warm instance)
+  useEffect(() => {
+    const pickupPending = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      const secret = useStore.getState().webhookSecret;
+      fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' })
+        .then(r => r.json())
+        .then((data: { signals?: TradingSignal[] }) => {
+          const store = useStore.getState();
+          (data.signals ?? []).forEach(sig => {
+            if (!store.hasActiveTrade(sig.symbol)) store.addTrade(sig);
+          });
+        })
+        .catch(() => {});
+    };
+    pickupPending();
+    document.addEventListener('visibilitychange', pickupPending);
+    return () => document.removeEventListener('visibilitychange', pickupPending);
+  }, []);
 
   useEffect(() => {
     if (!input.trim() || input.length < 2) { setSearchResults([]); return; }
@@ -146,7 +213,9 @@ export default function HomePage() {
     setSearchResults([]);
   };
 
-  const unread = coins.reduce((n, c) => n + c.signals.filter((s) => !s.isRead).length, 0);
+  const unread            = coins.reduce((n, c) => n + c.signals.filter((s) => !s.isRead).length, 0);
+  const autoCloseAlerts   = useStore((s) => s.autoCloseAlerts);
+  const dismissAutoClose  = useStore((s) => s.dismissAutoCloseAlert);
 
   return (
     <div className="flex flex-col h-full">
@@ -200,6 +269,27 @@ export default function HomePage() {
             已完成：{autoMsg}
           </div>
         )}
+        {/* Auto-close alerts */}
+        {autoCloseAlerts.map(alert => (
+          <div key={alert.id}
+            className={`mt-2 px-4 py-2.5 rounded-2xl flex items-center justify-between border ${
+              alert.result === 'LOSS'
+                ? 'bg-red-500/10 border-red-500/30'
+                : 'bg-green-500/10 border-green-500/30'
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-base shrink-0">{alert.result === 'LOSS' ? '🔴' : '🟢'}</span>
+              <p className={`text-xs font-semibold truncate ${alert.result === 'LOSS' ? 'text-red-400' : 'text-green-400'}`}>
+                {alert.symbol.replace('USDT', '/USDT')} 自動平倉 —{' '}
+                {alert.result === 'WIN_TP2' ? 'TP2 達標' : alert.result === 'WIN_TP1' ? 'TP1 達標' : '止損出場'}{' '}
+                <span className="font-bold">{alert.pnlPercent >= 0 ? '+' : ''}{alert.pnlPercent}%</span>
+              </p>
+            </div>
+            <button onClick={() => dismissAutoClose(alert.id)} className="text-[#606080] text-sm ml-2 shrink-0">✕</button>
+          </div>
+        ))}
+
         {unread > 0 && (
           <div className="mt-3 px-4 py-2.5 bg-yellow-400/10 border border-[#F0B90B]/30 rounded-2xl flex items-center gap-2">
             <span className="text-[#F0B90B]">🔔</span>

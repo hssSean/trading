@@ -3,12 +3,13 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { SignalCard } from '@/components/SignalCard';
+import { CandlestickChart } from '@/components/CandlestickChart';
 import { fetchCandles, fetchTicker24h } from '@/api/binance';
 import { computeIndicators } from '@/analysis/indicators';
 import { generateSignals } from '@/analysis/signals';
 import { findOrderBlocks, findFairValueGaps } from '@/analysis/smc';
 import { findSRLevels } from '@/analysis/snr';
-import { TechnicalIndicators, Timeframe, OrderBlock, FairValueGap, SRLevel } from '@/types';
+import { Candle, TechnicalIndicators, Timeframe, OrderBlock, FairValueGap, SRLevel } from '@/types';
 
 const TFS: Timeframe[] = ['15m', '1h', '4h', '1d'];
 
@@ -24,9 +25,20 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
   const [orderBlocks, setOrderBlocks] = useState<OrderBlock[]>([]);
   const [fvgs, setFvgs] = useState<FairValueGap[]>([]);
   const [srLevels, setSrLevels] = useState<SRLevel[]>([]);
+  const [chartCandles, setChartCandles] = useState<Candle[]>([]);
+  const [htfBias, setHtfBias] = useState<'LONG' | 'SHORT' | null>(null);
+  const [htfLabel, setHtfLabel] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [unlockFlash, setUnlockFlash] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  const handleUnlock = () => {
+    const store  = useStore.getState();
+    fetch(`/api/analyze?secret=${encodeURIComponent(store.webhookSecret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
+    setUnlockFlash(true);
+    setTimeout(() => setUnlockFlash(false), 2500);
+  };
 
   const analyze = useCallback(
     async (timeframe: Timeframe) => {
@@ -42,6 +54,8 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           fetchTicker24h(symbol),
         ]);
 
+        setChartCandles(candles);
+
         // Indicators
         setIndicators(computeIndicators(candles));
 
@@ -50,6 +64,31 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         setFvgs(findFairValueGaps(candles).filter((f) => !f.filled).slice(0, 5));
         setSrLevels(findSRLevels(candles).slice(0, 6));
 
+        // ── HTF bias: higher timeframe determines trend direction ──
+        const htfMap: Partial<Record<Timeframe, Timeframe>> = {
+          '15m': '1h', '1h': '4h', '4h': '1d',
+        };
+        const htfTf = htfMap[timeframe] ?? null;
+        let bias: 'LONG' | 'SHORT' | null = null;
+        let biasLabel = '';
+        if (htfTf) {
+          try {
+            const htfCandles = await fetchCandles(symbol, htfTf, 100);
+            const htfInd     = computeIndicators(htfCandles);
+            const htfPrice   = htfCandles[htfCandles.length - 1].close;
+            const aboveHtfEma200 = htfPrice > htfInd.ema200;
+            const nearHtfEma200  = Math.abs(htfPrice - htfInd.ema200) / htfInd.ema200 < 0.015;
+            if (!nearHtfEma200) {
+              bias      = aboveHtfEma200 ? 'LONG' : 'SHORT';
+              biasLabel = aboveHtfEma200 ? `${htfTf.toUpperCase()} 大框偏多 ▲` : `${htfTf.toUpperCase()} 大框偏空 ▼`;
+            } else {
+              biasLabel = `${htfTf.toUpperCase()} 大框盤整`;
+            }
+          } catch { /* htf fetch failed, no bias */ }
+        }
+        setHtfBias(bias);
+        setHtfLabel(biasLabel);
+
         // Update price
         updateCoin(symbol, {
           currentPrice: ticker.price,
@@ -57,22 +96,16 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           priceChangePercent24h: ticker.priceChangePercent,
         });
 
-        // Generate signals for all coin timeframes
+        // Generate signals for all coin timeframes (pass htfBias for current tf)
         const currentCoins = useStore.getState().coins;
         const thisCoin = currentCoins.find((c) => c.symbol === symbol);
         const coinTfs = thisCoin?.timeframes ?? [timeframe];
         const allSig = [];
         for (const t of coinTfs) {
           const c = t === timeframe ? candles : await fetchCandles(symbol, t, 200);
-          allSig.push(...generateSignals(symbol, t, c));
+          allSig.push(...generateSignals(symbol, t, c, t === timeframe ? bias : undefined));
         }
         addSignals(symbol, allSig);
-        // Auto-add best STRONG signal to trade journal if no active trade
-        const best = allSig.filter((s) => s.strength === 'STRONG').sort((a, b) => b.score - a.score)[0];
-        const store = useStore.getState();
-        if (best && !store.hasActiveTrade(symbol)) {
-          store.addTrade(best);
-        }
       } catch (e: unknown) {
         if (e instanceof Error && e.name === 'CanceledError') return;
         setError('無法取得資料，請確認網路連線後重試');
@@ -123,13 +156,26 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             )}
           </div>
         </div>
-        <button
-          onClick={() => analyze(tf)}
-          disabled={loading}
-          className="shrink-0 text-[#F0B90B] text-xs font-semibold border border-[#F0B90B]/40 rounded-full px-3 py-1.5 disabled:opacity-40 active:opacity-70"
-        >
-          {loading ? '分析中…' : '重新整理'}
-        </button>
+        <div className="flex gap-2 shrink-0">
+          <button
+            onClick={handleUnlock}
+            className={`text-xs font-semibold border rounded-full px-3 py-1.5 transition-colors active:opacity-70 ${
+              unlockFlash
+                ? 'text-green-400 border-green-400/50 bg-green-400/10'
+                : 'text-[#606080] border-[#1E1E2E]'
+            }`}
+            title="解除 LINE 推播鎖定，允許此幣種再次推薦新信號"
+          >
+            {unlockFlash ? '✓ 已解鎖' : '解鎖推播'}
+          </button>
+          <button
+            onClick={() => analyze(tf)}
+            disabled={loading}
+            className="text-[#F0B90B] text-xs font-semibold border border-[#F0B90B]/40 rounded-full px-3 py-1.5 disabled:opacity-40 active:opacity-70"
+          >
+            {loading ? '分析中…' : '重新整理'}
+          </button>
+        </div>
       </div>
 
       {/* ── Timeframe tabs ── */}
@@ -147,6 +193,29 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             {t}
           </button>
         ))}
+      </div>
+
+      {/* ── K線圖 ── */}
+      <div className="border-b border-[#1E1E2E]">
+        {/* HTF bias badge */}
+        {htfLabel && (
+          <div className="px-4 pt-2 pb-0">
+            <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+              htfBias === 'LONG'  ? 'text-green-400 bg-green-400/10 border-green-400/30' :
+              htfBias === 'SHORT' ? 'text-red-400   bg-red-400/10   border-red-400/30'   :
+              'text-[#606080] bg-[#1A1A26] border-[#1E1E2E]'
+            }`}>
+              {htfLabel}
+            </span>
+          </div>
+        )}
+        <CandlestickChart
+          candles={chartCandles}
+          signals={coin?.signals ?? []}
+          srLevels={srLevels}
+          orderBlocks={orderBlocks}
+          height={280}
+        />
       </div>
 
       {/* ── Main content ── */}
