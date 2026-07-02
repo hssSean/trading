@@ -47,6 +47,7 @@ export default function TradesPage() {
   const closeTrade      = useStore(s => s.closeTrade);
   const deleteTrade     = useStore(s => s.deleteTrade);
   const addManualTrade  = useStore(s => s.addManualTrade);
+  const updateTrade     = useStore(s => s.updateTrade);
 
   const [closeModal, setCloseModal] = useState<{
     id: string; symbol: string; direction: 'LONG' | 'SHORT';
@@ -58,7 +59,9 @@ export default function TradesPage() {
   const [unlockMsg,  setUnlockMsg]  = useState<Record<string, boolean>>({});
   const [syncing,    setSyncing]    = useState(false);
   const [syncMsg,    setSyncMsg]    = useState('');
-  const [showManual, setShowManual] = useState(false);
+  const [showManual,  setShowManual]  = useState(false);
+  const [editingNote, setEditingNote] = useState<string | null>(null); // trade id
+  const [noteText,    setNoteText]    = useState('');
   const [mSymbol,    setMSymbol]    = useState('');
   const [mDir,       setMDir]       = useState<'LONG' | 'SHORT'>('LONG');
   const [mEntry,     setMEntry]     = useState('');
@@ -84,7 +87,7 @@ export default function TradesPage() {
   const filtered = filter === 'PENDING' ? pending : filter === 'CLOSED' ? closed : trades;
 
   const exportCsv = () => {
-    const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%';
+    const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,入場備註,入場截圖,出場截圖';
     const rows = trades.map(t =>
       [
         t.id, t.symbol, t.direction, t.timeframe, t.strength, t.score,
@@ -94,6 +97,9 @@ export default function TradesPage() {
         t.result ? RESULT_LABEL[t.result] : '持倉中',
         t.exitPrice ?? '',
         t.pnlPercent ?? '',
+        `"${(t.entryNotes ?? '').replace(/"/g, '""')}"`,
+        t.entryChartUrl ?? '',
+        t.exitChartUrl  ?? '',
       ].join(',')
     );
     const csv  = [header, ...rows].join('\n');
@@ -331,6 +337,57 @@ export default function TradesPage() {
                         {distSL >= 0 ? `緩衝 ${distSL.toFixed(2)}%` : `穿越 ${Math.abs(distSL).toFixed(2)}%`}
                       </p>
                     </div>
+                  </div>
+                )}
+
+                {/* Entry notes */}
+                {editingNote === trade.id ? (
+                  <div className="mt-2">
+                    <textarea
+                      value={noteText}
+                      onChange={e => setNoteText(e.target.value)}
+                      placeholder="記錄入場原因、市場觀察…"
+                      rows={3}
+                      className="w-full bg-[#1A1A26] border border-[#1E1E2E] rounded-xl px-3 py-2 text-xs text-[#EAEAF4] resize-none outline-none mb-2"
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={() => { updateTrade(trade.id, { entryNotes: noteText }); setEditingNote(null); }}
+                        className="flex-1 py-1.5 rounded-lg bg-[#F0B90B] text-[#0A0A0F] text-xs font-bold">儲存備註</button>
+                      <button onClick={() => setEditingNote(null)}
+                        className="px-3 py-1.5 rounded-lg bg-[#1A1A26] text-[#606080] text-xs">取消</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      {trade.entryNotes
+                        ? <p className="text-[#A0A0C0] text-xs leading-5 bg-[#1A1A26] rounded-xl px-3 py-2">{trade.entryNotes}</p>
+                        : <button onClick={() => { setEditingNote(trade.id); setNoteText(trade.entryNotes ?? ''); }}
+                            className="text-[#404060] text-xs">＋ 新增備註</button>
+                      }
+                    </div>
+                    {trade.entryNotes && (
+                      <button onClick={() => { setEditingNote(trade.id); setNoteText(trade.entryNotes ?? ''); }}
+                        className="text-[#404060] text-xs shrink-0">✏️</button>
+                    )}
+                  </div>
+                )}
+
+                {/* Chart screenshots */}
+                {(trade.entryChartUrl || trade.exitChartUrl) && (
+                  <div className="flex gap-2 mt-2">
+                    {trade.entryChartUrl && (
+                      <a href={trade.entryChartUrl} target="_blank" rel="noopener noreferrer" className="flex-1">
+                        <img src={trade.entryChartUrl} alt="入場圖" className="w-full h-20 object-cover rounded-xl border border-[#1E1E2E]" />
+                        <p className="text-[#404060] text-[9px] text-center mt-0.5">入場圖</p>
+                      </a>
+                    )}
+                    {trade.exitChartUrl && (
+                      <a href={trade.exitChartUrl} target="_blank" rel="noopener noreferrer" className="flex-1">
+                        <img src={trade.exitChartUrl} alt="出場圖" className="w-full h-20 object-cover rounded-xl border border-[#1E1E2E]" />
+                        <p className="text-[#404060] text-[9px] text-center mt-0.5">出場圖</p>
+                      </a>
+                    )}
                   </div>
                 )}
 

@@ -1,6 +1,8 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
+import { supabase } from '@/lib/supabase';
 import { SignalStrength, Timeframe } from '@/types';
 
 const INTERVALS = [5, 15, 30, 60];
@@ -40,6 +42,23 @@ export default function SettingsPage() {
     coins, settings, lineToken, lineUserId, webhookSecret,
     removeCoin, clearSignals, updateSettings, setLine, setWebhookSecret,
   } = useStore();
+  const router = useRouter();
+
+  const [userEmail, setUserEmail] = useState('');
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      setUserEmail(data.user?.email ?? '');
+    });
+  }, []);
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    await supabase.auth.signOut();
+    useStore.getState().setUserId('');
+    router.replace('/login');
+  };
 
   const [token, setToken]         = useState(lineToken);
   const [userId, setUserId]       = useState(lineUserId);
@@ -147,6 +166,23 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pt-4 scroll-container space-y-4">
+
+        {/* Account */}
+        <Section title="👤 帳號">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[#EAEAF4] text-sm font-semibold">{userEmail || '載入中…'}</p>
+              <p className="text-[#606080] text-xs mt-0.5">已登入</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              disabled={loggingOut}
+              className="px-4 py-2 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm font-semibold disabled:opacity-40"
+            >
+              {loggingOut ? '登出中…' : '登出'}
+            </button>
+          </div>
+        </Section>
 
         {/* LINE */}
         <Section title="💬 LINE 通知設定">

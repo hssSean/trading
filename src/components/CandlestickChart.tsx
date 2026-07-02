@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { Candle, TradingSignal, SRLevel, OrderBlock } from '@/types';
 import { ema as emaCalc } from '@/analysis/indicators';
 
@@ -12,15 +12,23 @@ interface Props {
   height?:      number;
 }
 
-export function CandlestickChart({
+export interface CandlestickChartRef {
+  takeScreenshot: () => HTMLCanvasElement | null;
+}
+
+export const CandlestickChart = forwardRef<CandlestickChartRef, Props>(function CandlestickChart({
   candles,
   signals      = [],
   srLevels     = [],
   orderBlocks  = [],
   height       = 320,
-}: Props) {
+}: Props, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef     = useRef<unknown>(null);
+
+  useImperativeHandle(ref, () => ({
+    takeScreenshot: () => (chartRef.current as any)?.takeScreenshot() ?? null,
+  }));
 
   useEffect(() => {
     if (!containerRef.current || candles.length < 10) return;
@@ -178,4 +186,4 @@ export function CandlestickChart({
       </div>
     </div>
   );
-}
+});

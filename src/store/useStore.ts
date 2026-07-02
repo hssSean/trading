@@ -52,6 +52,7 @@ interface StoreState {
   lineToken: string;
   lineUserId: string;
   webhookSecret: string;
+  userId: string;            // Supabase user ID (empty if not logged in)
   _hasHydrated: boolean;
   autoCloseAlerts: AutoCloseAlert[];   // ephemeral — not persisted
 
@@ -65,6 +66,8 @@ interface StoreState {
   updateSettings: (patch: Partial<AppSettings>) => void;
   setLine: (token: string, userId: string) => void;
   setWebhookSecret: (secret: string) => void;
+  setUserId: (id: string) => void;
+  updateTrade: (id: string, patch: Partial<Pick<TradeRecord, 'entryNotes' | 'entryChartUrl' | 'exitChartUrl'>>) => void;
   // Trade journal
   addTrade: (signal: TradingSignal) => void;
   addManualTrade: (params: { symbol: string; direction: 'LONG' | 'SHORT'; entry: number; stopLoss: number; tp1: number; tp2: number; timeframe?: Timeframe; score?: number }) => void;
@@ -92,6 +95,7 @@ export const useStore = create<StoreState>()(
       lineToken: '',
       lineUserId: '',
       webhookSecret: 'abc123',
+      userId: '',
       _hasHydrated: false,
       autoCloseAlerts: [],
 
@@ -162,6 +166,9 @@ export const useStore = create<StoreState>()(
 
       setLine: (token, userId) => set({ lineToken: token, lineUserId: userId }),
       setWebhookSecret: (secret) => set({ webhookSecret: secret }),
+      setUserId: (id) => set({ userId: id }),
+      updateTrade: (id, patch) =>
+        set(s => ({ trades: s.trades.map(t => t.id === id ? { ...t, ...patch } : t) })),
 
       // ── Trade journal ──────────────────────────────────────
       addTrade: (signal) => {
@@ -255,6 +262,7 @@ export const useStore = create<StoreState>()(
         lineToken: s.lineToken,
         lineUserId: s.lineUserId,
         webhookSecret: s.webhookSecret,
+        userId: s.userId,
         // autoCloseAlerts intentionally excluded — ephemeral
       }),
       onRehydrateStorage: () => (state) => {

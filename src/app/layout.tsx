@@ -3,6 +3,8 @@ import './globals.css';
 import { BottomNav } from '@/components/BottomNav';
 import { StoreHydration } from '@/components/StoreHydration';
 
+export const dynamic = 'force-dynamic';
+
 export const metadata: Metadata = {
   title: 'Crypto Trader',
   description: '加密貨幣交易信號分析 — SMC + SNR + RSI/MACD',

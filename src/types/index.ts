@@ -124,6 +124,9 @@ export interface TradeRecord {
   tp1: number;
   tp2: number;
   reasons: string[];
+  entryNotes?: string;       // User notes at entry
+  entryChartUrl?: string;    // Screenshot URL at entry
+  exitChartUrl?: string;     // Screenshot URL at exit
   openedAt: number;
   closedAt?: number;
   result?: TradeResult;
