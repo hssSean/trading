@@ -6,7 +6,7 @@ import { SignalCard } from '@/components/SignalCard';
 import { CandlestickChart } from '@/components/CandlestickChart';
 import { fetchCandles, fetchTicker24h } from '@/api/binance';
 import { computeIndicators } from '@/analysis/indicators';
-import { generateSignals } from '@/analysis/signals';
+import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { findOrderBlocks, findFairValueGaps } from '@/analysis/smc';
 import { findSRLevels } from '@/analysis/snr';
 import { Candle, TechnicalIndicators, Timeframe, OrderBlock, FairValueGap, SRLevel } from '@/types';
@@ -105,7 +105,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           const c = t === timeframe ? candles : await fetchCandles(symbol, t, 200);
           allSig.push(...generateSignals(symbol, t, c, t === timeframe ? bias : undefined));
         }
-        addSignals(symbol, allSig);
+        addSignals(symbol, unifySignalDirection(allSig));
       } catch (e: unknown) {
         if (e instanceof Error && e.name === 'CanceledError') return;
         setError('無法取得資料，請確認網路連線後重試');

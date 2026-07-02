@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume } from '@/api/binance';
-import { generateSignals } from '@/analysis/signals';
+import { computeIndicators } from '@/analysis/indicators';
+import { generateSignals, unifySignalDirection } from '@/analysis/signals';
+import { Candle } from '@/types';
 import { sendLineMessage } from '@/lib/line';
 import { Timeframe, TradingSignal } from '@/types';
 
 export const maxDuration = 60;
+
+const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
+  '15m': '1h', '1h': '4h', '4h': '1d',
+};
 
 // ── Persistent lock via Upstash Redis ─────────────────────────
 // Survives Vercel cold starts (unlike module-level Maps).
@@ -130,16 +136,36 @@ export async function GET(req: NextRequest) {
     try {
       await fetchTicker24h(symbol).catch(() => null);
 
+      // Candle cache so HTF candles are fetched only once even if reused across TFs
+      const candleCache = new Map<string, Candle[]>();
       for (const tf of timeframes) {
         try {
-          const candles = await fetchCandles(symbol, tf, 200);
-          const sigs    = generateSignals(symbol, tf, candles);
+          if (!candleCache.has(tf)) candleCache.set(tf, await fetchCandles(symbol, tf, 200));
+          const candles = candleCache.get(tf)!;
+
+          // HTF bias: fetch higher TF once (cached), compute EMA200 direction
+          let htfBias: 'LONG' | 'SHORT' | null = null;
+          const htfTf = HTF_MAP[tf as Timeframe];
+          if (htfTf) {
+            try {
+              if (!candleCache.has(htfTf)) candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 100));
+              const htfC   = candleCache.get(htfTf)!;
+              const htfInd = computeIndicators(htfC);
+              const htfPx  = htfC[htfC.length - 1].close;
+              const near   = Math.abs(htfPx - htfInd.ema200) / htfInd.ema200 < 0.015;
+              if (!near) htfBias = htfPx > htfInd.ema200 ? 'LONG' : 'SHORT';
+            } catch { /* no bias if HTF unavailable */ }
+          }
+
+          const sigs = generateSignals(symbol, tf, candles, htfBias);
           allSignals.push(...sigs);
           sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
         } catch { /* skip failed timeframe */ }
       }
 
-      const strong    = allSignals.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
+      // Direction unification: highest TF's direction is master, drop conflicting signals
+      const unified   = unifySignalDirection(allSignals);
+      const strong    = unified.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
       const topStrong = strong.find(s => s.score >= STRONG_THRESHOLD);
 
       // Read lock from Redis (persistent across cold starts)

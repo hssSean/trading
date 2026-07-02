@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useStore } from '@/store/useStore';
 import { CoinCard } from '@/components/CoinCard';
 import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, searchSymbols } from '@/api/binance';
-import { generateSignals } from '@/analysis/signals';
+import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { computeIndicators } from '@/analysis/indicators';
 import { Timeframe, TradingSignal } from '@/types';
 
@@ -71,7 +71,7 @@ async function runCoinAnalysis(symbol: string) {
       }
       allSignals.push(...generateSignals(symbol, tf as Timeframe, candles, bias));
     }
-    store.addSignals(symbol, allSignals);
+    store.addSignals(symbol, unifySignalDirection(allSignals));
   } catch (err) {
     console.error('[analyze]', symbol, err);
   } finally {

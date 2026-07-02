@@ -1,5 +1,5 @@
 import { Candle, TradingSignal, SignalStrength, Timeframe, OrderBlock, FairValueGap, SRLevel } from '../types';
-import { computeIndicators } from './indicators';
+import { computeIndicators, rsi as rsiCalc } from './indicators';
 import { findOrderBlocks, findFairValueGaps, analyzeMarketStructure } from './smc';
 import { findSRLevels, nearestSupport, nearestResistance } from './snr';
 
@@ -46,21 +46,102 @@ function calcEmaSlope(candles: Candle[], period: number, lookback = 5): 'up' | '
   return 'flat';
 }
 
-// ════════════════════════════════════════════════════════════
-// Gate  : EMA200 position decides allowed direction.
-//         ±1.5% zone around EMA200 → both directions scored,
-//         highest wins.
-// Score : Minimum 9 to fire a signal.
-// RR    : Minimum 2.0.
-// Stop  : ATR × 1.5 (dynamic).
-// ════════════════════════════════════════════════════════════
-const MIN_SCORE = 7;
-const MIN_RR    = 1.5;
+// ── Candle pattern recognition ────────────────────────────────
+function detectCandlePatterns(candles: Candle[]): {
+  bullishEngulfing: boolean;
+  bearishEngulfing: boolean;
+  hammer: boolean;
+  shootingStar: boolean;
+} {
+  if (candles.length < 3) {
+    return { bullishEngulfing: false, bearishEngulfing: false, hammer: false, shootingStar: false };
+  }
+  const cur  = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
 
+  const curBody   = Math.abs(cur.close  - cur.open);
+  const prevBody  = Math.abs(prev.close - prev.open);
+  const curBullish  = cur.close  > cur.open;
+  const prevBullish = prev.close > prev.open;
+  const lowerWick = Math.min(cur.open, cur.close) - cur.low;
+  const upperWick = cur.high - Math.max(cur.open, cur.close);
+
+  const bullishEngulfing =
+    !prevBullish && curBullish &&
+    cur.open  <= prev.close &&
+    cur.close >= prev.open  &&
+    curBody > prevBody * 0.8;
+
+  const bearishEngulfing =
+    prevBullish && !curBullish &&
+    cur.open  >= prev.close &&
+    cur.close <= prev.open  &&
+    curBody > prevBody * 0.8;
+
+  const hammer =
+    curBody > 0 &&
+    lowerWick >= curBody * 2 &&
+    upperWick <= curBody * 0.5;
+
+  const shootingStar =
+    curBody > 0 &&
+    upperWick >= curBody * 2 &&
+    lowerWick <= curBody * 0.5;
+
+  return { bullishEngulfing, bearishEngulfing, hammer, shootingStar };
+}
+
+// ── RSI divergence (lookback last N candles) ──────────────────
+function detectRsiDivergence(
+  candles: Candle[],
+  lookback = 12,
+): { bullish: boolean; bearish: boolean } {
+  if (candles.length < 30) return { bullish: false, bearish: false };
+
+  const closes    = candles.map((c) => c.close);
+  const rsiValues = rsiCalc(closes, 14);
+  const curClose  = closes[closes.length - 1];
+  const curRsi    = rsiValues[rsiValues.length - 1];
+  if (isNaN(curRsi)) return { bullish: false, bearish: false };
+
+  const start = closes.length - lookback - 1;
+  let lowestClose = Infinity,  lowestRsi  = Infinity;
+  let highestClose = -Infinity, highestRsi = -Infinity;
+
+  for (let i = start; i < closes.length - 1; i++) {
+    const r = rsiValues[i];
+    if (isNaN(r)) continue;
+    if (closes[i] < lowestClose)  { lowestClose  = closes[i]; lowestRsi  = r; }
+    if (closes[i] > highestClose) { highestClose = closes[i]; highestRsi = r; }
+  }
+
+  // Bullish: price makes lower low, RSI makes higher low
+  const bullish = curClose < lowestClose  && curRsi > lowestRsi  + 3;
+  // Bearish: price makes higher high, RSI makes lower high
+  const bearish = curClose > highestClose && curRsi < highestRsi - 3;
+
+  return { bullish, bearish };
+}
+
+// ════════════════════════════════════════════════════════════════
+// Gate  : EMA200 position decides allowed direction.
+//         ±1.5% zone around EMA200 → both directions scored.
+// Score : Minimum 9 to fire a signal.
+// RR    : Minimum 2.0 (raised from 1.5 for better risk management).
+// Stop  : ATR × 1.5 (dynamic).
+// Volatility gate: ATR > 3% of price requires score +4.
+// ════════════════════════════════════════════════════════════════
+const MIN_SCORE      = 9;
+const MIN_RR         = 2.0;
+const HIGH_VOLIT_PCT = 0.03; // ATR > 3% = high volatility
+const HIGH_VOLIT_EXTRA = 4;  // extra score required in high-vol
+
+// htfBias: if provided, bonus +3 for aligned direction, penalty -2 for opposite
 export function generateSignals(
   symbol: string,
   timeframe: Timeframe,
   candles: Candle[],
+  htfBias?: 'LONG' | 'SHORT' | null,
 ): TradingSignal[] {
   if (candles.length < 55) return [];
 
@@ -75,21 +156,30 @@ export function generateSignals(
   const srLevels  = findSRLevels(candles);
 
   const atrVal     = calcAtr(candles);
+  const atrPct     = atrVal / price;
   const volRatio   = calcVolRatio(candles);
   const ema50Slope = calcEmaSlope(candles, 50);
+  const patterns   = detectCandlePatterns(candles);
+  const divergence = detectRsiDivergence(candles);
+
+  // Volatility adaptive threshold
+  const effectiveMinScore = atrPct > HIGH_VOLIT_PCT ? MIN_SCORE + HIGH_VOLIT_EXTRA : MIN_SCORE;
 
   const aboveEma200     = price > ind.ema200;
   const ema20AboveEma50 = ind.ema20 > ind.ema50;
-  // Within 1.5% of EMA200: allow both directions, let score decide
-  const nearEma200  = Math.abs(price - ind.ema200) / ind.ema200 < 0.015;
-  const allowLong   = aboveEma200 || nearEma200;
-  const allowShort  = !aboveEma200 || nearEma200;
+  const nearEma200      = Math.abs(price - ind.ema200) / ind.ema200 < 0.015;
+  const allowLong       = aboveEma200 || nearEma200;
+  const allowShort      = !aboveEma200 || nearEma200;
+
+  // EMA perfect alignment
+  const emaPerfectLong  = ind.ema20 > ind.ema50 && ind.ema50 > ind.ema200;
+  const emaPerfectShort = ind.ema20 < ind.ema50 && ind.ema50 < ind.ema200;
 
   const support    = nearestSupport(srLevels, price);
   const resistance = nearestResistance(srLevels, price);
   const signals: TradingSignal[] = [];
 
-  // ── LONG SCORING ─────────────────────────────────────────
+  // ── LONG SCORING ─────────────────────────────────────────────
   let longScore = 0;
   const longReasons: string[] = [];
   let longOB:  OrderBlock | undefined;
@@ -97,20 +187,17 @@ export function generateSignals(
   let longSR:  SRLevel | undefined;
 
   if (allowLong) {
-    // EMA200 position — more points when clearly above
-    if (aboveEma200)       { longScore += 3; longReasons.push('EMA200 上方（多頭趨勢）'); }
-    else if (nearEma200)   { longScore += 1; longReasons.push('EMA200 附近（關鍵支撐）'); }
-    // Short-term momentum alignment
-    if (ema20AboveEma50)   { longScore += 2; longReasons.push('EMA20 > EMA50（短期強勢）'); }
+    if (aboveEma200)         { longScore += 3; longReasons.push('EMA200 上方（多頭趨勢）'); }
+    else if (nearEma200)     { longScore += 1; longReasons.push('EMA200 附近（關鍵支撐）'); }
+    if (emaPerfectLong)      { longScore += 2; longReasons.push('EMA 完美多頭排列 (20>50>200)'); }
+    if (ema20AboveEma50)     { longScore += 2; longReasons.push('EMA20 > EMA50（短期強勢）'); }
     if (ema50Slope === 'up') { longScore += 1; longReasons.push('EMA50 斜率向上'); }
 
-    // Market structure
     if (structure.trend === 'bullish')                { longScore += 2; longReasons.push('結構做多（HH HL）'); }
     if (structure.lastBOS?.direction === 'bullish')   { longScore += 2; longReasons.push('BOS 突破向上'); }
     if (structure.lastChoCH?.direction === 'bullish') { longScore += 3; longReasons.push('ChoCH 轉多'); }
     if (structure.lastChoCH?.direction === 'bearish') longScore -= 2;
 
-    // Order Block
     const bullOB = obs.find(
       (ob) => ob.type === 'bullish' && price >= ob.low * 0.999 && price <= ob.high * 1.005,
     );
@@ -120,25 +207,24 @@ export function generateSignals(
       longOB = bullOB;
     }
 
-    // FVG
     const bullFVG = fvgs.find(
       (f) => f.type === 'bullish' && price >= f.bottom * 0.999 && price <= f.top * 1.001,
     );
     if (bullFVG) { longScore += 2; longReasons.push('看漲 FVG 回補'); longFVG = bullFVG; }
 
-    // Support
     if (support && Math.abs(price - support.price) / price <= 0.015) {
       longScore += Math.min(support.touchCount, 4);
       longReasons.push(`支撐 $${support.price.toFixed(4)}（${support.touchCount} 次）`);
       longSR = support;
     }
 
-    // RSI — buy dips, not breakouts
     if (ind.rsi < 35)      { longScore += 4; longReasons.push(`RSI 超賣 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi < 50) { longScore += 2; longReasons.push(`RSI 回調 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi > 70) longScore -= 3;
 
-    // MACD
+    // RSI bullish divergence
+    if (divergence.bullish) { longScore += 3; longReasons.push('RSI 看漲背離'); }
+
     if (ind.macdHistogram > 0 && ind.macd > ind.macdSignal) {
       longScore += 2; longReasons.push('MACD 黃金交叉');
     }
@@ -146,16 +232,17 @@ export function generateSignals(
       longScore += 1; longReasons.push('MACD 動能增強');
     }
 
-    // Volume surge
     if (volRatio >= 1.5) { longScore += 2; longReasons.push(`量能放大 ${volRatio.toFixed(1)}×`); }
 
-    // Candle body
-    if ((cur.close - cur.open) / cur.open > 0.003) {
-      longScore += 1; longReasons.push('看漲實體K線');
-    }
+    // Candle patterns
+    if (patterns.bullishEngulfing) { longScore += 2; longReasons.push('看漲吞噬K線'); }
+    if (patterns.hammer)           { longScore += 2; longReasons.push('錘子線'); }
+
+    // High-vol note
+    if (atrPct > HIGH_VOLIT_PCT) longReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）需 ${effectiveMinScore} 分`);
   }
 
-  // ── SHORT SCORING ────────────────────────────────────────
+  // ── SHORT SCORING ─────────────────────────────────────────────
   let shortScore = 0;
   const shortReasons: string[] = [];
   let shortOB:  OrderBlock | undefined;
@@ -163,20 +250,17 @@ export function generateSignals(
   let shortSR:  SRLevel | undefined;
 
   if (allowShort) {
-    // EMA200 position
-    if (!aboveEma200)       { shortScore += 3; shortReasons.push('EMA200 下方（空頭趨勢）'); }
-    else if (nearEma200)    { shortScore += 1; shortReasons.push('EMA200 附近（關鍵阻力）'); }
-    // Short-term momentum
-    if (!ema20AboveEma50)   { shortScore += 2; shortReasons.push('EMA20 < EMA50（短期弱勢）'); }
+    if (!aboveEma200)          { shortScore += 3; shortReasons.push('EMA200 下方（空頭趨勢）'); }
+    else if (nearEma200)       { shortScore += 1; shortReasons.push('EMA200 附近（關鍵阻力）'); }
+    if (emaPerfectShort)       { shortScore += 2; shortReasons.push('EMA 完美空頭排列 (20<50<200)'); }
+    if (!ema20AboveEma50)      { shortScore += 2; shortReasons.push('EMA20 < EMA50（短期弱勢）'); }
     if (ema50Slope === 'down') { shortScore += 1; shortReasons.push('EMA50 斜率向下'); }
 
-    // Market structure
     if (structure.trend === 'bearish')                 { shortScore += 2; shortReasons.push('結構做空（LH LL）'); }
     if (structure.lastBOS?.direction === 'bearish')    { shortScore += 2; shortReasons.push('BOS 向下突破'); }
     if (structure.lastChoCH?.direction === 'bearish')  { shortScore += 3; shortReasons.push('ChoCH 轉空'); }
     if (structure.lastChoCH?.direction === 'bullish')  shortScore -= 2;
 
-    // Order Block
     const bearOB = obs.find(
       (ob) => ob.type === 'bearish' && price <= ob.high * 1.001 && price >= ob.low * 0.995,
     );
@@ -186,25 +270,24 @@ export function generateSignals(
       shortOB = bearOB;
     }
 
-    // FVG
     const bearFVG = fvgs.find(
       (f) => f.type === 'bearish' && price >= f.bottom * 0.999 && price <= f.top * 1.001,
     );
     if (bearFVG) { shortScore += 2; shortReasons.push('看跌 FVG 回補'); shortFVG = bearFVG; }
 
-    // Resistance
     if (resistance && Math.abs(price - resistance.price) / price <= 0.015) {
       shortScore += Math.min(resistance.touchCount, 4);
       shortReasons.push(`阻力 $${resistance.price.toFixed(4)}（${resistance.touchCount} 次）`);
       shortSR = resistance;
     }
 
-    // RSI — short bounces, not capitulation
     if (ind.rsi > 65)      { shortScore += 4; shortReasons.push(`RSI 超買 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi > 50) { shortScore += 2; shortReasons.push(`RSI 反彈 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi < 30) shortScore -= 3;
 
-    // MACD
+    // RSI bearish divergence
+    if (divergence.bearish) { shortScore += 3; shortReasons.push('RSI 看跌背離'); }
+
     if (ind.macdHistogram < 0 && ind.macd < ind.macdSignal) {
       shortScore += 2; shortReasons.push('MACD 死亡交叉');
     }
@@ -212,31 +295,35 @@ export function generateSignals(
       shortScore += 1; shortReasons.push('MACD 跌勢加速');
     }
 
-    // Volume
     if (volRatio >= 1.5) { shortScore += 2; shortReasons.push(`量能放大 ${volRatio.toFixed(1)}×`); }
 
-    // Candle body
-    if ((cur.open - cur.close) / cur.open > 0.003) {
-      shortScore += 1; shortReasons.push('看跌實體K線');
-    }
+    // Candle patterns
+    if (patterns.bearishEngulfing) { shortScore += 2; shortReasons.push('看跌吞噬K線'); }
+    if (patterns.shootingStar)     { shortScore += 2; shortReasons.push('流星線'); }
+
+    if (atrPct > HIGH_VOLIT_PCT) shortReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）需 ${effectiveMinScore} 分`);
   }
 
-  // ── BUILD SIGNALS ─────────────────────────────────────────
-  const slBuffer = Math.max(atrVal * 1.5, price * 0.01);
-  // Minimum TP distance to guarantee RR >= MIN_RR
+  // ── HTF Bias bonus / penalty ──────────────────────────────────
+  if (htfBias === 'LONG')  { longScore  += 3; longReasons.push('大時框偏多 +3'); shortScore -= 2; }
+  if (htfBias === 'SHORT') { shortScore += 3; shortReasons.push('大時框偏空 +3'); longScore  -= 2; }
+
+  // ── BUILD SIGNALS ─────────────────────────────────────────────
+  const slBuffer  = Math.max(atrVal * 1.5, price * 0.01);
+  // TP fallback: 2.0x and 3.5x risk (raised from 1.5x / 61.8% extension)
   const minTpDist = slBuffer * MIN_RR;
 
   // LONG — only fires when clearly stronger than short
-  if (longScore >= MIN_SCORE && longScore > shortScore) {
+  if (longScore >= effectiveMinScore && longScore > shortScore) {
     const sl  = longOB  ? Math.min(longOB.low  * 0.995, price - slBuffer)
               : longSR  ? Math.min(longSR.price * 0.995, price - slBuffer)
               : price - slBuffer;
     const risk   = Math.max(price - sl, 1e-6);
-    // Use resistance level if it gives sufficient RR; otherwise use minimum distance
-    const tp1Raw = resistance ? resistance.price : price + minTpDist;
-    const tp1    = Math.max(tp1Raw, price + risk * MIN_RR); // ensure RR >= MIN_RR
+    const tp1Raw = resistance ? resistance.price : price + risk * 2.0;
+    const tp1    = Math.max(tp1Raw, price + risk * MIN_RR);
+    // TP2: next resistance or 3.5x risk extension
     const nextR  = srLevels.find((l) => l.type === 'resistance' && l.price > tp1 * 1.005);
-    const tp2    = nextR ? nextR.price : tp1 + (tp1 - price) * 0.618;
+    const tp2    = nextR ? nextR.price : price + risk * 3.5;
     const rr     = parseFloat(((tp1 - price) / risk).toFixed(2));
     signals.push({
       id: simpleId(), symbol, direction: 'LONG',
@@ -249,16 +336,16 @@ export function generateSignals(
   }
 
   // SHORT — only fires when clearly stronger than long
-  if (shortScore >= MIN_SCORE && shortScore > longScore) {
+  if (shortScore >= effectiveMinScore && shortScore > longScore) {
     const sl  = shortOB ? Math.max(shortOB.high * 1.005, price + slBuffer)
               : shortSR ? Math.max(shortSR.price * 1.005, price + slBuffer)
               : price + slBuffer;
     const risk   = Math.max(sl - price, 1e-6);
-    // Use support level if it gives sufficient RR; otherwise use minimum distance
-    const tp1Raw = support ? support.price : price - minTpDist;
-    const tp1    = Math.min(tp1Raw, price - risk * MIN_RR); // ensure RR >= MIN_RR
+    const tp1Raw = support ? support.price : price - risk * 2.0;
+    const tp1    = Math.min(tp1Raw, price - risk * MIN_RR);
+    // TP2: next support or 3.5x risk extension
     const nextS  = srLevels.find((l) => l.type === 'support' && l.price < tp1 * 0.995);
-    const tp2    = nextS ? nextS.price : tp1 - (price - tp1) * 0.618;
+    const tp2    = nextS ? nextS.price : price - risk * 3.5;
     const rr     = parseFloat(((price - tp1) / risk).toFixed(2));
     signals.push({
       id: simpleId(), symbol, direction: 'SHORT',
@@ -271,4 +358,16 @@ export function generateSignals(
   }
 
   return signals;
+}
+
+// Highest timeframe's direction is the master — filter out conflicting directions.
+// Prevents simultaneous LONG (1h) + SHORT (4h) signals for the same coin.
+const TF_RANK: Partial<Record<Timeframe, number>> = { '1d': 4, '4h': 3, '1h': 2, '15m': 1 };
+
+export function unifySignalDirection(signals: TradingSignal[]): TradingSignal[] {
+  if (signals.length === 0) return [];
+  const master = [...signals].sort(
+    (a, b) => (TF_RANK[b.timeframe] ?? 0) - (TF_RANK[a.timeframe] ?? 0),
+  )[0];
+  return signals.filter(s => s.direction === master.direction);
 }
