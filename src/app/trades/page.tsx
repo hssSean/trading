@@ -1,7 +1,7 @@
 'use client';
 import { useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
-import { TradeResult } from '@/types';
+import { TradeResult, TradingSignal } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
   WIN_TP1:      'TP1 達標',
@@ -55,6 +55,8 @@ export default function TradesPage() {
   const [exitResult, setExitResult] = useState<TradeResult>('WIN_TP1');
   const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'CLOSED'>('ALL');
   const [unlockMsg,  setUnlockMsg]  = useState<Record<string, boolean>>({});
+  const [syncing,    setSyncing]    = useState(false);
+  const [syncMsg,    setSyncMsg]    = useState('');
   const now = Date.now();
 
   const closed  = trades.filter(t => !!t.result);
@@ -110,6 +112,29 @@ export default function TradesPage() {
     setTimeout(() => setUnlockMsg(prev => ({ ...prev, [symbol]: false })), 2500);
   }, []);
 
+  const handleSync = useCallback(async () => {
+    setSyncing(true);
+    setSyncMsg('');
+    try {
+      const secret = useStore.getState().webhookSecret;
+      const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
+      const data: { signals?: TradingSignal[] } = await res.json();
+      let added = 0;
+      for (const sig of data.signals ?? []) {
+        const s = useStore.getState();
+        if (s.trades.some(t => t.signalId === sig.id)) continue;
+        if (!s.coins.find(c => c.symbol === sig.symbol)) s.addCoin(sig.symbol);
+        if (!s.hasActiveTrade(sig.symbol)) { s.addTrade(sig); added++; }
+      }
+      setSyncMsg(added > 0 ? `已同步 ${added} 筆新紀錄` : '已是最新，無新紀錄');
+    } catch {
+      setSyncMsg('同步失敗，請重試');
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setSyncMsg(''), 3000);
+    }
+  }, []);
+
   const autoFill = (result: TradeResult) => {
     setExitResult(result);
     if (!closeModal) return;
@@ -127,10 +152,31 @@ export default function TradesPage() {
             <h1 className="text-[#EAEAF4] text-xl font-extrabold tracking-tight">交易紀錄</h1>
             <p className="text-[#606080] text-xs mt-0.5">{trades.length} 筆 · 自動偵測止盈止損</p>
           </div>
-          <button onClick={exportCsv} className="text-[#F0B90B] text-xs font-semibold px-3 py-1.5 border border-[#F0B90B]/40 rounded-full active:opacity-70">
-            匯出 CSV
-          </button>
+          <div className="flex gap-2 items-center">
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="text-blue-400 text-xs font-semibold px-3 py-1.5 border border-blue-400/40 rounded-full disabled:opacity-40 active:opacity-70"
+            >
+              {syncing ? (
+                <span className="flex items-center gap-1">
+                  <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin inline-block" />
+                  同步中
+                </span>
+              ) : '同步紀錄'}
+            </button>
+            <button onClick={exportCsv} className="text-[#F0B90B] text-xs font-semibold px-3 py-1.5 border border-[#F0B90B]/40 rounded-full active:opacity-70">
+              匯出 CSV
+            </button>
+          </div>
         </div>
+        {syncMsg && (
+          <div className={`mb-2 px-3 py-2 rounded-xl text-xs font-semibold ${
+            syncMsg.includes('失敗') ? 'bg-red-500/10 text-red-400' : 'bg-blue-500/10 text-blue-400'
+          }`}>
+            {syncMsg}
+          </div>
+        )}
 
         {/* Stats */}
         <div className="grid grid-cols-4 gap-1.5 mb-3">

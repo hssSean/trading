@@ -165,6 +165,9 @@ export const useStore = create<StoreState>()(
       // ── Trade journal ──────────────────────────────────────
       addTrade: (signal) => {
         const existing = get().trades;
+        // Skip if this exact signal was already journalled (open or closed)
+        if (existing.some((t) => t.signalId === signal.id)) return;
+        // Skip if there's already an open trade for this symbol
         if (existing.some((t) => t.symbol === signal.symbol && !t.result)) return;
         const trade: TradeRecord = {
           id: `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,

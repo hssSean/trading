@@ -251,6 +251,8 @@ export async function GET(req: NextRequest) {
 }
 
 // ── POST — return pending signals for client auto-journal ──────
+// Signals are NOT deleted on read — they expire via the 24h TTL set at push time.
+// Client deduplicates by signalId so re-reads are harmless.
 export async function POST(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   const cutoff = Date.now() - 24 * 60 * 60 * 1000; // 24h window
@@ -258,12 +260,13 @@ export async function POST(req: NextRequest) {
   if (r) {
     try {
       const signals = await r.lrange<TradingSignal>('pending_signals', 0, -1);
-      await r.del('pending_signals');
+      // Do NOT delete — TTL set at lpush time handles expiry automatically
       const filtered = signals.filter(s => s && s.timestamp > cutoff);
       return NextResponse.json({ ok: true, signals: filtered, source: 'redis' });
     } catch { /* fall through to in-memory */ }
   }
-  const signals = pendingSignals.splice(0).filter(s => s.timestamp > cutoff);
+  // In-memory fallback: read-only, filter by age (no splice)
+  const signals = pendingSignals.filter(s => s.timestamp > cutoff);
   return NextResponse.json({ ok: true, signals, source: 'memory' });
 }
 

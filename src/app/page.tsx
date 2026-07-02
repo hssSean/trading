@@ -189,13 +189,13 @@ export default function HomePage() {
         const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
         const data: { signals?: TradingSignal[] } = await res.json();
         for (const sig of data.signals ?? []) {
-          // Fresh state per signal to avoid stale closure bugs
           const s = useStore.getState();
+          // Skip if already in trades (by signalId) — signals persist in Redis via TTL
+          if (s.trades.some(t => t.signalId === sig.id)) continue;
           if (!s.coins.find(c => c.symbol === sig.symbol)) {
             s.addCoin(sig.symbol);
             setTimeout(() => runCoinAnalysis(sig.symbol), 500);
           }
-          // Re-read after potential addCoin
           if (!useStore.getState().hasActiveTrade(sig.symbol)) {
             useStore.getState().addTrade(sig);
           }
@@ -251,8 +251,13 @@ export default function HomePage() {
   const dismissAutoClose = useStore((s) => s.dismissAutoCloseAlert);
   const minStrength      = useStore((s) => s.settings.minSignalStrength);
 
-  // Market sentiment: count coins with LONG vs SHORT signals (above minStrength)
+  // Sort coins: highest-score signal first, then by name
   const STRENGTH_RANK: Record<string, number> = { WEAK: 0, MODERATE: 1, STRONG: 2 };
+  const sortedCoins = useMemo(() =>
+    [...coins].sort((a, b) => (b.signals[0]?.score ?? 0) - (a.signals[0]?.score ?? 0)),
+  [coins]);
+
+  // Market sentiment: count coins with LONG vs SHORT signals (above minStrength)
   const sentiment = useMemo(() => {
     let longs = 0, shorts = 0;
     coins.forEach(c => {
@@ -366,10 +371,10 @@ export default function HomePage() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pt-3 scroll-container">
-        {coins.length === 0 && !autoLoading ? (
+        {sortedCoins.length === 0 && !autoLoading ? (
           <EmptyState onAuto={() => loadTopCoins(false)} onManual={() => setShowAdd(true)} autoLoading={autoLoading} />
         ) : (
-          coins.map((coin) => <CoinCard key={coin.symbol} coin={coin} />)
+          sortedCoins.map((coin) => <CoinCard key={coin.symbol} coin={coin} />)
         )}
         <div className="h-4" />
       </div>
