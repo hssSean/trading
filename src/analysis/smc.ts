@@ -140,6 +140,40 @@ export function findOrderBlocks(candles: Candle[]): OrderBlock[] {
   return obs;
 }
 
+// ── Equal Highs / Equal Lows (EQL/EQH) — liquidity cluster detection ──
+export function findEqualLevels(
+  candles: Candle[],
+  lookback = 60,
+  tolerance = 0.002,
+): { eqHighs: number[]; eqLows: number[] } {
+  const slice = candles.slice(-lookback, -1);
+
+  const findClusters = (values: number[]): number[] => {
+    const clusters: number[] = [];
+    const assigned = new Array(values.length).fill(false);
+    for (let i = 0; i < values.length; i++) {
+      if (assigned[i]) continue;
+      const members: number[] = [values[i]];
+      assigned[i] = true;
+      for (let j = i + 1; j < values.length; j++) {
+        if (!assigned[j] && Math.abs(values[j] - values[i]) / values[i] <= tolerance) {
+          members.push(values[j]);
+          assigned[j] = true;
+        }
+      }
+      if (members.length >= 2) {
+        clusters.push(members.reduce((a, b) => a + b, 0) / members.length);
+      }
+    }
+    return clusters;
+  };
+
+  return {
+    eqHighs: findClusters(slice.map(c => c.high)),
+    eqLows:  findClusters(slice.map(c => c.low)),
+  };
+}
+
 export function findFairValueGaps(candles: Candle[]): FairValueGap[] {
   const fvgs: FairValueGap[] = [];
 

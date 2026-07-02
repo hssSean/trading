@@ -1,6 +1,6 @@
 import { Candle, TradingSignal, SignalStrength, Timeframe, OrderBlock, FairValueGap, SRLevel } from '../types';
 import { computeIndicators, rsi as rsiCalc } from './indicators';
-import { findOrderBlocks, findFairValueGaps, analyzeMarketStructure } from './smc';
+import { findOrderBlocks, findFairValueGaps, analyzeMarketStructure, findEqualLevels } from './smc';
 import { findSRLevels, nearestSupport, nearestResistance } from './snr';
 
 function simpleId(): string {
@@ -307,6 +307,53 @@ export function generateSignals(
   // ── HTF Bias bonus / penalty ──────────────────────────────────
   if (htfBias === 'LONG')  { longScore  += 3; longReasons.push('大時框偏多 +3'); shortScore -= 2; }
   if (htfBias === 'SHORT') { shortScore += 3; shortReasons.push('大時框偏空 +3'); longScore  -= 2; }
+
+  // ── BREAKER BLOCKS ─────────────────────────────────────────────
+  const allOBs    = findOrderBlocks(candles);
+  const breakerBull = allOBs.find(
+    ob => ob.mitigated && ob.type === 'bearish' &&
+          price >= ob.low * 0.999 && price <= ob.high * 1.005,
+  );
+  const breakerBear = allOBs.find(
+    ob => ob.mitigated && ob.type === 'bullish' &&
+          price <= ob.high * 1.001 && price >= ob.low * 0.995,
+  );
+  if (breakerBull) { longScore  += 2; longReasons.push('看漲破壞塊（空頭 OB 突破轉支撐）'); }
+  if (breakerBear) { shortScore += 2; shortReasons.push('看跌破壞塊（多頭 OB 突破轉阻力）'); }
+
+  // ── FIBONACCI GOLDEN POCKET (0.618 – 0.65) ────────────────────
+  const fmtF = (n: number) => n >= 1000 ? n.toFixed(2) : n >= 1 ? n.toFixed(4) : n.toFixed(6);
+  const { swingHighs: shs, swingLows: sls } = structure;
+  if (shs.length >= 1 && sls.length >= 1) {
+    const swHigh  = Math.max(...shs.slice(-3).map(s => s.price));
+    const swLow   = Math.min(...sls.slice(-3).map(s => s.price));
+    const fibRange = swHigh - swLow;
+    if (fibRange / swLow > 0.02) {
+      const gp618 = swHigh - fibRange * 0.618;
+      const gp65  = swHigh - fibRange * 0.65;
+      if (price >= Math.min(gp618, gp65) * 0.998 && price <= Math.max(gp618, gp65) * 1.002 && allowLong) {
+        longScore += 3;
+        longReasons.push(`Fib 黃金口袋 0.618–0.65（$${fmtF(Math.min(gp618,gp65))}–$${fmtF(Math.max(gp618,gp65))}）`);
+      }
+      const gpS618 = swLow + fibRange * 0.618;
+      const gpS65  = swLow + fibRange * 0.65;
+      if (price >= Math.min(gpS618, gpS65) * 0.998 && price <= Math.max(gpS618, gpS65) * 1.002 && allowShort) {
+        shortScore += 3;
+        shortReasons.push(`Fib 黃金口袋 0.618–0.65（$${fmtF(Math.min(gpS618,gpS65))}–$${fmtF(Math.max(gpS618,gpS65))}）`);
+      }
+    }
+  }
+
+  // ── EQUAL HIGHS / LOWS (EQL/EQH) — liquidity zones ────────────
+  const { eqHighs, eqLows } = findEqualLevels(candles);
+  const nearEQL = eqLows.filter(l => l < price).sort((a, b) => b - a)[0];
+  if (nearEQL && (price - nearEQL) / price <= 0.015) {
+    longScore  += 2; longReasons.push(`EQL 流動性支撐 $${fmtF(nearEQL)}`);
+  }
+  const nearEQH = eqHighs.filter(h => h > price).sort((a, b) => a - b)[0];
+  if (nearEQH && (nearEQH - price) / price <= 0.015) {
+    shortScore += 2; shortReasons.push(`EQH 流動性阻力 $${fmtF(nearEQH)}`);
+  }
 
   // ── BUILD SIGNALS ─────────────────────────────────────────────
   const slBuffer  = Math.max(atrVal * 1.5, price * 0.01);

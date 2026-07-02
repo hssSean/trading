@@ -212,7 +212,7 @@ export default function TradesPage() {
         )}
 
         {/* Stats */}
-        <div className="grid grid-cols-4 gap-1.5 mb-3">
+        <div className="grid grid-cols-4 gap-1.5 mb-2">
           <StatCard label="總交易" value={String(closed.length)} sub={`${pending.length} 持倉`} />
           <StatCard
             label="勝率"
@@ -233,6 +233,32 @@ export default function TradesPage() {
             color={profitFactor ? (parseFloat(profitFactor) >= 1 ? '#00C851' : '#FF4444') : undefined}
           />
         </div>
+
+        {/* Portfolio Heat */}
+        {pending.length > 0 && (
+          <div className={`rounded-2xl px-4 py-2.5 mb-3 border flex items-center justify-between ${
+            pending.length >= 5 ? 'border-red-500/40 bg-red-500/5'
+            : pending.length >= 3 ? 'border-yellow-500/40 bg-yellow-500/5'
+            : 'border-[#1E1E2E] bg-[#12121A]'
+          }`}>
+            <div>
+              <p className="text-[#606080] text-[9px]">帳戶總曝險</p>
+              <p className={`font-extrabold text-base ${
+                pending.length >= 5 ? 'text-red-400'
+                : pending.length >= 3 ? 'text-yellow-400' : 'text-[#EAEAF4]'
+              }`}>{pending.length}%</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[#606080] text-[9px]">{pending.length} 筆持倉 × 1% 風險</p>
+              {pending.length >= 5
+                ? <p className="text-red-400 text-[9px]">⚠ 高風險，建議暫停開新倉</p>
+                : pending.length >= 3
+                ? <p className="text-yellow-400 text-[9px]">注意：總曝險偏高</p>
+                : <p className="text-[#404060] text-[9px]">風險在控制範圍內</p>
+              }
+            </div>
+          </div>
+        )}
 
         {/* Filter tabs */}
         <div className="flex gap-2">

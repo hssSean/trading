@@ -166,12 +166,15 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     await unlockSymbol(trade.symbol);
 
     if (lineToken && lineUserId) {
-      const label = closeResult === 'WIN_TP2' ? '✅ TP2 達標'
+      const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
                   : closeResult === 'WIN_TP1' ? '✅ TP1 達標'
                   : '❌ 止損出場';
       const dir = isLong ? '▲ 做多' : '▼ 做空';
       const sym = trade.symbol.replace('USDT', '/USDT');
-      const msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+      const tp2Line = closeResult === 'WIN_TP1'
+        ? `\n💡 建議移止損到本金 $${trade.entry}，繼續抱 TP2 $${trade.tp2}`
+        : '';
+      const msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%${tp2Line}`;
       await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
     }
     closed++;

@@ -121,7 +121,19 @@ export function buildLineFlexMessage(signal: TradingSignal): object {
       layout: 'vertical',
       backgroundColor: '#0A0A0A',
       paddingAll: '10px',
+      spacing: 'sm',
       contents: [
+        {
+          type: 'button',
+          action: {
+            type: 'uri',
+            label: '📊 查看 TradingView 圖表',
+            uri: `https://www.tradingview.com/chart/?symbol=BINANCE%3A${signal.symbol}`,
+          },
+          style: 'secondary',
+          height: 'sm',
+          color: '#1A2A3A',
+        },
         {
           type: 'text',
           text: `Crypto Trader  ·  ${timeStr}`,
