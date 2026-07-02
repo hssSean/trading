@@ -105,6 +105,80 @@ function checkAuth(req: NextRequest): boolean {
   return true;
 }
 
+// ── Server-side TP/SL monitor (runs every cron tick) ──────────
+async function monitorActiveTrades(lineToken: string, lineUserId: string) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key) return { monitored: 0, closed: 0 };
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const admin = createClient(url, key);
+
+  const { data: trades } = await admin
+    .from('trades')
+    .select('id, symbol, direction, entry, stop_loss, tp1, tp2')
+    .is('result', null);
+
+  if (!trades || trades.length === 0) return { monitored: 0, closed: 0 };
+
+  // Fetch prices for unique symbols
+  const symbolSet = new Set(trades.map((t: any) => t.symbol as string));
+  const symbols = Array.from(symbolSet);
+  const prices: Record<string, number> = {};
+  await Promise.all(symbols.map(async sym => {
+    try {
+      const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`);
+      if (res.ok) prices[sym] = parseFloat((await res.json()).price);
+    } catch {}
+  }));
+
+  let closed = 0;
+  for (const trade of trades as any[]) {
+    const price = prices[trade.symbol];
+    if (!price) continue;
+
+    const isLong = trade.direction === 'LONG';
+    let closeResult: string | null = null;
+    let closePrice = 0;
+
+    if (isLong) {
+      if      (price >= trade.tp2)        { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
+      else if (price >= trade.tp1)        { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
+      else if (price <= trade.stop_loss)  { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
+    } else {
+      if      (price <= trade.tp2)        { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
+      else if (price <= trade.tp1)        { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
+      else if (price >= trade.stop_loss)  { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
+    }
+    if (!closeResult) continue;
+
+    const pnl = isLong
+      ? ((closePrice - trade.entry) / trade.entry) * 100
+      : ((trade.entry - closePrice) / trade.entry) * 100;
+
+    await admin.from('trades').update({
+      result:      closeResult,
+      exit_price:  closePrice,
+      closed_at:   Date.now(),
+      pnl_percent: parseFloat(pnl.toFixed(2)),
+    }).eq('id', trade.id);
+
+    await unlockSymbol(trade.symbol);
+
+    if (lineToken && lineUserId) {
+      const label = closeResult === 'WIN_TP2' ? '✅ TP2 達標'
+                  : closeResult === 'WIN_TP1' ? '✅ TP1 達標'
+                  : '❌ 止損出場';
+      const dir = isLong ? '▲ 做多' : '▼ 做空';
+      const sym = trade.symbol.replace('USDT', '/USDT');
+      const msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+      await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+    }
+    closed++;
+  }
+  return { monitored: trades.length, closed };
+}
+
 // ── GET — run analysis + send LINE ────────────────────────────
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -244,9 +318,13 @@ export async function GET(req: NextRequest) {
     await delay(300);
   }
 
+  // Monitor active trades for TP/SL hits (server-side, App can be closed)
+  const monitor = await monitorActiveTrades(lineToken, lineUserId).catch(() => ({ monitored: 0, closed: 0 }));
+
   return NextResponse.json({
     ok: true, analyzedAt: new Date().toISOString(),
     minScore, lineReady, usingRedis, coins: coins.length, notified, results,
+    monitor,
   });
 }
 
