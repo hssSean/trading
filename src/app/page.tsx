@@ -204,7 +204,7 @@ export default function HomePage() {
     };
     pickupPending();
     document.addEventListener('visibilitychange', pickupPending);
-    const pollId = setInterval(pickupPending, 30 * 1000);
+    const pollId = setInterval(pickupPending, 15 * 1000);
     return () => {
       document.removeEventListener('visibilitychange', pickupPending);
       clearInterval(pollId);

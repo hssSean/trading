@@ -51,10 +51,40 @@ export default function SettingsPage() {
   const [guideOpen, setGuideOpen]   = useState(false);
   const [diagResult, setDiagResult] = useState<AnalyzeResult | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
+  const [cloudSaving, setCloudSaving] = useState(false);
+  const [cloudMsg,    setCloudMsg]    = useState('');
 
   useEffect(() => {
     if (typeof window !== 'undefined') setAppUrl(window.location.origin);
   }, []);
+
+  const saveCloud = async () => {
+    setCloudSaving(true); setCloudMsg('');
+    try {
+      const store = useStore.getState();
+      const res = await fetch(`/api/sync?secret=${encodeURIComponent(secret.trim() || 'abc123')}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          watchlist:  store.coins.map(c => ({ symbol: c.symbol, timeframes: c.timeframes })),
+          trades:     store.trades,
+          lineToken:  store.lineToken,
+          lineUserId: store.lineUserId,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setCloudMsg(`已儲存至雲端 (${store.coins.length} 幣種 · ${store.trades.length} 筆紀錄)`);
+      } else {
+        setCloudMsg('儲存失敗：' + (data.error ?? '未知錯誤'));
+      }
+    } catch {
+      setCloudMsg('網路錯誤，請稍後再試');
+    } finally {
+      setCloudSaving(false);
+      setTimeout(() => setCloudMsg(''), 5000);
+    }
+  };
 
   const saveLine = () => {
     setLine(token.trim(), userId.trim());
@@ -351,6 +381,36 @@ export default function SettingsPage() {
               ))}
             </div>
           )}
+        </Section>
+
+        {/* Cloud Sync */}
+        <Section title="☁️ 雲端同步">
+          <p className="text-[#606080] text-xs mb-3 leading-5">
+            資料自動儲存至雲端（Redis），切換裝置或清除瀏覽器快取後重新開啟 App 會自動恢復。<br />
+            同步金鑰為你的 Webhook 密鑰，請確保設定了唯一密鑰以保護資料。
+          </p>
+          {cloudMsg && (
+            <div className={`mb-3 px-3 py-2 rounded-xl text-xs font-semibold ${
+              cloudMsg.includes('失敗') || cloudMsg.includes('錯誤') ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'
+            }`}>
+              {cloudMsg}
+            </div>
+          )}
+          <button
+            onClick={saveCloud}
+            disabled={cloudSaving}
+            className="w-full py-2.5 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm font-semibold"
+          >
+            {cloudSaving ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                儲存中…
+              </span>
+            ) : '立即備份到雲端'}
+          </button>
+          <p className="text-[#404060] text-xs mt-2">
+            自動同步：每次資料變動後 4 秒，以及每 10 分鐘定期備份
+          </p>
         </Section>
 
         {/* Data */}
