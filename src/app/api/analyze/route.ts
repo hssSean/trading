@@ -3,9 +3,8 @@ import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume } from '@/api/binance';
 import { computeIndicators } from '@/analysis/indicators';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
-import { Candle } from '@/types';
+import { Candle, Timeframe, TradingSignal } from '@/types';
 import { sendLineMessage } from '@/lib/line';
-import { Timeframe, TradingSignal } from '@/types';
 
 export const maxDuration = 60;
 
