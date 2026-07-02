@@ -348,12 +348,27 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true, signals, source: 'memory' });
 }
 
-// ── DELETE — unlock coin (called when trade is closed) ─────────
+// ── DELETE — unlock coin or reset ALL locks ────────────────────
 export async function DELETE(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   const symbol = req.nextUrl.searchParams.get('symbol')?.toUpperCase();
-  if (symbol) await unlockSymbol(symbol);
-  return NextResponse.json({ ok: true, symbol, unlocked: true, usingRedis: !!getRedis() });
+  const r = getRedis();
+
+  if (!symbol) {
+    // Reset ALL tlock keys
+    if (r) {
+      try {
+        const keys = await r.keys('tlock:*');
+        if (keys.length > 0) await Promise.all(keys.map(k => r.del(k)));
+        return NextResponse.json({ ok: true, cleared: keys.length, usingRedis: true });
+      } catch { /* fall through */ }
+    }
+    memLock.clear();
+    return NextResponse.json({ ok: true, cleared: memLock.size, usingRedis: false });
+  }
+
+  await unlockSymbol(symbol);
+  return NextResponse.json({ ok: true, symbol, unlocked: true, usingRedis: !!r });
 }
 
 function buildFlexMessages(signal: TradingSignal): object[] {

@@ -72,10 +72,27 @@ export default function SettingsPage() {
   const [diagLoading, setDiagLoading] = useState(false);
   const [cloudSaving, setCloudSaving] = useState(false);
   const [cloudMsg,    setCloudMsg]    = useState('');
+  const [resetting,   setResetting]   = useState(false);
+  const [resetMsg,    setResetMsg]    = useState('');
 
   useEffect(() => {
     if (typeof window !== 'undefined') setAppUrl(window.location.origin);
   }, []);
+
+  const handleResetAllLocks = async () => {
+    if (!confirm('確定要重置所有幣種的 LINE 推播鎖定嗎？\n（解除後，下次分析達到條件即可重新推播）')) return;
+    setResetting(true); setResetMsg('');
+    try {
+      const res  = await fetch(`/api/analyze?secret=${encodeURIComponent(secret.trim() || 'abc123')}`, { method: 'DELETE' });
+      const data = await res.json();
+      setResetMsg(`已重置 ${data.cleared ?? 0} 個鎖定`);
+    } catch {
+      setResetMsg('重置失敗，請重試');
+    } finally {
+      setResetting(false);
+      setTimeout(() => setResetMsg(''), 4000);
+    }
+  };
 
   const saveCloud = async () => {
     setCloudSaving(true); setCloudMsg('');
@@ -451,6 +468,20 @@ export default function SettingsPage() {
 
         {/* Data */}
         <Section title="🗑️ 資料管理">
+          {/* Reset all LINE locks */}
+          {resetMsg && (
+            <div className={`mb-3 px-3 py-2 rounded-xl text-xs font-semibold ${
+              resetMsg.includes('失敗') ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'
+            }`}>{resetMsg}</div>
+          )}
+          <button
+            onClick={handleResetAllLocks}
+            disabled={resetting}
+            className="w-full py-3 rounded-xl bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-sm font-semibold mb-3 disabled:opacity-40"
+          >
+            {resetting ? '重置中…' : '🔓 重置所有推播鎖定'}
+          </button>
+          <p className="text-[#404060] text-xs mb-4 -mt-1">解除所有幣種的 7 天鎖定，讓下次分析可以重新推播</p>
           <button
             onClick={() => { if (confirm('確定清除所有歷史信號？')) clearSignals(); }}
             className="w-full py-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm font-semibold"

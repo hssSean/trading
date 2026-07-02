@@ -310,25 +310,60 @@ export function generateSignals(
 
   // ── BUILD SIGNALS ─────────────────────────────────────────────
   const slBuffer  = Math.max(atrVal * 1.5, price * 0.01);
-  // TP fallback: 2.0x and 3.5x risk (raised from 1.5x / 61.8% extension)
-  const minTpDist = slBuffer * MIN_RR;
+
+  // ── LONG: find best limit-order entry level BELOW current price ─
+  // Strategy: higher-TF sets direction; lower-TF waits for pullback to OB/SR
+  let longEntry = price;
+  const pendingBullOB = obs
+    .filter(o => o.type === 'bullish' && !o.mitigated
+               && o.high < price * 0.997 && o.high > price * 0.93)
+    .sort((a, b) => b.high - a.high)[0]; // closest bullish OB below
+  const pendingSupport = srLevels
+    .filter(l => l.type === 'support' && l.price < price * 0.997 && l.price > price * 0.93)
+    .sort((a, b) => b.price - a.price)[0]; // closest support below
+  if (pendingBullOB && (!pendingSupport || pendingBullOB.high >= pendingSupport.price)) {
+    longEntry = (pendingBullOB.high + pendingBullOB.low) / 2;
+    longOB    = pendingBullOB;
+  } else if (pendingSupport) {
+    longEntry = pendingSupport.price;
+    longSR    = pendingSupport;
+  }
+  // If no level found below → entry at current price (already at optimal zone)
+  if (longEntry < price * 0.997) longReasons.push('掛限價單，待回測入場');
+
+  // ── SHORT: find best limit-order entry level ABOVE current price ─
+  let shortEntry = price;
+  const pendingBearOB = obs
+    .filter(o => o.type === 'bearish' && !o.mitigated
+               && o.low > price * 1.003 && o.low < price * 1.07)
+    .sort((a, b) => a.low - b.low)[0]; // closest bearish OB above
+  const pendingResistance = srLevels
+    .filter(l => l.type === 'resistance' && l.price > price * 1.003 && l.price < price * 1.07)
+    .sort((a, b) => a.price - b.price)[0]; // closest resistance above
+  if (pendingBearOB && (!pendingResistance || pendingBearOB.low <= pendingResistance.price)) {
+    shortEntry = (pendingBearOB.high + pendingBearOB.low) / 2;
+    shortOB    = pendingBearOB;
+  } else if (pendingResistance) {
+    shortEntry = pendingResistance.price;
+    shortSR    = pendingResistance;
+  }
+  if (shortEntry > price * 1.003) shortReasons.push('掛限價單，待反彈入場');
 
   // LONG — only fires when clearly stronger than short
   if (longScore >= effectiveMinScore && longScore > shortScore) {
-    const sl  = longOB  ? Math.min(longOB.low  * 0.995, price - slBuffer)
-              : longSR  ? Math.min(longSR.price * 0.995, price - slBuffer)
-              : price - slBuffer;
-    const risk   = Math.max(price - sl, 1e-6);
-    const tp1Raw = resistance ? resistance.price : price + risk * 2.0;
-    const tp1    = Math.max(tp1Raw, price + risk * MIN_RR);
-    // TP2: next resistance or 3.5x risk extension
+    const sl  = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
+              : longSR  ? Math.min(longSR.price * 0.995, longEntry - slBuffer)
+              : longEntry - slBuffer;
+    const risk   = Math.max(longEntry - sl, 1e-6);
+    const tp1Raw = resistance ? resistance.price : longEntry + risk * 2.0;
+    const tp1    = Math.max(tp1Raw, longEntry + risk * MIN_RR);
     const nextR  = srLevels.find((l) => l.type === 'resistance' && l.price > tp1 * 1.005);
-    const tp2    = nextR ? nextR.price : price + risk * 3.5;
-    const rr     = parseFloat(((tp1 - price) / risk).toFixed(2));
+    const tp2    = nextR ? nextR.price : longEntry + risk * 3.5;
+    const rr     = parseFloat(((tp1 - longEntry) / risk).toFixed(2));
     signals.push({
       id: simpleId(), symbol, direction: 'LONG',
       strength: scoreToStrength(longScore), score: longScore,
-      entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
+      entry: longEntry, takeProfits: [tp1, tp2], stopLoss: sl,
       riskReward: rr, timeframe, timestamp: Date.now(),
       reasons: longReasons, orderBlock: longOB, fvg: longFVG,
       srLevel: longSR ?? support ?? undefined, indicators: ind, isRead: false,
@@ -337,20 +372,19 @@ export function generateSignals(
 
   // SHORT — only fires when clearly stronger than long
   if (shortScore >= effectiveMinScore && shortScore > longScore) {
-    const sl  = shortOB ? Math.max(shortOB.high * 1.005, price + slBuffer)
-              : shortSR ? Math.max(shortSR.price * 1.005, price + slBuffer)
-              : price + slBuffer;
-    const risk   = Math.max(sl - price, 1e-6);
-    const tp1Raw = support ? support.price : price - risk * 2.0;
-    const tp1    = Math.min(tp1Raw, price - risk * MIN_RR);
-    // TP2: next support or 3.5x risk extension
+    const sl  = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)
+              : shortSR ? Math.max(shortSR.price * 1.005, shortEntry + slBuffer)
+              : shortEntry + slBuffer;
+    const risk   = Math.max(sl - shortEntry, 1e-6);
+    const tp1Raw = support ? support.price : shortEntry - risk * 2.0;
+    const tp1    = Math.min(tp1Raw, shortEntry - risk * MIN_RR);
     const nextS  = srLevels.find((l) => l.type === 'support' && l.price < tp1 * 0.995);
-    const tp2    = nextS ? nextS.price : price - risk * 3.5;
-    const rr     = parseFloat(((price - tp1) / risk).toFixed(2));
+    const tp2    = nextS ? nextS.price : shortEntry - risk * 3.5;
+    const rr     = parseFloat(((shortEntry - tp1) / risk).toFixed(2));
     signals.push({
       id: simpleId(), symbol, direction: 'SHORT',
       strength: scoreToStrength(shortScore), score: shortScore,
-      entry: price, takeProfits: [tp1, tp2], stopLoss: sl,
+      entry: shortEntry, takeProfits: [tp1, tp2], stopLoss: sl,
       riskReward: rr, timeframe, timestamp: Date.now(),
       reasons: shortReasons, orderBlock: shortOB, fvg: shortFVG,
       srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
