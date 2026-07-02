@@ -228,6 +228,29 @@ export default function SettingsPage() {
           </div>
         </Section>
 
+        {/* Account Size */}
+        <Section title="💰 帳戶資金（倉位計算用）">
+          <p className="text-[#606080] text-xs mb-2 leading-5">
+            設定後，每張信號卡會根據 <span className="text-[#F0B90B]">1% 風險原則</span> 自動計算建議倉位大小
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              value={settings.accountSize}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (!isNaN(v) && v > 0) updateSettings({ accountSize: v });
+              }}
+              placeholder="1000"
+              className="input-field flex-1"
+            />
+            <span className="text-[#606080] text-sm shrink-0">USDT</span>
+          </div>
+          <p className="text-[#404060] text-xs mt-2">
+            每筆最大虧損 = {(settings.accountSize * 0.01).toFixed(0)} USDT（帳戶 1%）
+          </p>
+        </Section>
+
         {/* Signal Strength */}
         <Section title="📶 最低信號強度">
           <div className="space-y-2">

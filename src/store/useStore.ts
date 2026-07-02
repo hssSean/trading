@@ -10,7 +10,17 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultTimeframes: ['4h', '1h'],
   vibrationEnabled: true,
   soundEnabled: false,
+  accountSize: 1000,
 };
+
+// ── Ephemeral alert shown when auto-close fires ───────────────
+export interface AutoCloseAlert {
+  id:         string;
+  symbol:     string;
+  result:     TradeResult;
+  pnlPercent: number;
+  closedAt:   number;
+}
 
 export function makeCoin(symbol: string, timeframes: Timeframe[]): WatchedCoin {
   const base = symbol.replace('USDT', '');
@@ -43,6 +53,7 @@ interface StoreState {
   lineUserId: string;
   webhookSecret: string;
   _hasHydrated: boolean;
+  autoCloseAlerts: AutoCloseAlert[];   // ephemeral — not persisted
 
   setHasHydrated: (v: boolean) => void;
   addCoin: (symbol: string) => void;
@@ -59,6 +70,9 @@ interface StoreState {
   closeTrade: (id: string, result: TradeResult, exitPrice: number) => void;
   deleteTrade: (id: string) => void;
   hasActiveTrade: (symbol: string) => boolean;
+  // Auto-close alerts
+  addAutoCloseAlert: (a: Omit<AutoCloseAlert, 'id'>) => void;
+  dismissAutoCloseAlert: (id: string) => void;
 }
 
 const safeStorage = typeof window !== 'undefined' ? localStorage : {
@@ -78,6 +92,7 @@ export const useStore = create<StoreState>()(
       lineUserId: '',
       webhookSecret: 'abc123',
       _hasHydrated: false,
+      autoCloseAlerts: [],
 
       setHasHydrated: (v) => set({ _hasHydrated: v }),
 
@@ -144,15 +159,12 @@ export const useStore = create<StoreState>()(
       updateSettings: (patch) =>
         set((s) => ({ settings: { ...s.settings, ...patch } })),
 
-      setLine: (token, userId) =>
-        set({ lineToken: token, lineUserId: userId }),
-
+      setLine: (token, userId) => set({ lineToken: token, lineUserId: userId }),
       setWebhookSecret: (secret) => set({ webhookSecret: secret }),
 
       // ── Trade journal ──────────────────────────────────────
       addTrade: (signal) => {
         const existing = get().trades;
-        // Skip if same coin already has a pending trade
         if (existing.some((t) => t.symbol === signal.symbol && !t.result)) return;
         const trade: TradeRecord = {
           id: `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -175,7 +187,7 @@ export const useStore = create<StoreState>()(
       closeTrade: (id, result, exitPrice) => {
         set((s) => ({
           trades: s.trades.map((t) => {
-            if (t.id !== id) return t;
+            if (t.id !== id || t.result) return t; // skip already-closed
             const pnl = t.direction === 'LONG'
               ? ((exitPrice - t.entry) / t.entry) * 100
               : ((t.entry - exitPrice) / t.entry) * 100;
@@ -189,6 +201,20 @@ export const useStore = create<StoreState>()(
 
       hasActiveTrade: (symbol) =>
         get().trades.some((t) => t.symbol === symbol && !t.result),
+
+      // ── Auto-close alerts (ephemeral, not persisted) ───────
+      addAutoCloseAlert: (a) =>
+        set((s) => ({
+          autoCloseAlerts: [
+            { ...a, id: `acl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` },
+            ...s.autoCloseAlerts,
+          ].slice(0, 8),
+        })),
+
+      dismissAutoCloseAlert: (id) =>
+        set((s) => ({
+          autoCloseAlerts: s.autoCloseAlerts.filter((a) => a.id !== id),
+        })),
     }),
     {
       name: 'crypto-trader-v2',
@@ -201,6 +227,7 @@ export const useStore = create<StoreState>()(
         lineToken: s.lineToken,
         lineUserId: s.lineUserId,
         webhookSecret: s.webhookSecret,
+        // autoCloseAlerts intentionally excluded — ephemeral
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);

@@ -106,6 +106,7 @@ export interface AppSettings {
   defaultTimeframes: Timeframe[];
   vibrationEnabled: boolean;
   soundEnabled: boolean;
+  accountSize: number; // USDT, for position sizing (1% risk rule)
 }
 
 export type TradeResult = 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | 'MANUAL_CLOSE';

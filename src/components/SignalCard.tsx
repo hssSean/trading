@@ -15,10 +15,17 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   const isLong    = signal.direction === 'LONG';
   const tp1       = signal.takeProfits?.[0];
   const tp2       = signal.takeProfits?.[1];
-  const addTrade  = useStore((s) => s.addTrade);
-  const hasTrade  = useStore((s) => s.trades.some((t) => t.symbol === signal.symbol && !t.result));
-  const justAdded = useStore((s) => s.trades.some((t) => t.signalId === signal.id));
+  const addTrade   = useStore((s) => s.addTrade);
+  const hasTrade   = useStore((s) => s.trades.some((t) => t.symbol === signal.symbol && !t.result));
+  const justAdded  = useStore((s) => s.trades.some((t) => t.signalId === signal.id));
+  const accountSize = useStore((s) => s.settings.accountSize);
   const [flash, setFlash] = useState(false);
+
+  // Position sizing: 1% risk rule
+  const stopDistPct   = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
+  const riskUSDT      = accountSize * 0.01;
+  const positionUSDT  = stopDistPct > 0 ? Math.round(riskUSDT / stopDistPct) : 0;
+  const isHighVol     = signal.reasons.some((r) => r.startsWith('⚠ 高波動'));
 
   const handleAddTrade = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -87,6 +94,22 @@ export function SignalCard({ signal, onClick, compact }: Props) {
             label={isLong ? '預期漲幅' : '預期跌幅'}
             value={`${(Math.abs(tp1 - signal.entry) / signal.entry * 100).toFixed(1)}%`}
           />
+        )}
+      </div>
+
+      {/* ── Position size + volatility ── */}
+      <div className="flex items-center gap-2 mb-2">
+        <div className="flex-1 bg-[#1A1A26] rounded-xl px-3 py-2">
+          <p className="text-[#606080] text-[9px]">建議倉位（1% 風險）</p>
+          <p className="text-[#EAEAF4] font-bold text-xs mt-0.5">
+            {positionUSDT > 0 ? `$${positionUSDT.toLocaleString()} USDT` : '—'}
+            <span className="text-[#404060] font-normal ml-1">（虧損上限 ${riskUSDT.toFixed(0)}）</span>
+          </p>
+        </div>
+        {isHighVol && (
+          <span className="text-xs font-semibold px-2 py-1 rounded-xl bg-orange-500/20 text-orange-400 border border-orange-500/30 shrink-0">
+            高波動
+          </span>
         )}
       </div>
 
