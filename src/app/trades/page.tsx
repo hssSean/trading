@@ -71,8 +71,11 @@ export default function TradesPage() {
   const [syncMsg,    setSyncMsg]    = useState('');
   const [showManual,      setShowManual]      = useState(false);
   const [showDetailStats, setShowDetailStats] = useState(false);
-  const [editingNote, setEditingNote] = useState<string | null>(null); // trade id
-  const [noteText,    setNoteText]    = useState('');
+  const [editingNote,  setEditingNote]  = useState<string | null>(null); // trade id
+  const [noteText,     setNoteText]     = useState('');
+  const [editingEntry, setEditingEntry] = useState<string | null>(null); // trade id
+  const [entryText,    setEntryText]    = useState('');
+  const [actualEntry,  setActualEntry]  = useState(''); // in close modal
   const [mSymbol,    setMSymbol]    = useState('');
   const [mDir,       setMDir]       = useState<'LONG' | 'SHORT'>('LONG');
   const [mEntry,     setMEntry]     = useState('');
@@ -159,10 +162,16 @@ export default function TradesPage() {
     if (!closeModal) return;
     const price = parseFloat(exitPrice);
     if (isNaN(price) || price <= 0) return;
+    // Apply corrected actual entry price BEFORE closing so PnL is accurate
+    const parsedActualEntry = parseFloat(actualEntry);
+    if (!isNaN(parsedActualEntry) && parsedActualEntry > 0 && parsedActualEntry !== closeModal.entry) {
+      updateTrade(closeModal.id, { entry: parsedActualEntry });
+    }
     closeTrade(closeModal.id, exitResult, price);
     unlockCoin(closeModal.symbol);
     setCloseModal(null);
     setExitPrice('');
+    setActualEntry('');
   };
 
   const handleManualUnlock = useCallback((symbol: string) => {
@@ -449,8 +458,11 @@ export default function TradesPage() {
                     {isPending ? (
                       <>
                         {livePx > 0 && (
-                          <span className={`text-xs font-bold ${livePnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
+                          <span className="flex items-center gap-1">
+                            <span className={`text-xs font-bold ${livePnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
+                            </span>
+                            <span className="text-[#404060] text-[9px]">掛單</span>
                           </span>
                         )}
                         <span className="text-xs bg-[#F0B90B]/20 text-[#F0B90B] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
@@ -467,7 +479,44 @@ export default function TradesPage() {
 
                 {/* Price grid */}
                 <div className="grid grid-cols-4 gap-1 mb-2">
-                  <PriceCell label="進場" value={`$${fmtPrice(trade.entry)}`} />
+                  {/* Entry price — editable for pending trades (limit order may not have filled) */}
+                  {isPending ? (
+                    editingEntry === trade.id ? (
+                      <div className="bg-[#0A0A0F] rounded-xl p-1.5 col-span-1">
+                        <p className="text-[#606080] text-[9px] text-center mb-1">實際進場價</p>
+                        <input
+                          autoFocus
+                          type="number"
+                          value={entryText}
+                          onChange={e => setEntryText(e.target.value)}
+                          className="w-full bg-[#1A1A26] border border-[#F0B90B]/40 rounded-lg px-1.5 py-1 text-[10px] text-center text-[#F0B90B] outline-none"
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              const v = parseFloat(entryText);
+                              if (!isNaN(v) && v > 0) updateTrade(trade.id, { entry: v });
+                              setEditingEntry(null);
+                            }
+                            if (e.key === 'Escape') setEditingEntry(null);
+                          }}
+                          onBlur={() => {
+                            const v = parseFloat(entryText);
+                            if (!isNaN(v) && v > 0) updateTrade(trade.id, { entry: v });
+                            setEditingEntry(null);
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => { setEditingEntry(trade.id); setEntryText(String(trade.entry)); }}
+                        className="bg-[#0A0A0F] rounded-xl p-2 text-center active:opacity-70 w-full"
+                      >
+                        <p className="text-[#606080] text-[9px]">進場 ✏</p>
+                        <p className="font-bold text-[11px] mt-0.5 text-[#EAEAF4]">${fmtPrice(trade.entry)}</p>
+                      </button>
+                    )
+                  ) : (
+                    <PriceCell label="進場" value={`$${fmtPrice(trade.entry)}`} />
+                  )}
                   <PriceCell label="TP1"  value={`$${fmtPrice(trade.tp1)}`}      color="#00C851" />
                   <PriceCell label="TP2"  value={`$${fmtPrice(trade.tp2)}`}      color="#00A040" />
                   <PriceCell label="止損" value={`$${fmtPrice(trade.stopLoss)}`} color="#FF4444" />
@@ -681,7 +730,7 @@ export default function TradesPage() {
 
       {/* Manual close modal */}
       {closeModal && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-end" onClick={e => e.target === e.currentTarget && setCloseModal(null)}>
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-end" onClick={e => { if (e.target === e.currentTarget) { setCloseModal(null); setActualEntry(''); } }}>
           <div className="w-full max-w-xl mx-auto bg-[#12121A] rounded-t-3xl p-6 pb-10 border-t border-[#1E1E2E]">
             <div className="w-12 h-1 bg-[#1E1E2E] rounded-full mx-auto mb-5" />
             <h2 className="text-[#EAEAF4] text-lg font-extrabold mb-1">手動記錄結果</h2>
@@ -696,6 +745,22 @@ export default function TradesPage() {
                   {RESULT_LABEL[r]}
                 </button>
               ))}
+            </div>
+
+            {/* Actual entry correction — for limit orders that filled at a different price */}
+            <div className="bg-[#0D1020] border border-[#F0B90B]/15 rounded-xl px-3 py-2.5 mb-3">
+              <p className="text-[#6B5A20] text-[9px] font-bold uppercase tracking-widest mb-1">實際成交進場價（限價單修正）</p>
+              <p className="text-[#404060] text-[10px] mb-2">
+                掛單設定價：<span className="text-[#EAEAF4] font-semibold">${closeModal ? fmtPrice(closeModal.entry) : ''}</span>
+                {' '}— 若實際成交價不同，請填入以下欄位
+              </p>
+              <input
+                value={actualEntry}
+                onChange={e => setActualEntry(e.target.value)}
+                placeholder={`留空 = 沿用掛單價 $${closeModal ? fmtPrice(closeModal.entry) : ''}`}
+                type="number"
+                className="input-field text-sm"
+              />
             </div>
 
             <p className="text-[#606080] text-xs mb-1">出場價格</p>
