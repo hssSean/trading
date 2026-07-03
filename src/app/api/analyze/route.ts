@@ -295,6 +295,56 @@ export async function GET(req: NextRequest) {
             pendingSignals.push(topStrong);
             if (pendingSignals.length > 50) pendingSignals.splice(0, pendingSignals.length - 50);
           }
+
+          // ── Write trade directly to Supabase ─────────────────────
+          // This ensures the client always gets the EXACT entry/TP/SL
+          // sent to LINE, regardless of when they open the app.
+          // Uses line_user_id to find the Supabase account owner.
+          const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+          const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+          if (sbUrl && sbKey && lineUserId) {
+            try {
+              const { createClient: mkAdmin } = await import('@supabase/supabase-js');
+              const admin = mkAdmin(sbUrl, sbKey);
+
+              const { data: profile } = await admin
+                .from('profiles')
+                .select('id')
+                .eq('line_user_id', lineUserId)
+                .maybeSingle();
+
+              if (profile?.id) {
+                // Only insert if no open trade for this symbol
+                const { count } = await admin
+                  .from('trades')
+                  .select('id', { count: 'exact', head: true })
+                  .eq('user_id', profile.id)
+                  .eq('symbol', topStrong.symbol)
+                  .is('result', null);
+
+                if (!count) {
+                  const tradeId = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                  await admin.from('trades').insert({
+                    id:          tradeId,
+                    user_id:     profile.id,
+                    signal_id:   topStrong.id,
+                    symbol:      topStrong.symbol,
+                    direction:   topStrong.direction,
+                    timeframe:   topStrong.timeframe,
+                    strength:    topStrong.strength,
+                    score:       topStrong.score,
+                    entry:       topStrong.entry,
+                    stop_loss:   topStrong.stopLoss,
+                    tp1:         topStrong.takeProfits[0],
+                    tp2:         topStrong.takeProfits[1] ?? topStrong.takeProfits[0],
+                    reasons:     topStrong.reasons,
+                    entry_notes: '',
+                    opened_at:   Date.now(),
+                  });
+                }
+              }
+            } catch { /* non-critical — Redis fallback still covers client pickup */ }
+          }
         }
       }
 

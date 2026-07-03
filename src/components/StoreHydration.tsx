@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
-import { TradeRecord } from '@/types';
+import { TradeRecord, TradingSignal } from '@/types';
 
 // ── Supabase sync helpers ──────────────────────────────────────────
 
@@ -20,29 +20,38 @@ async function loadFromSupabase(userId: string) {
   // Load trades
   const { data: tr } = await supabase.from('trades').select('*').eq('user_id', userId).order('opened_at', { ascending: false });
   if (tr && tr.length > 0) {
-    const existingIds = new Set(store.trades.map(t => t.id));
-    const incoming: TradeRecord[] = tr
-      .filter(r => !existingIds.has(r.id))
-      .map(r => ({
-        id:            r.id,
-        signalId:      r.signal_id ?? '',
-        symbol:        r.symbol,
-        direction:     r.direction,
-        timeframe:     r.timeframe,
-        strength:      r.strength ?? 'STRONG',
-        score:         r.score ?? 0,
-        entry:         r.entry,
-        stopLoss:      r.stop_loss,
-        tp1:           r.tp1,
-        tp2:           r.tp2,
-        reasons:       r.reasons ?? [],
-        entryNotes:    r.entry_notes ?? '',
-        openedAt:      r.opened_at,
-        closedAt:      r.closed_at ?? undefined,
-        result:        r.result ?? undefined,
-        exitPrice:     r.exit_price ?? undefined,
-        pnlPercent:    r.pnl_percent ?? undefined,
-      }));
+    const existingMap = new Map(store.trades.map(t => [t.id, t]));
+    const incoming: TradeRecord[] = [];
+
+    for (const r of tr) {
+      if (!existingMap.has(r.id)) {
+        // New trade from server (e.g. auto-inserted when LINE was sent)
+        incoming.push({
+          id:         r.id,
+          signalId:   r.signal_id ?? '',
+          symbol:     r.symbol,
+          direction:  r.direction,
+          timeframe:  r.timeframe,
+          strength:   r.strength ?? 'STRONG',
+          score:      r.score ?? 0,
+          entry:      r.entry,
+          stopLoss:   r.stop_loss,
+          tp1:        r.tp1,
+          tp2:        r.tp2,
+          reasons:    r.reasons ?? [],
+          entryNotes: r.entry_notes ?? '',
+          openedAt:   r.opened_at,
+          closedAt:   r.closed_at ?? undefined,
+          result:     r.result ?? undefined,
+          exitPrice:  r.exit_price ?? undefined,
+          pnlPercent: r.pnl_percent ?? undefined,
+        });
+      } else if (r.result && !existingMap.get(r.id)!.result) {
+        // Trade was closed by server-side TP/SL monitor — update local copy
+        useStore.getState().closeTrade(r.id, r.result, r.exit_price ?? 0);
+      }
+    }
+
     if (incoming.length > 0) {
       useStore.setState(s => ({ trades: [...incoming, ...s.trades].slice(0, 500) }));
     }
@@ -148,6 +157,28 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     syncDoneRef.current = true;
     loadFromSupabase(userId).catch(() => {});
 
+    // ── Pick up pending LINE signals immediately on app open ──────
+    // This ensures the trade from the LINE push is added with the
+    // EXACT entry/TP/SL the server computed — before the user can
+    // accidentally add a freshly-regenerated signal with wrong entry.
+    const pickupPending = async () => {
+      const secret = useStore.getState().webhookSecret;
+      try {
+        const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
+        if (!res.ok) return;
+        const data: { signals?: TradingSignal[] } = await res.json();
+        for (const sig of data.signals ?? []) {
+          const s = useStore.getState();
+          if (s.trades.some(t => t.signalId === sig.id)) continue;
+          if (!s.coins.find(c => c.symbol === sig.symbol)) s.addCoin(sig.symbol);
+          if (!useStore.getState().hasActiveTrade(sig.symbol)) {
+            useStore.getState().addTrade(sig);
+          }
+        }
+      } catch { /* ignore network errors */ }
+    };
+    pickupPending();
+
     // Auto-save on state changes (debounced 4s)
     const unsub = useStore.subscribe(() => {
       if (!useStore.getState().userId) return;
@@ -159,14 +190,23 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     });
 
     // Periodic save every 10 min
-    const periodic = setInterval(() => {
+    const periodicSave = setInterval(() => {
       const uid = useStore.getState().userId;
       if (uid) saveToSupabase(uid).catch(() => {});
     }, 10 * 60 * 1000);
 
+    // Periodic re-sync from Supabase every 2 min:
+    // - picks up trades inserted by server (LINE signal auto-write)
+    // - reflects server-side TP/SL auto-close results
+    const periodicSync = setInterval(async () => {
+      const uid = useStore.getState().userId;
+      if (uid) await loadFromSupabase(uid).catch(() => {});
+    }, 2 * 60 * 1000);
+
     return () => {
       unsub();
-      clearInterval(periodic);
+      clearInterval(periodicSave);
+      clearInterval(periodicSync);
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [userId, hasHydrated]);
