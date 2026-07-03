@@ -1,6 +1,7 @@
 'use client';
 import { useState, useCallback, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
+import { deleteTradePermanently } from '@/components/StoreHydration';
 import { TradeResult, TradingSignal } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
@@ -55,7 +56,6 @@ export default function TradesPage() {
   const coins           = useStore(s => s.coins);
   const accountSize     = useStore(s => s.settings.accountSize);
   const closeTrade      = useStore(s => s.closeTrade);
-  const deleteTrade     = useStore(s => s.deleteTrade);
   const addManualTrade  = useStore(s => s.addManualTrade);
   const updateTrade     = useStore(s => s.updateTrade);
 
@@ -606,7 +606,7 @@ export default function TradesPage() {
                         </button>
                       </>
                     )}
-                    <button onClick={() => deleteTrade(trade.id)} className="text-xs px-2 py-1 rounded-xl text-[#404060] active:opacity-70">
+                    <button onClick={() => deleteTradePermanently(trade.id)} className="text-xs px-2 py-1 rounded-xl text-[#404060] active:opacity-70">
                       刪除
                     </button>
                   </div>

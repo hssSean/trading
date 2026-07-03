@@ -114,10 +114,21 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   const { createClient } = await import('@supabase/supabase-js');
   const admin = createClient(url, key);
 
-  const { data: trades } = await admin
+  // Resolve the LINE user's Supabase profile so we only monitor their trades
+  let ownerFilter: string | null = null;
+  if (lineUserId) {
+    const { data: prof } = await admin
+      .from('profiles').select('id').eq('line_user_id', lineUserId).maybeSingle();
+    ownerFilter = prof?.id ?? null;
+  }
+
+  let query = admin
     .from('trades')
     .select('id, symbol, direction, entry, stop_loss, tp1, tp2')
     .is('result', null);
+  if (ownerFilter) query = query.eq('user_id', ownerFilter);
+
+  const { data: trades } = await query;
 
   if (!trades || trades.length === 0) return { monitored: 0, closed: 0 };
 

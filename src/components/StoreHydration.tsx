@@ -5,6 +5,21 @@ import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
 import { TradeRecord, TradingSignal } from '@/types';
 
+// Tracks IDs deleted in this session so loadFromSupabase won't re-add them.
+// Module-level so it persists across re-renders and periodic syncs.
+const sessionDeletedIds = new Set<string>();
+
+export async function deleteTradePermanently(tradeId: string): Promise<void> {
+  sessionDeletedIds.add(tradeId);
+  useStore.getState().deleteTrade(tradeId);
+  const userId = useStore.getState().userId;
+  if (userId) {
+    try {
+      await supabase.from('trades').delete().eq('id', tradeId).eq('user_id', userId);
+    } catch { /* best effort — sessionDeletedIds prevents re-add even if this fails */ }
+  }
+}
+
 // ── Supabase sync helpers ──────────────────────────────────────────
 
 async function loadFromSupabase(userId: string) {
@@ -20,13 +35,27 @@ async function loadFromSupabase(userId: string) {
   // Load trades
   const { data: tr } = await supabase.from('trades').select('*').eq('user_id', userId).order('opened_at', { ascending: false });
   if (tr && tr.length > 0) {
-    const existingMap = new Map(store.trades.map(t => [t.id, t]));
+    const existingMap       = new Map(store.trades.map(t => [t.id, t]));
+    const existingSignalIds = new Set(store.trades.map(t => t.signalId).filter(Boolean));
+    const activeSymbols     = new Set(store.trades.filter(t => !t.result).map(t => t.symbol));
     const incoming: TradeRecord[] = [];
 
     for (const r of tr) {
-      if (!existingMap.has(r.id)) {
-        // New trade from server (e.g. auto-inserted when LINE was sent)
-        incoming.push({
+      // Skip trades deleted in this session — don't let the sync resurrect them
+      if (sessionDeletedIds.has(r.id)) continue;
+
+      if (existingMap.has(r.id)) {
+        // Trade already in local store — check if server closed it while app was open
+        if (r.result && !existingMap.get(r.id)!.result) {
+          useStore.getState().closeTrade(r.id, r.result, r.exit_price ?? 0);
+        }
+      } else if (
+        // Guard against duplicates: same signalId already added (e.g. by pickupPending)
+        !existingSignalIds.has(r.signal_id ?? '') &&
+        // Guard against duplicates: already have an open trade for this symbol
+        (r.result != null || !activeSymbols.has(r.symbol))
+      ) {
+        const record: TradeRecord = {
           id:         r.id,
           signalId:   r.signal_id ?? '',
           symbol:     r.symbol,
@@ -45,10 +74,10 @@ async function loadFromSupabase(userId: string) {
           result:     r.result ?? undefined,
           exitPrice:  r.exit_price ?? undefined,
           pnlPercent: r.pnl_percent ?? undefined,
-        });
-      } else if (r.result && !existingMap.get(r.id)!.result) {
-        // Trade was closed by server-side TP/SL monitor — update local copy
-        useStore.getState().closeTrade(r.id, r.result, r.exit_price ?? 0);
+        };
+        incoming.push(record);
+        existingSignalIds.add(r.signal_id ?? '');
+        if (!r.result) activeSymbols.add(r.symbol);
       }
     }
 
@@ -155,12 +184,11 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!userId || !hasHydrated || syncDoneRef.current) return;
     syncDoneRef.current = true;
-    loadFromSupabase(userId).catch(() => {});
 
-    // ── Pick up pending LINE signals immediately on app open ──────
-    // This ensures the trade from the LINE push is added with the
-    // EXACT entry/TP/SL the server computed — before the user can
-    // accidentally add a freshly-regenerated signal with wrong entry.
+    // ── Pick up pending LINE signals AFTER Supabase load ─────────
+    // Running after load ensures the store already has all server-written
+    // trades, so signalId and activeSymbol dedup works correctly and we
+    // don't create a duplicate trade that loadFromSupabase would then add.
     const pickupPending = async () => {
       const secret = useStore.getState().webhookSecret;
       try {
@@ -177,7 +205,10 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
         }
       } catch { /* ignore network errors */ }
     };
-    pickupPending();
+
+    loadFromSupabase(userId)
+      .then(() => pickupPending())
+      .catch(() => pickupPending());
 
     // Auto-save on state changes (debounced 4s)
     const unsub = useStore.subscribe(() => {
