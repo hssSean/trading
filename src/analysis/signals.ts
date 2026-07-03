@@ -8,8 +8,8 @@ function simpleId(): string {
 }
 
 function scoreToStrength(score: number): SignalStrength {
-  if (score >= 16) return 'STRONG';
-  if (score >= 9)  return 'MODERATE';
+  if (score >= 19) return 'STRONG';
+  if (score >= 13) return 'MODERATE';
   return 'WEAK';
 }
 
@@ -131,10 +131,12 @@ function detectRsiDivergence(
 // Stop  : ATR × 1.5 (dynamic).
 // Volatility gate: ATR > 3% of price requires score +4.
 // ════════════════════════════════════════════════════════════════
-const MIN_SCORE      = 9;
-const MIN_RR         = 2.0;
-const HIGH_VOLIT_PCT = 0.03; // ATR > 3% = high volatility
-const HIGH_VOLIT_EXTRA = 4;  // extra score required in high-vol
+const MIN_SCORE        = 13;   // raised: fewer but higher-quality signals
+const MIN_RR           = 2.0;
+const HIGH_VOLIT_PCT   = 0.03; // ATR > 3% = high volatility
+const HIGH_VOLIT_EXTRA = 5;    // raised from 4
+const RANGING_PENALTY  = 4;    // extra required when market is ranging/choppy
+const NO_LEVEL_PENALTY = 3;    // deducted when no OB/SR limit level exists
 
 // htfBias: if provided, bonus +3 for aligned direction, penalty -2 for opposite
 export function generateSignals(
@@ -145,8 +147,9 @@ export function generateSignals(
 ): TradingSignal[] {
   if (candles.length < 55) return [];
 
-  const cur    = candles[candles.length - 1];
-  const price  = cur.close;
+  const cur             = candles[candles.length - 1];
+  const price           = cur.close;
+  const isBullishCandle = cur.close > cur.open;
 
   const ind       = computeIndicators(candles);
   const prevInd   = computeIndicators(candles.slice(0, -1));
@@ -162,12 +165,13 @@ export function generateSignals(
   const patterns   = detectCandlePatterns(candles);
   const divergence = detectRsiDivergence(candles);
 
-  // Volatility adaptive threshold
-  const effectiveMinScore = atrPct > HIGH_VOLIT_PCT ? MIN_SCORE + HIGH_VOLIT_EXTRA : MIN_SCORE;
+  // Adaptive threshold: tighter in ranging markets AND high volatility
+  const rangingPenalty    = structure.trend === 'ranging' ? RANGING_PENALTY : 0;
+  const effectiveMinScore = MIN_SCORE + rangingPenalty + (atrPct > HIGH_VOLIT_PCT ? HIGH_VOLIT_EXTRA : 0);
 
   const aboveEma200     = price > ind.ema200;
   const ema20AboveEma50 = ind.ema20 > ind.ema50;
-  const nearEma200      = Math.abs(price - ind.ema200) / ind.ema200 < 0.015;
+  const nearEma200      = Math.abs(price - ind.ema200) / ind.ema200 < 0.008; // tightened ±1.5% → ±0.8%
   const allowLong       = aboveEma200 || nearEma200;
   const allowShort      = !aboveEma200 || nearEma200;
 
@@ -219,7 +223,7 @@ export function generateSignals(
     }
 
     if (ind.rsi < 35)      { longScore += 4; longReasons.push(`RSI 超賣 ${ind.rsi.toFixed(1)}`); }
-    else if (ind.rsi < 50) { longScore += 2; longReasons.push(`RSI 回調 ${ind.rsi.toFixed(1)}`); }
+    else if (ind.rsi < 45) { longScore += 2; longReasons.push(`RSI 超賣回升 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi > 70) longScore -= 3;
 
     // RSI bullish divergence
@@ -232,14 +236,14 @@ export function generateSignals(
       longScore += 1; longReasons.push('MACD 動能增強');
     }
 
-    if (volRatio >= 1.5) { longScore += 2; longReasons.push(`量能放大 ${volRatio.toFixed(1)}×`); }
+    if (volRatio >= 1.5 && isBullishCandle) { longScore += 2; longReasons.push(`多頭量能放大 ${volRatio.toFixed(1)}×`); }
 
     // Candle patterns
     if (patterns.bullishEngulfing) { longScore += 2; longReasons.push('看漲吞噬K線'); }
     if (patterns.hammer)           { longScore += 2; longReasons.push('錘子線'); }
 
-    // High-vol note
-    if (atrPct > HIGH_VOLIT_PCT) longReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）需 ${effectiveMinScore} 分`);
+    if (structure.trend === 'ranging') longReasons.push(`⚠ 橫盤整理，最低需 ${effectiveMinScore} 分`);
+    if (atrPct > HIGH_VOLIT_PCT)       longReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）需 ${effectiveMinScore} 分`);
   }
 
   // ── SHORT SCORING ─────────────────────────────────────────────
@@ -282,7 +286,7 @@ export function generateSignals(
     }
 
     if (ind.rsi > 65)      { shortScore += 4; shortReasons.push(`RSI 超買 ${ind.rsi.toFixed(1)}`); }
-    else if (ind.rsi > 50) { shortScore += 2; shortReasons.push(`RSI 反彈 ${ind.rsi.toFixed(1)}`); }
+    else if (ind.rsi > 55) { shortScore += 2; shortReasons.push(`RSI 超買回落 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi < 30) shortScore -= 3;
 
     // RSI bearish divergence
@@ -295,13 +299,14 @@ export function generateSignals(
       shortScore += 1; shortReasons.push('MACD 跌勢加速');
     }
 
-    if (volRatio >= 1.5) { shortScore += 2; shortReasons.push(`量能放大 ${volRatio.toFixed(1)}×`); }
+    if (volRatio >= 1.5 && !isBullishCandle) { shortScore += 2; shortReasons.push(`空頭量能放大 ${volRatio.toFixed(1)}×`); }
 
     // Candle patterns
     if (patterns.bearishEngulfing) { shortScore += 2; shortReasons.push('看跌吞噬K線'); }
     if (patterns.shootingStar)     { shortScore += 2; shortReasons.push('流星線'); }
 
-    if (atrPct > HIGH_VOLIT_PCT) shortReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）需 ${effectiveMinScore} 分`);
+    if (structure.trend === 'ranging') shortReasons.push(`⚠ 橫盤整理，最低需 ${effectiveMinScore} 分`);
+    if (atrPct > HIGH_VOLIT_PCT)       shortReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）需 ${effectiveMinScore} 分`);
   }
 
   // ── HTF Bias bonus / penalty ──────────────────────────────────
@@ -375,8 +380,13 @@ export function generateSignals(
     longEntry = pendingSupport.price;
     longSR    = pendingSupport;
   }
-  // If no level found below → entry at current price (already at optimal zone)
-  if (longEntry < price * 0.997) longReasons.push('掛限價單，待回測入場');
+  if (longEntry < price * 0.997) {
+    longReasons.push('掛限價單，待回測入場');
+  } else {
+    // No OB/SR level found → would enter at market price; penalise to filter weak setups
+    longScore -= NO_LEVEL_PENALTY;
+    longReasons.push('⚠ 無明確回測位，扣 3 分');
+  }
 
   // ── SHORT: find best limit-order entry level ABOVE current price ─
   let shortEntry = price;
@@ -394,7 +404,12 @@ export function generateSignals(
     shortEntry = pendingResistance.price;
     shortSR    = pendingResistance;
   }
-  if (shortEntry > price * 1.003) shortReasons.push('掛限價單，待反彈入場');
+  if (shortEntry > price * 1.003) {
+    shortReasons.push('掛限價單，待反彈入場');
+  } else {
+    shortScore -= NO_LEVEL_PENALTY;
+    shortReasons.push('⚠ 無明確回測位，扣 3 分');
+  }
 
   // LONG — only fires when clearly stronger than short
   if (longScore >= effectiveMinScore && longScore > shortScore) {

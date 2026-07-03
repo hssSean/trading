@@ -23,7 +23,7 @@ interface LockEntry {
 }
 const LOCK_TTL_SEC  = 7 * 24 * 3600; // 7-day failsafe expiry
 const COOLDOWN_MS   = 6 * 60 * 60 * 1000;
-const STRONG_THRESHOLD = 16;
+const STRONG_THRESHOLD = 19;
 
 let _redis: Redis | null = null;
 function getRedis(): Redis | null {

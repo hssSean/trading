@@ -1,5 +1,5 @@
 'use client';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
 import { TradeResult, TradingSignal } from '@/types';
 
@@ -41,9 +41,19 @@ function unlockCoin(symbol: string) {
   fetch(`/api/analyze?secret=${encodeURIComponent(secret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
 }
 
+function calcPositionSize(entry: number, sl: number, accountSize: number) {
+  const stopPct = Math.abs(entry - sl) / entry;
+  if (stopPct <= 0) return null;
+  const riskUSDT    = accountSize * 0.01;
+  const positionUSDT = riskUSDT / stopPct;
+  const coins        = positionUSDT / entry;
+  return { riskUSDT, positionUSDT, coins };
+}
+
 export default function TradesPage() {
   const trades          = useStore(s => s.trades);
   const coins           = useStore(s => s.coins);
+  const accountSize     = useStore(s => s.settings.accountSize);
   const closeTrade      = useStore(s => s.closeTrade);
   const deleteTrade     = useStore(s => s.deleteTrade);
   const addManualTrade  = useStore(s => s.addManualTrade);
@@ -59,7 +69,8 @@ export default function TradesPage() {
   const [unlockMsg,  setUnlockMsg]  = useState<Record<string, boolean>>({});
   const [syncing,    setSyncing]    = useState(false);
   const [syncMsg,    setSyncMsg]    = useState('');
-  const [showManual,  setShowManual]  = useState(false);
+  const [showManual,      setShowManual]      = useState(false);
+  const [showDetailStats, setShowDetailStats] = useState(false);
   const [editingNote, setEditingNote] = useState<string | null>(null); // trade id
   const [noteText,    setNoteText]    = useState('');
   const [mSymbol,    setMSymbol]    = useState('');
@@ -83,6 +94,40 @@ export default function TradesPage() {
   const totalWin  = wins.reduce((a, t) => a + Math.max(t.pnlPercent ?? 0, 0), 0);
   const totalLoss = Math.abs(losses.reduce((a, t) => a + Math.min(t.pnlPercent ?? 0, 0), 0));
   const profitFactor = totalLoss > 0 ? (totalWin / totalLoss).toFixed(2) : null;
+
+  // ── Extended stats ───────────────────────────────────────────
+  const avgWin  = wins.length  > 0 ? (wins.reduce((a, t)   => a + (t.pnlPercent ?? 0), 0) / wins.length).toFixed(2)  : null;
+  const avgLoss = losses.length > 0 ? (losses.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / losses.length).toFixed(2) : null;
+
+  const longClosed  = closed.filter(t => t.direction === 'LONG');
+  const shortClosed = closed.filter(t => t.direction === 'SHORT');
+  const longWins    = longClosed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+  const shortWins   = shortClosed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+  const longWinRate  = longClosed.length  > 0 ? Math.round(longWins.length  / longClosed.length  * 100) : null;
+  const shortWinRate = shortClosed.length > 0 ? Math.round(shortWins.length / shortClosed.length * 100) : null;
+
+  const maxConsecLoss = useMemo(() => {
+    let best = 0; let cur = 0;
+    [...trades]
+      .filter(t => t.result)
+      .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
+      .forEach(t => {
+        if (t.result === 'LOSS') { cur++; best = Math.max(best, cur); } else cur = 0;
+      });
+    return best;
+  }, [trades]);
+
+  const { bestCoin, worstCoin } = useMemo(() => {
+    const map = new Map<string, { total: number; count: number }>();
+    closed.forEach(t => {
+      const c = map.get(t.symbol) ?? { total: 0, count: 0 };
+      map.set(t.symbol, { total: c.total + (t.pnlPercent ?? 0), count: c.count + 1 });
+    });
+    const arr = Array.from(map.entries()).map(([s, v]) => ({ symbol: s, avg: +(v.total / v.count).toFixed(2) }));
+    if (arr.length === 0) return { bestCoin: null, worstCoin: null };
+    const sorted = [...arr].sort((a, b) => b.avg - a.avg);
+    return { bestCoin: sorted[0], worstCoin: sorted[sorted.length - 1] };
+  }, [closed]);
 
   const filtered = filter === 'PENDING' ? pending : filter === 'CLOSED' ? closed : trades;
 
@@ -233,6 +278,87 @@ export default function TradesPage() {
           />
         </div>
 
+        {/* Expandable detail stats */}
+        {closed.length > 0 && (
+          <div className="mb-2">
+            <button
+              onClick={() => setShowDetailStats(v => !v)}
+              className="w-full flex items-center justify-between px-3 py-2 bg-[#0D0D16] rounded-xl border border-[#1E1E2E] text-xs text-[#606080] active:opacity-70"
+            >
+              <span className="font-semibold">詳細績效分析</span>
+              <span>{showDetailStats ? '▲ 收起' : '▼ 展開'}</span>
+            </button>
+            {showDetailStats && (
+              <div className="mt-1.5 bg-[#0D0D16] border border-[#1E1E2E] rounded-xl p-3 space-y-3">
+                {/* Direction breakdown */}
+                <div>
+                  <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">多/空勝率</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-[#0A1A10] rounded-lg px-3 py-2">
+                      <p className="text-[#00C851] text-[9px] font-bold mb-0.5">▲ 做多 ({longClosed.length}筆)</p>
+                      <p className={`text-base font-extrabold ${longWinRate !== null && longWinRate >= 50 ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+                        {longWinRate !== null ? `${longWinRate}%` : '—'}
+                      </p>
+                      <p className="text-[#404060] text-[9px]">{longWins.length}W {longClosed.length - longWins.length}L</p>
+                    </div>
+                    <div className="bg-[#1A0A0A] rounded-lg px-3 py-2">
+                      <p className="text-[#FF4444] text-[9px] font-bold mb-0.5">▼ 做空 ({shortClosed.length}筆)</p>
+                      <p className={`text-base font-extrabold ${shortWinRate !== null && shortWinRate >= 50 ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+                        {shortWinRate !== null ? `${shortWinRate}%` : '—'}
+                      </p>
+                      <p className="text-[#404060] text-[9px]">{shortWins.length}W {shortClosed.length - shortWins.length}L</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Avg win / loss + consecutive */}
+                <div>
+                  <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">損益分析</p>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[#404060] text-[8px]">平均獲利</p>
+                      <p className="text-[#00C851] text-xs font-bold">{avgWin ? `+${avgWin}%` : '—'}</p>
+                    </div>
+                    <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[#404060] text-[8px]">平均虧損</p>
+                      <p className="text-[#FF4444] text-xs font-bold">{avgLoss ? `${avgLoss}%` : '—'}</p>
+                    </div>
+                    <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[#404060] text-[8px]">最大連虧</p>
+                      <p className={`text-xs font-bold ${maxConsecLoss >= 3 ? 'text-red-400' : 'text-[#A0A0C0]'}`}>
+                        {maxConsecLoss} 筆
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Best / worst coin */}
+                {(bestCoin || worstCoin) && (
+                  <div>
+                    <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">幣種表現</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {bestCoin && (
+                        <div className="bg-[#0A1A10] rounded-lg px-3 py-2">
+                          <p className="text-[#404060] text-[8px] mb-0.5">最佳幣種</p>
+                          <p className="text-[#EAEAF4] text-xs font-bold">{bestCoin.symbol.replace('USDT', '')}</p>
+                          <p className="text-[#00C851] text-xs">{bestCoin.avg >= 0 ? '+' : ''}{bestCoin.avg}%</p>
+                        </div>
+                      )}
+                      {worstCoin && worstCoin.symbol !== bestCoin?.symbol && (
+                        <div className="bg-[#1A0A0A] rounded-lg px-3 py-2">
+                          <p className="text-[#404060] text-[8px] mb-0.5">最差幣種</p>
+                          <p className="text-[#EAEAF4] text-xs font-bold">{worstCoin.symbol.replace('USDT', '')}</p>
+                          <p className="text-[#FF4444] text-xs">{worstCoin.avg >= 0 ? '+' : ''}{worstCoin.avg}%</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Portfolio Heat */}
         {pending.length > 0 && (
           <div className={`rounded-2xl px-4 py-2.5 mb-3 border flex items-center justify-between ${
@@ -364,6 +490,32 @@ export default function TradesPage() {
                     </div>
                   </div>
                 )}
+
+                {/* Position sizing (1% risk rule) for pending trades */}
+                {isPending && (() => {
+                  const pos = calcPositionSize(trade.entry, trade.stopLoss, accountSize);
+                  if (!pos) return null;
+                  const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
+                  return (
+                    <div className="mb-2 bg-[#0D1020] border border-[#F0B90B]/15 rounded-xl px-3 py-2">
+                      <p className="text-[#6B5A20] text-[9px] font-bold uppercase tracking-widest mb-1.5">倉位計算（1% 風險）</p>
+                      <div className="grid grid-cols-3 gap-1">
+                        <div className="text-center">
+                          <p className="text-[#404060] text-[8px]">風險金額</p>
+                          <p className="text-[#F0B90B] text-xs font-bold">${pos.riskUSDT.toFixed(0)}</p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[#404060] text-[8px]">建議倉位</p>
+                          <p className="text-[#EAEAF4] text-xs font-bold">${pos.positionUSDT.toFixed(0)}</p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[#404060] text-[8px]">止損幅度</p>
+                          <p className={`text-xs font-bold ${slPct > 5 ? 'text-red-400' : 'text-[#A0A0C0]'}`}>{slPct.toFixed(2)}%</p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Auto-generated entry reasons from signal analysis */}
                 {trade.reasons && trade.reasons.length > 0 && (
