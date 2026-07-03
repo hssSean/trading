@@ -235,7 +235,7 @@ export const useStore = create<StoreState>()(
         set((s) => ({ trades: s.trades.filter((t) => t.id !== id) })),
 
       hasActiveTrade: (symbol) =>
-        get().trades.some((t) => t.symbol === symbol && !t.result),
+        get().trades.some((t) => t.symbol === symbol && !t.result && t.status !== 'waiting'),
 
       // ── Auto-close alerts (ephemeral, not persisted) ───────
       addAutoCloseAlert: (a) =>

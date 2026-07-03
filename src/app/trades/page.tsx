@@ -1,8 +1,8 @@
 'use client';
 import { useState, useCallback, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
-import { deleteTradePermanently } from '@/components/StoreHydration';
-import { TradeResult, TradingSignal } from '@/types';
+import { deleteTradePermanently, loadFromSupabase } from '@/components/StoreHydration';
+import { TradeResult } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
   WIN_TP1:      'TP1 達標',
@@ -71,11 +71,9 @@ export default function TradesPage() {
   const [syncMsg,    setSyncMsg]    = useState('');
   const [showManual,      setShowManual]      = useState(false);
   const [showDetailStats, setShowDetailStats] = useState(false);
-  const [editingNote,  setEditingNote]  = useState<string | null>(null); // trade id
-  const [noteText,     setNoteText]     = useState('');
-  const [editingEntry, setEditingEntry] = useState<string | null>(null); // trade id
-  const [entryText,    setEntryText]    = useState('');
-  const [actualEntry,  setActualEntry]  = useState(''); // in close modal
+  const [editingNote, setEditingNote] = useState<string | null>(null); // trade id
+  const [noteText,    setNoteText]    = useState('');
+  const [actualEntry, setActualEntry] = useState(''); // in close modal
   const [mSymbol,    setMSymbol]    = useState('');
   const [mDir,       setMDir]       = useState<'LONG' | 'SHORT'>('LONG');
   const [mEntry,     setMEntry]     = useState('');
@@ -184,16 +182,12 @@ export default function TradesPage() {
     setSyncing(true);
     setSyncMsg('');
     try {
-      const secret = useStore.getState().webhookSecret;
-      const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
-      const data: { signals?: TradingSignal[] } = await res.json();
-      let added = 0;
-      for (const sig of data.signals ?? []) {
-        const s = useStore.getState();
-        if (s.trades.some(t => t.signalId === sig.id)) continue;
-        if (!s.coins.find(c => c.symbol === sig.symbol)) s.addCoin(sig.symbol);
-        if (!s.hasActiveTrade(sig.symbol)) { s.addTrade(sig); added++; }
-      }
+      const uid = useStore.getState().userId;
+      if (!uid) { setSyncMsg('請先登入'); return; }
+      const before = useStore.getState().trades.length;
+      await loadFromSupabase(uid);
+      const after = useStore.getState().trades.length;
+      const added = after - before;
       setSyncMsg(added > 0 ? `已同步 ${added} 筆新紀錄` : '已是最新，無新紀錄');
     } catch {
       setSyncMsg('同步失敗，請重試');
@@ -458,11 +452,8 @@ export default function TradesPage() {
                     {isPending ? (
                       <>
                         {livePx > 0 && (
-                          <span className="flex items-center gap-1">
-                            <span className={`text-xs font-bold ${livePnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                              {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
-                            </span>
-                            <span className="text-[#404060] text-[9px]">掛單</span>
+                          <span className={`text-xs font-bold ${livePnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
                           </span>
                         )}
                         <span className="text-xs bg-[#F0B90B]/20 text-[#F0B90B] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
@@ -479,44 +470,7 @@ export default function TradesPage() {
 
                 {/* Price grid */}
                 <div className="grid grid-cols-4 gap-1 mb-2">
-                  {/* Entry price — editable for pending trades (limit order may not have filled) */}
-                  {isPending ? (
-                    editingEntry === trade.id ? (
-                      <div className="bg-[#0A0A0F] rounded-xl p-1.5 col-span-1">
-                        <p className="text-[#606080] text-[9px] text-center mb-1">實際進場價</p>
-                        <input
-                          autoFocus
-                          type="number"
-                          value={entryText}
-                          onChange={e => setEntryText(e.target.value)}
-                          className="w-full bg-[#1A1A26] border border-[#F0B90B]/40 rounded-lg px-1.5 py-1 text-[10px] text-center text-[#F0B90B] outline-none"
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') {
-                              const v = parseFloat(entryText);
-                              if (!isNaN(v) && v > 0) updateTrade(trade.id, { entry: v });
-                              setEditingEntry(null);
-                            }
-                            if (e.key === 'Escape') setEditingEntry(null);
-                          }}
-                          onBlur={() => {
-                            const v = parseFloat(entryText);
-                            if (!isNaN(v) && v > 0) updateTrade(trade.id, { entry: v });
-                            setEditingEntry(null);
-                          }}
-                        />
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => { setEditingEntry(trade.id); setEntryText(String(trade.entry)); }}
-                        className="bg-[#0A0A0F] rounded-xl p-2 text-center active:opacity-70 w-full"
-                      >
-                        <p className="text-[#606080] text-[9px]">進場 ✏</p>
-                        <p className="font-bold text-[11px] mt-0.5 text-[#EAEAF4]">${fmtPrice(trade.entry)}</p>
-                      </button>
-                    )
-                  ) : (
-                    <PriceCell label="進場" value={`$${fmtPrice(trade.entry)}`} />
-                  )}
+                  <PriceCell label="進場" value={`$${fmtPrice(trade.entry)}`} />
                   <PriceCell label="TP1"  value={`$${fmtPrice(trade.tp1)}`}      color="#00C851" />
                   <PriceCell label="TP2"  value={`$${fmtPrice(trade.tp2)}`}      color="#00A040" />
                   <PriceCell label="止損" value={`$${fmtPrice(trade.stopLoss)}`} color="#FF4444" />

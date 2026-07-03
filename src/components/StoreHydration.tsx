@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
-import { TradeRecord, TradingSignal } from '@/types';
+import { TradeRecord } from '@/types';
 
 // Tracks IDs deleted in this session so loadFromSupabase won't re-add them.
 // Module-level so it persists across re-renders and periodic syncs.
@@ -22,7 +22,7 @@ export async function deleteTradePermanently(tradeId: string): Promise<void> {
 
 // ── Supabase sync helpers ──────────────────────────────────────────
 
-async function loadFromSupabase(userId: string) {
+export async function loadFromSupabase(userId: string) {
   const store = useStore.getState();
 
   // Load watchlist
@@ -32,48 +32,62 @@ async function loadFromSupabase(userId: string) {
     wl.forEach(r => { if (!existing.has(r.symbol)) store.addCoin(r.symbol); });
   }
 
-  // Load trades
-  const { data: tr } = await supabase.from('trades').select('*').eq('user_id', userId).order('opened_at', { ascending: false });
+  // Load trades — only 'active' or closed trades (not 'waiting' limit orders pending fill)
+  const { data: tr } = await supabase
+    .from('trades')
+    .select('*')
+    .eq('user_id', userId)
+    .or('status.eq.active,status.is.null,result.not.is.null')
+    .order('opened_at', { ascending: false });
   if (tr && tr.length > 0) {
     const existingMap       = new Map(store.trades.map(t => [t.id, t]));
     const existingSignalIds = new Set(store.trades.map(t => t.signalId).filter(Boolean));
-    const activeSymbols     = new Set(store.trades.filter(t => !t.result).map(t => t.symbol));
+    const activeSymbols     = new Set(store.trades.filter(t => !t.result && t.status !== 'waiting').map(t => t.symbol));
     const incoming: TradeRecord[] = [];
 
     for (const r of tr) {
+      // Skip waiting limit orders — server will upgrade to 'active' on fill
+      if (r.status === 'waiting') continue;
       // Skip trades deleted in this session — don't let the sync resurrect them
       if (sessionDeletedIds.has(r.id)) continue;
 
       if (existingMap.has(r.id)) {
         // Trade already in local store — check if server closed it while app was open
-        if (r.result && !existingMap.get(r.id)!.result) {
+        const local = existingMap.get(r.id)!;
+        if (r.result && !local.result) {
           useStore.getState().closeTrade(r.id, r.result, r.exit_price ?? 0);
         }
+        // If server upgraded status from waiting → active (fill confirmed)
+        if (r.status === 'active' && local.status === 'waiting') {
+          useStore.setState(s => ({
+            trades: s.trades.map(t => t.id === r.id ? { ...t, status: 'active' as const } : t),
+          }));
+        }
       } else if (
-        // Guard against duplicates: same signalId already added (e.g. by pickupPending)
         !existingSignalIds.has(r.signal_id ?? '') &&
-        // Guard against duplicates: already have an open trade for this symbol
         (r.result != null || !activeSymbols.has(r.symbol))
       ) {
         const record: TradeRecord = {
-          id:         r.id,
-          signalId:   r.signal_id ?? '',
-          symbol:     r.symbol,
-          direction:  r.direction,
-          timeframe:  r.timeframe,
-          strength:   r.strength ?? 'STRONG',
-          score:      r.score ?? 0,
-          entry:      r.entry,
-          stopLoss:   r.stop_loss,
-          tp1:        r.tp1,
-          tp2:        r.tp2,
-          reasons:    r.reasons ?? [],
-          entryNotes: r.entry_notes ?? '',
-          openedAt:   r.opened_at,
-          closedAt:   r.closed_at ?? undefined,
-          result:     r.result ?? undefined,
-          exitPrice:  r.exit_price ?? undefined,
-          pnlPercent: r.pnl_percent ?? undefined,
+          id:          r.id,
+          signalId:    r.signal_id ?? '',
+          symbol:      r.symbol,
+          direction:   r.direction,
+          timeframe:   r.timeframe,
+          strength:    r.strength ?? 'STRONG',
+          score:       r.score ?? 0,
+          entry:       r.entry,
+          stopLoss:    r.stop_loss,
+          tp1:         r.tp1,
+          tp2:         r.tp2,
+          reasons:     r.reasons ?? [],
+          entryNotes:  r.entry_notes ?? '',
+          openedAt:    r.opened_at,
+          closedAt:    r.closed_at ?? undefined,
+          result:      r.result ?? undefined,
+          exitPrice:   r.exit_price ?? undefined,
+          pnlPercent:  r.pnl_percent ?? undefined,
+          status:      (r.status as 'waiting' | 'active' | undefined) ?? 'active',
+          signalPrice: r.signal_price ?? undefined,
         };
         incoming.push(record);
         existingSignalIds.add(r.signal_id ?? '');
@@ -114,28 +128,32 @@ async function saveToSupabase(userId: string) {
   const watchRows = s.coins.map(c => ({ user_id: userId, symbol: c.symbol, timeframes: c.timeframes }));
   if (watchRows.length > 0) await supabase.from('watchlist').upsert(watchRows, { onConflict: 'user_id,symbol' });
 
-  // Upsert trades
-  const tradeRows = s.trades.map(t => ({
-    id:             t.id,
-    user_id:        userId,
-    signal_id:      t.signalId,
-    symbol:         t.symbol,
-    direction:      t.direction,
-    timeframe:      t.timeframe,
-    strength:       t.strength,
-    score:          t.score,
-    entry:          t.entry,
-    stop_loss:      t.stopLoss,
-    tp1:            t.tp1,
-    tp2:            t.tp2,
-    reasons:        t.reasons,
-    entry_notes:    t.entryNotes ?? '',
-    opened_at:      t.openedAt,
-    closed_at:      t.closedAt ?? null,
-    result:         t.result ?? null,
-    exit_price:     t.exitPrice ?? null,
-    pnl_percent:    t.pnlPercent ?? null,
-  }));
+  // Upsert trades (skip waiting — server manages those directly)
+  const tradeRows = s.trades
+    .filter(t => t.status !== 'waiting')
+    .map(t => ({
+      id:           t.id,
+      user_id:      userId,
+      signal_id:    t.signalId,
+      symbol:       t.symbol,
+      direction:    t.direction,
+      timeframe:    t.timeframe,
+      strength:     t.strength,
+      score:        t.score,
+      entry:        t.entry,
+      stop_loss:    t.stopLoss,
+      tp1:          t.tp1,
+      tp2:          t.tp2,
+      reasons:      t.reasons,
+      entry_notes:  t.entryNotes ?? '',
+      opened_at:    t.openedAt,
+      closed_at:    t.closedAt ?? null,
+      result:       t.result ?? null,
+      exit_price:   t.exitPrice ?? null,
+      pnl_percent:  t.pnlPercent ?? null,
+      status:       t.status ?? 'active',
+      signal_price: t.signalPrice ?? null,
+    }));
   if (tradeRows.length > 0) await supabase.from('trades').upsert(tradeRows, { onConflict: 'id' });
 }
 
@@ -185,30 +203,9 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     if (!userId || !hasHydrated || syncDoneRef.current) return;
     syncDoneRef.current = true;
 
-    // ── Pick up pending LINE signals AFTER Supabase load ─────────
-    // Running after load ensures the store already has all server-written
-    // trades, so signalId and activeSymbol dedup works correctly and we
-    // don't create a duplicate trade that loadFromSupabase would then add.
-    const pickupPending = async () => {
-      const secret = useStore.getState().webhookSecret;
-      try {
-        const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
-        if (!res.ok) return;
-        const data: { signals?: TradingSignal[] } = await res.json();
-        for (const sig of data.signals ?? []) {
-          const s = useStore.getState();
-          if (s.trades.some(t => t.signalId === sig.id)) continue;
-          if (!s.coins.find(c => c.symbol === sig.symbol)) s.addCoin(sig.symbol);
-          if (!useStore.getState().hasActiveTrade(sig.symbol)) {
-            useStore.getState().addTrade(sig);
-          }
-        }
-      } catch { /* ignore network errors */ }
-    };
-
-    loadFromSupabase(userId)
-      .then(() => pickupPending())
-      .catch(() => pickupPending());
+    // Server writes trades directly to Supabase with status='waiting'|'active',
+    // so we only need to load from Supabase — no manual pickup needed.
+    loadFromSupabase(userId).catch(() => {});
 
     // Auto-save on state changes (debounced 4s)
     const unsub = useStore.subscribe(() => {

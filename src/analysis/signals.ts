@@ -429,6 +429,7 @@ export function generateSignals(
       riskReward: rr, timeframe, timestamp: Date.now(),
       reasons: longReasons, orderBlock: longOB, fvg: longFVG,
       srLevel: longSR ?? support ?? undefined, indicators: ind, isRead: false,
+      signalPrice: price,
     });
   }
 
@@ -450,6 +451,7 @@ export function generateSignals(
       riskReward: rr, timeframe, timestamp: Date.now(),
       reasons: shortReasons, orderBlock: shortOB, fvg: shortFVG,
       srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
+      signalPrice: price,
     });
   }
 

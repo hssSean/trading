@@ -83,6 +83,7 @@ export interface TradingSignal {
   srLevel?: SRLevel;
   indicators: TechnicalIndicators;
   isRead: boolean;
+  signalPrice?: number; // market price at the moment the signal was generated
 }
 
 export interface WatchedCoin {
@@ -130,6 +131,8 @@ export interface TradeRecord {
   result?: TradeResult;
   exitPrice?: number;
   pnlPercent?: number;
+  status?: 'waiting' | 'active'; // 'waiting' = limit order not yet filled
+  signalPrice?: number;           // market price when signal was generated
 }
 
 export interface AnalysisResult {

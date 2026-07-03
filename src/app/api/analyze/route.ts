@@ -105,16 +105,16 @@ function checkAuth(req: NextRequest): boolean {
   return true;
 }
 
-// ── Server-side TP/SL monitor (runs every cron tick) ──────────
+// ── Server-side monitor: fill detection + TP/SL (runs every cron tick) ──
 async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  if (!url || !key) return { monitored: 0, closed: 0 };
+  if (!url || !key) return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
 
   const { createClient } = await import('@supabase/supabase-js');
   const admin = createClient(url, key);
 
-  // Resolve the LINE user's Supabase profile so we only monitor their trades
+  // Resolve the LINE user's profile so we only touch their trades
   let ownerFilter: string | null = null;
   if (lineUserId) {
     const { data: prof } = await admin
@@ -122,29 +122,96 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     ownerFilter = prof?.id ?? null;
   }
 
-  let query = admin
-    .from('trades')
-    .select('id, symbol, direction, entry, stop_loss, tp1, tp2')
-    .is('result', null);
-  if (ownerFilter) query = query.eq('user_id', ownerFilter);
+  // ── Fetch waiting and active trades separately ────────────────
+  const baseQ = () => {
+    let q = admin.from('trades').select(
+      'id, symbol, direction, entry, stop_loss, tp1, tp2, signal_price, strength, score, timeframe, reasons'
+    ).is('result', null);
+    if (ownerFilter) q = q.eq('user_id', ownerFilter);
+    return q;
+  };
 
-  const { data: trades } = await query;
+  const [{ data: waitingRaw }, { data: activeRaw }] = await Promise.all([
+    baseQ().eq('status', 'waiting'),
+    // active OR legacy rows (null status from before migration)
+    baseQ().or('status.eq.active,status.is.null'),
+  ]);
 
-  if (!trades || trades.length === 0) return { monitored: 0, closed: 0 };
+  const waiting = (waitingRaw ?? []) as any[];
+  const active  = (activeRaw  ?? []) as any[];
 
-  // Fetch prices for unique symbols
-  const symbolSet = new Set(trades.map((t: any) => t.symbol as string));
-  const symbols = Array.from(symbolSet);
+  if (waiting.length === 0 && active.length === 0) {
+    return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
+  }
+
+  // Fetch prices for all relevant symbols in one batch
+  const allSymbols = Array.from(new Set([...waiting, ...active].map(t => t.symbol as string)));
   const prices: Record<string, number> = {};
-  await Promise.all(symbols.map(async sym => {
+  await Promise.all(allSymbols.map(async sym => {
     try {
       const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`);
       if (res.ok) prices[sym] = parseFloat((await res.json()).price);
     } catch {}
   }));
 
-  let closed = 0;
-  for (const trade of trades as any[]) {
+  let filled = 0, cancelled = 0, closed = 0;
+
+  // ── Phase 1: fill detection for waiting (limit) orders ───────
+  for (const trade of waiting) {
+    const price = prices[trade.symbol];
+    if (!price) continue;
+
+    const isLong = trade.direction === 'LONG';
+
+    // Fill: price reached the limit entry level (±0.3% tolerance for cron latency)
+    const isFilled = isLong
+      ? price <= trade.entry * 1.003
+      : price >= trade.entry * 0.997;
+
+    // Auto-cancel: TP1 was hit before entry — price moved in the right direction
+    // but the limit order was never triggered (missed trade)
+    const isCancelled = !isFilled && (
+      isLong
+        ? price >= trade.tp1  // LONG: TP1 hit without pulling back to entry
+        : price <= trade.tp1  // SHORT: TP1 hit without bouncing up to entry
+    );
+
+    if (isFilled) {
+      await admin.from('trades')
+        .update({ status: 'active', opened_at: Date.now() })
+        .eq('id', trade.id);
+      filled++;
+
+      if (lineToken && lineUserId) {
+        const dir = isLong ? '▲ 做多' : '▼ 做空';
+        const sym = trade.symbol.replace('USDT', '/USDT');
+        const msg =
+          `【✅ 掛單成交】${sym}\n` +
+          `${dir} 進場已確認，已自動加入交易日誌\n` +
+          `成交價：$${price}\n` +
+          `TP1：$${trade.tp1} ｜ SL：$${trade.stop_loss}`;
+        await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+      }
+    } else if (isCancelled) {
+      // Price hit TP before entry — delete the pending record and unlock
+      await admin.from('trades').delete().eq('id', trade.id);
+      await unlockSymbol(trade.symbol);
+      cancelled++;
+
+      if (lineToken && lineUserId) {
+        const dir = isLong ? '▲ 做多' : '▼ 做空';
+        const sym = trade.symbol.replace('USDT', '/USDT');
+        const msg =
+          `【⚠️ 掛單未成交】${sym}\n` +
+          `${dir} 價格未回測至進場位 $${trade.entry}\n` +
+          `直接到達 TP1 $${trade.tp1}，掛單已自動取消`;
+        await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+      }
+    }
+  }
+
+  // ── Phase 2: TP/SL monitoring for active trades ───────────────
+  for (const trade of active) {
     const price = prices[trade.symbol];
     if (!price) continue;
 
@@ -153,13 +220,13 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     let closePrice = 0;
 
     if (isLong) {
-      if      (price >= trade.tp2)        { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
-      else if (price >= trade.tp1)        { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
-      else if (price <= trade.stop_loss)  { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
+      if      (price >= trade.tp2)       { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
+      else if (price >= trade.tp1)       { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
+      else if (price <= trade.stop_loss) { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
     } else {
-      if      (price <= trade.tp2)        { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
-      else if (price <= trade.tp1)        { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
-      else if (price >= trade.stop_loss)  { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
+      if      (price <= trade.tp2)       { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
+      else if (price <= trade.tp1)       { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
+      else if (price >= trade.stop_loss) { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
     }
     if (!closeResult) continue;
 
@@ -190,7 +257,8 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     }
     closed++;
   }
-  return { monitored: trades.length, closed };
+
+  return { monitored: active.length + waiting.length, closed, filled, cancelled };
 }
 
 // ── GET — run analysis + send LINE ────────────────────────────
@@ -325,7 +393,7 @@ export async function GET(req: NextRequest) {
                 .maybeSingle();
 
               if (profile?.id) {
-                // Only insert if no open trade for this symbol
+                // Only insert if no open/pending trade for this symbol
                 const { count } = await admin
                   .from('trades')
                   .select('id', { count: 'exact', head: true })
@@ -334,23 +402,28 @@ export async function GET(req: NextRequest) {
                   .is('result', null);
 
                 if (!count) {
+                  // Determine if this is a limit order (entry differs from current price by >0.3%)
+                  const sp = topStrong.signalPrice ?? 0;
+                  const isLimitOrder = sp > 0 && Math.abs(topStrong.entry - sp) / sp > 0.003;
                   const tradeId = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
                   await admin.from('trades').insert({
-                    id:          tradeId,
-                    user_id:     profile.id,
-                    signal_id:   topStrong.id,
-                    symbol:      topStrong.symbol,
-                    direction:   topStrong.direction,
-                    timeframe:   topStrong.timeframe,
-                    strength:    topStrong.strength,
-                    score:       topStrong.score,
-                    entry:       topStrong.entry,
-                    stop_loss:   topStrong.stopLoss,
-                    tp1:         topStrong.takeProfits[0],
-                    tp2:         topStrong.takeProfits[1] ?? topStrong.takeProfits[0],
-                    reasons:     topStrong.reasons,
-                    entry_notes: '',
-                    opened_at:   Date.now(),
+                    id:           tradeId,
+                    user_id:      profile.id,
+                    signal_id:    topStrong.id,
+                    symbol:       topStrong.symbol,
+                    direction:    topStrong.direction,
+                    timeframe:    topStrong.timeframe,
+                    strength:     topStrong.strength,
+                    score:        topStrong.score,
+                    entry:        topStrong.entry,
+                    stop_loss:    topStrong.stopLoss,
+                    tp1:          topStrong.takeProfits[0],
+                    tp2:          topStrong.takeProfits[1] ?? topStrong.takeProfits[0],
+                    reasons:      topStrong.reasons,
+                    entry_notes:  '',
+                    opened_at:    Date.now(),
+                    status:       isLimitOrder ? 'waiting' : 'active',
+                    signal_price: sp,
                   });
                 }
               }
