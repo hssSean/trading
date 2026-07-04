@@ -98,6 +98,15 @@ export async function loadFromSupabase(userId: string) {
         const localBySig  = srvSignalId ? existingBySignal.get(srvSignalId) : undefined;
         if (localBySig) {
           // Different ID but same signalId — server is authoritative; push status to local trade
+          if (r.status === 'waiting' && localBySig.status !== 'waiting') {
+            // Server correctly has 'waiting' but local (created by old addTrade) has wrong status
+            useStore.setState(s => ({
+              trades: s.trades.map(t => t.signalId === srvSignalId
+                ? { ...t, status: 'waiting' as const, signalPrice: (r.signal_price as number | null) ?? t.signalPrice }
+                : t
+              ),
+            }));
+          }
           if (r.status === 'active' && localBySig.status === 'waiting') {
             useStore.setState(s => ({
               trades: s.trades.map(t => t.signalId === srvSignalId ? { ...t, status: 'active' as const } : t),
@@ -134,6 +143,61 @@ export async function loadFromSupabase(userId: string) {
       webhookSecret: prof.webhook_secret || s.webhookSecret,
       settings:      prof.settings ? { ...s.settings, ...(prof.settings as object) } : s.settings,
     }));
+  }
+
+  // Backup reconciliation: for open trades whose Supabase record is also 'active'
+  // (incorrectly created without waiting status), verify via current price and revert.
+  // Handles the case where both local and Supabase have wrong status.
+  await reconcileIncorrectlyActiveTrades(userId);
+}
+
+// Finds open trades that are marked active/undefined but whose signalPrice clearly
+// indicates an unfilled limit order, then confirms via Binance price before reverting
+// to 'waiting'. Only acts when price is >0.5% away from entry (safe margin).
+async function reconcileIncorrectlyActiveTrades(userId: string): Promise<void> {
+  const store = useStore.getState();
+  const suspects = store.trades.filter(t => {
+    if (t.result || t.status === 'waiting') return false;
+    const sp = t.signalPrice ?? 0;
+    if (sp === 0) return false;
+    const isLongLimit  = t.direction === 'LONG'  && sp > t.entry * 1.003;
+    const isShortLimit = t.direction === 'SHORT' && sp < t.entry * 0.997;
+    return isLongLimit || isShortLimit;
+  });
+  if (suspects.length === 0) return;
+
+  const symbols = Array.from(new Set(suspects.map(t => t.symbol)));
+  const prices: Record<string, number> = {};
+  try {
+    const symList = symbols.map(s => `"${s}"`).join(',');
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbols=[${symList}]`);
+    if (res.ok) {
+      const data = await res.json() as { symbol: string; price: string }[];
+      data.forEach((d: { symbol: string; price: string }) => { prices[d.symbol] = parseFloat(d.price); });
+    }
+  } catch { return; }
+
+  const toRevert: string[] = [];
+  for (const t of suspects) {
+    const price = prices[t.symbol];
+    if (!price) continue;
+    // 0.5% buffer: only revert when price is clearly away from entry (not just bouncing)
+    const clearlyUnfilled = t.direction === 'LONG'
+      ? price > t.entry * 1.005
+      : price < t.entry * 0.995;
+    if (clearlyUnfilled) toRevert.push(t.id);
+  }
+  if (toRevert.length === 0) return;
+
+  useStore.setState(s => ({
+    trades: s.trades.map(t => toRevert.includes(t.id) ? { ...t, status: 'waiting' as const } : t),
+  }));
+  if (userId) {
+    await Promise.all(
+      toRevert.map(id =>
+        supabase.from('trades').update({ status: 'waiting' }).eq('id', id).eq('user_id', userId)
+      )
+    );
   }
 }
 
