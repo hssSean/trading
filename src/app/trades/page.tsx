@@ -1,7 +1,8 @@
 'use client';
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useStore } from '@/store/useStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
+import { fetchCurrentPrice } from '@/api/binance';
 import { TradeResult } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
@@ -58,6 +59,30 @@ export default function TradesPage() {
   const closeTrade      = useStore(s => s.closeTrade);
   const addManualTrade  = useStore(s => s.addManualTrade);
   const updateTrade     = useStore(s => s.updateTrade);
+
+  // Poll prices for active (持倉中) trades so livePnl stays fresh.
+  // Reads directly from store inside the interval to avoid recreating it when trades change.
+  useEffect(() => {
+    const pollPrices = async () => {
+      const seen = new Set<string>();
+      const activeSymbols = useStore.getState().trades
+        .filter(t => !t.result && t.status !== 'waiting')
+        .map(t => t.symbol)
+        .filter(s => { if (seen.has(s)) return false; seen.add(s); return true; });
+      if (activeSymbols.length === 0) return;
+      for (const sym of activeSymbols) {
+        try {
+          const price = await fetchCurrentPrice(sym);
+          useStore.getState().updateCoin(sym, { currentPrice: price });
+        } catch { /* ignore per-symbol errors — next tick will retry */ }
+        await new Promise(r => setTimeout(r, 120)); // stagger to avoid 429
+      }
+    };
+
+    pollPrices(); // immediate on mount
+    const id = setInterval(pollPrices, 30_000);
+    return () => clearInterval(id);
+  }, []); // empty deps: interval reads store directly, no closure staleness
 
   const [closeModal, setCloseModal] = useState<{
     id: string; symbol: string; direction: 'LONG' | 'SHORT';
