@@ -127,6 +127,7 @@ export interface TradeRecord {
   reasons: string[];
   entryNotes?: string;
   openedAt: number;
+  filledAt?: number;           // timestamp when limit order was filled (undefined for market orders)
   closedAt?: number;
   result?: TradeResult;
   exitPrice?: number;

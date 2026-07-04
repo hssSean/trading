@@ -23,6 +23,17 @@ function getRedis(): Redis | null {
   return null;
 }
 
+async function checkRateLimit(r: Redis, secret: string): Promise<boolean> {
+  try {
+    const rlKey = `rl:sync:${secret.slice(0, 40)}`; // cap key length
+    const count = await r.incr(rlKey);
+    if (count === 1) await r.expire(rlKey, 60);
+    return count <= 20; // max 20 requests/minute per secret
+  } catch {
+    return true; // Redis error — don't block
+  }
+}
+
 // GET /api/sync?secret=xxx  — load cloud state
 export async function GET(req: NextRequest) {
   const secret = req.nextUrl.searchParams.get('secret');
@@ -30,6 +41,10 @@ export async function GET(req: NextRequest) {
 
   const r = getRedis();
   if (!r) return NextResponse.json({ ok: false, error: 'Redis not configured' }, { status: 503 });
+
+  if (!(await checkRateLimit(r, secret))) {
+    return NextResponse.json({ ok: false, error: 'rate limited' }, { status: 429 });
+  }
 
   try {
     const data = await r.get<CloudData>(`udata:${secret}`);
@@ -46,6 +61,10 @@ export async function POST(req: NextRequest) {
 
   const r = getRedis();
   if (!r) return NextResponse.json({ ok: false, error: 'Redis not configured' }, { status: 503 });
+
+  if (!(await checkRateLimit(r, secret))) {
+    return NextResponse.json({ ok: false, error: 'rate limited' }, { status: 429 });
+  }
 
   try {
     const body: CloudData = await req.json();

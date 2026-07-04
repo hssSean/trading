@@ -104,7 +104,7 @@ export default function SettingsPage() {
     try {
       const res = await fetch('/api/test-line', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-webhook-secret': secret.trim() || 'abc123' },
         body: JSON.stringify({ channelToken: token.trim(), userId: userId.trim() }),
       });
       const data = await res.json();

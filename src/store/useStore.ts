@@ -64,6 +64,8 @@ interface StoreState {
   markSignalRead: (signalId: string) => void;
   clearSignals: (symbol?: string) => void;
   updateSettings: (patch: Partial<AppSettings>) => void;
+  syncWarning: string | null;
+  setSyncWarning: (msg: string | null) => void;
   setLine: (token: string, userId: string) => void;
   setWebhookSecret: (secret: string) => void;
   setUserId: (id: string) => void;
@@ -94,10 +96,14 @@ export const useStore = create<StoreState>()(
       trades: [],
       lineToken: '',
       lineUserId: '',
-      webhookSecret: 'abc123',
+      webhookSecret: (() => {
+        try { if (typeof crypto !== 'undefined') return crypto.randomUUID(); } catch {}
+        return 'abc123';
+      })(),
       userId: '',
       _hasHydrated: false,
       autoCloseAlerts: [],
+      syncWarning: null,
 
       setHasHydrated: (v) => set({ _hasHydrated: v }),
 
@@ -164,6 +170,7 @@ export const useStore = create<StoreState>()(
       updateSettings: (patch) =>
         set((s) => ({ settings: { ...s.settings, ...patch } })),
 
+      setSyncWarning: (msg) => set({ syncWarning: msg }),
       setLine: (token, userId) => set({ lineToken: token, lineUserId: userId }),
       setWebhookSecret: (secret) => set({ webhookSecret: secret }),
       setUserId: (id) => set({ userId: id }),

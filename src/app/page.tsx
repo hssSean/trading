@@ -13,10 +13,14 @@ const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
 
 const DEFAULT_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 
-// ── Fast: price update + TP/SL detection (no candle fetch) ───────
-async function checkCoinPrice(symbol: string) {
+// ── Fast: price update + TP1 detection (no candle fetch) ─────────
+// All actual trade closes (TP2, SL, TP1 final) are handled by server cron
+// (monitorActiveTrades). Client only marks TP1 locally so the trade card
+// immediately shows "✅ TP1·等TP2" without waiting for the next 2-min sync.
+// Returns false when Binance rate-limits us (caller should stop the loop).
+async function checkCoinPrice(symbol: string): Promise<boolean> {
   const store = useStore.getState();
-  if (!store.coins.find((c) => c.symbol === symbol)) return;
+  if (!store.coins.find((c) => c.symbol === symbol)) return true;
   try {
     const ticker = await fetchTicker24h(symbol);
     const currentPrice = ticker.price;
@@ -26,31 +30,30 @@ async function checkCoinPrice(symbol: string) {
       priceChangePercent24h: ticker.priceChangePercent,
     });
 
+    // Mark TP1 locally for active (non-waiting, non-tp1_hit) trades
     const fresh = useStore.getState();
-    // Skip waiting limit orders — they aren't filled yet, no TP/SL to monitor
-    const pending = fresh.trades.filter((t) => t.symbol === symbol && !t.result && t.status !== 'waiting');
-    for (const trade of pending) {
-      let autoResult: 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | null = null;
-      let autoExit = 0;
-      if (trade.direction === 'LONG') {
-        if      (currentPrice >= trade.tp2)       { autoResult = 'WIN_TP2'; autoExit = trade.tp2; }
-        else if (currentPrice >= trade.tp1)       { autoResult = 'WIN_TP1'; autoExit = trade.tp1; }
-        else if (currentPrice <= trade.stopLoss)  { autoResult = 'LOSS';    autoExit = trade.stopLoss; }
-      } else {
-        if      (currentPrice <= trade.tp2)       { autoResult = 'WIN_TP2'; autoExit = trade.tp2; }
-        else if (currentPrice <= trade.tp1)       { autoResult = 'WIN_TP1'; autoExit = trade.tp1; }
-        else if (currentPrice >= trade.stopLoss)  { autoResult = 'LOSS';    autoExit = trade.stopLoss; }
-      }
-      if (autoResult) {
-        const pnl = trade.direction === 'LONG'
-          ? (autoExit - trade.entry) / trade.entry * 100
-          : (trade.entry - autoExit) / trade.entry * 100;
-        fresh.closeTrade(trade.id, autoResult, autoExit);
-        fresh.addAutoCloseAlert({ symbol, result: autoResult, pnlPercent: parseFloat(pnl.toFixed(2)), closedAt: Date.now() });
-        fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': fresh.webhookSecret } }).catch(() => {});
+    const active = fresh.trades.filter(
+      t => t.symbol === symbol && !t.result && t.status !== 'waiting' && t.status !== 'tp1_hit'
+    );
+    for (const trade of active) {
+      const tp1Reached = trade.direction === 'LONG'
+        ? currentPrice >= trade.tp1
+        : currentPrice <= trade.tp1;
+      if (tp1Reached) {
+        useStore.setState(s => ({
+          trades: s.trades.map(t =>
+            t.id === trade.id ? { ...t, status: 'tp1_hit' as const } : t
+          ),
+        }));
       }
     }
-  } catch { /* ignore */ }
+    return true;
+  } catch (err) {
+    // Detect Binance rate limit (429/418) and signal caller to back off
+    const msg = String(err).toLowerCase();
+    if (msg.includes('429') || msg.includes('418') || msg.includes('too many')) return false;
+    return true;
+  }
 }
 
 // ── Full: candle analysis + signal generation ────────────────────
@@ -167,12 +170,13 @@ export default function HomePage() {
       .forEach((c, i) => setTimeout(() => runCoinAnalysis(c.symbol), i * 400 + 300));
   }, [hasHydrated, loadTopCoins]);
 
-  // ── Fast: price check + TP/SL detection every 30s ────────────
+  // ── Fast: price update + TP1 detection every 30s ─────────────
   useEffect(() => {
     const checkAll = async () => {
       const syms = useStore.getState().coins.map((c) => c.symbol);
       for (const s of syms) {
-        await checkCoinPrice(s);
+        const ok = await checkCoinPrice(s);
+        if (!ok) break; // Binance rate-limited — stop this round, next interval will retry
         await new Promise((r) => setTimeout(r, 100));
       }
     };

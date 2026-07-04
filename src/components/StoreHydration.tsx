@@ -44,6 +44,7 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     pnlPercent:  (r.pnl_percent as number | null) ?? undefined,
     status:      ((r.status as string | null) as 'waiting' | 'active' | 'tp1_hit' | undefined) ?? 'active',
     signalPrice: (r.signal_price as number | null) ?? undefined,
+    filledAt:    (r.filled_at as number | null) ?? undefined,
   };
 }
 
@@ -144,7 +145,15 @@ async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> 
       headers: { 'Content-Type': 'application/json', 'x-webhook-secret': webhookSecret },
       body: JSON.stringify({ ids: openTrades.map(t => t.id) }),
     });
-    if (!res.ok) return confirmedActive;
+    if (!res.ok) {
+      if (res.status === 401) {
+        useStore.getState().setSyncWarning('Webhook Secret 不符，狀態同步失敗，請至設定頁確認密鑰');
+      }
+      return confirmedActive;
+    }
+
+    // Clear any previous auth warning on success
+    useStore.getState().setSyncWarning(null);
 
     const { statuses } = await res.json() as {
       statuses: Record<string, { status: string | null; signalPrice: number | null }>
@@ -258,6 +267,7 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
     });
 
   if (toUpload.length > 0) {
+    // 'status' and 'signal_price' omitted — server owns these via service role.
     const rows = toUpload.map(t => ({
       id:           t.id,
       user_id:      userId,
@@ -278,8 +288,6 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
       result:       t.result ?? null,
       exit_price:   t.exitPrice ?? null,
       pnl_percent:  t.pnlPercent ?? null,
-      status:       t.status ?? 'active',
-      signal_price: t.signalPrice ?? null,
     }));
     await supabase.from('trades').upsert(rows, { onConflict: 'id' });
     toUpload.forEach(t => serverMap.set(t.id, t));
@@ -363,7 +371,10 @@ export async function saveToSupabase(userId: string) {
   const watchRows = s.coins.map(c => ({ user_id: userId, symbol: c.symbol, timeframes: c.timeframes }));
   if (watchRows.length > 0) await supabase.from('watchlist').upsert(watchRows, { onConflict: 'user_id,symbol' });
 
-  // Upsert trades (skip waiting — server manages those directly)
+  // Upsert trades (skip waiting — server manages those directly).
+  // 'status' and 'signal_price' are intentionally omitted: the server owns these columns
+  // via service role. Including them in client upserts causes the whole row to fail if
+  // column-level grants for the authenticated role are missing (42703/42501 errors).
   const tradeRows = s.trades
     .filter(t => t.status !== 'waiting')
     .map(t => ({
@@ -386,8 +397,6 @@ export async function saveToSupabase(userId: string) {
       result:       t.result ?? null,
       exit_price:   t.exitPrice ?? null,
       pnl_percent:  t.pnlPercent ?? null,
-      status:       t.status ?? 'active',
-      signal_price: t.signalPrice ?? null,
     }));
   if (tradeRows.length > 0) await supabase.from('trades').upsert(tradeRows, { onConflict: 'id' });
 }
@@ -395,7 +404,9 @@ export async function saveToSupabase(userId: string) {
 // ── Component ──────────────────────────────────────────────────────
 
 export function StoreHydration({ children }: { children: React.ReactNode }) {
-  const hasHydrated = useStore(s => s._hasHydrated);
+  const hasHydrated   = useStore(s => s._hasHydrated);
+  const syncWarning   = useStore(s => s.syncWarning);
+  const setSyncWarning = useStore(s => s.setSyncWarning);
   const [mounted, setMounted]     = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [userId, setLocalUserId]  = useState<string | null>(null);
@@ -506,5 +517,15 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     );
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      {syncWarning && (
+        <div className="fixed top-16 left-0 right-0 z-50 px-4 py-2 bg-orange-500/10 border-b border-orange-500/30 text-orange-400 text-xs text-center font-semibold flex items-center justify-center gap-2">
+          <span>⚠ {syncWarning}</span>
+          <button onClick={() => setSyncWarning(null)} className="opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
+      {children}
+    </>
+  );
 }

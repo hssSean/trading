@@ -4,7 +4,7 @@ import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume } from '@/api/binan
 import { computeIndicators } from '@/analysis/indicators';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal } from '@/types';
-import { sendLineMessage } from '@/lib/line';
+import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 
 export const maxDuration = 60;
 
@@ -117,6 +117,16 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key) return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
 
+  // Distributed mutex: if two cron invocations overlap, only one runs the monitor.
+  // Lock TTL=55s so it always expires before the next 1-minute cron tick.
+  const rLock = getRedis();
+  if (rLock) {
+    try {
+      const acquired = await rLock.set('monitor-run-lock', 1, { nx: true, ex: 55 });
+      if (!acquired) return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
+    } catch { /* Redis unavailable — proceed without lock */ }
+  }
+
   const { createClient } = await import('@supabase/supabase-js');
   const admin = createClient(url, key);
 
@@ -130,9 +140,9 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
 
   // ── Fetch waiting and active trades separately ────────────────
   const baseQ = () => {
-    let q = admin.from('trades').select(
-      'id, symbol, direction, entry, stop_loss, tp1, tp2, signal_price, strength, score, timeframe, reasons, opened_at, status'
-    ).is('result', null);
+    // select('*') is intentional: avoids 42703 errors when new columns (e.g. filled_at) are added
+    // without requiring a schema-aware column list update here.
+    let q = admin.from('trades').select('*').is('result', null);
     if (ownerFilter) q = q.eq('user_id', ownerFilter);
     return q;
   };
@@ -202,9 +212,15 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     ));
 
     if (isFilled) {
-      await admin.from('trades')
-        .update({ status: 'active', opened_at: Date.now() })
+      // Record fill time in filled_at; preserve original opened_at (order placement time).
+      // Fallback: if filled_at column doesn't exist yet, reset opened_at as before.
+      const now = Date.now();
+      const fillRes = await admin.from('trades')
+        .update({ status: 'active', filled_at: now })
         .eq('id', trade.id);
+      if (fillRes.error?.code === '42703') {
+        await admin.from('trades').update({ status: 'active', opened_at: now }).eq('id', trade.id);
+      }
       filled++;
 
       if (lineToken && lineUserId) {
@@ -215,7 +231,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
           `${dir} 進場已確認，已自動加入交易日誌\n` +
           `成交價：$${price}\n` +
           `TP1：$${trade.tp1} ｜ SL：$${trade.stop_loss}`;
-        await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
     } else if (isCancelled) {
       // Price hit TP before entry — delete the pending record and unlock
@@ -230,7 +246,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
           ? `掛單逾期 ${WAITING_EXPIRY_HOURS} 小時未成交，已自動取消`
           : `價格未回測至進場位 $${trade.entry}，直接到達 TP1 $${trade.tp1}，掛單已自動取消`;
         const msg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
-        await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
     }
   }
@@ -277,14 +293,15 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
           `【🎯 TP1 達標】${sym}\n` +
           `${dir} TP1 $${trade.tp1} 已達標，繼續持有等待 TP2 $${trade.tp2}\n` +
           `💡 建議立刻將止損移至成本 $${trade.entry}`;
-        await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
       continue; // Skip close logic this tick
     }
 
     // Timeframe-aware auto-close: 4h needs more runway than 1h
     const autoCloseHours = trade.timeframe === '4h' ? 72 : trade.timeframe === '1d' ? 168 : INTRADAY_CLOSE_HOURS;
-    const ageHours = (Date.now() - (trade.opened_at ?? 0)) / (60 * 60 * 1000);
+    // Use filled_at (fill time) if available, otherwise opened_at (order placement time)
+    const ageHours = (Date.now() - (trade.filled_at ?? trade.opened_at ?? 0)) / (60 * 60 * 1000);
     if (!closeResult && ageHours >= autoCloseHours) {
       closeResult = isTp1Hit ? 'WIN_TP1' : 'MANUAL_CLOSE';
       closePrice  = price;
@@ -317,7 +334,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
                     : '❌ 止損出場';
         msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       }
-      await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+      await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
     }
     closed++;
   }
@@ -593,7 +610,6 @@ export async function DELETE(req: NextRequest) {
 }
 
 function buildFlexMessages(signal: TradingSignal): object[] {
-  const { buildLineFlexMessage } = require('@/lib/line');
   const flex = buildLineFlexMessage(signal);
   const coin = signal.symbol.replace('USDT', '/USDT');
   const dir  = signal.direction === 'LONG' ? '做多▲' : '做空▼';
@@ -602,4 +618,12 @@ function buildFlexMessages(signal: TradingSignal): object[] {
 
 function delay(ms: number) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// Retry LINE send once after 1.5s if the first attempt fails (handles transient LINE API errors).
+async function sendLineWithRetry(token: string, uid: string, msgs: object[]) {
+  const first = await sendLineMessage(token, uid, msgs);
+  if (first.ok) return first;
+  await delay(1500);
+  return sendLineMessage(token, uid, msgs);
 }

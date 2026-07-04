@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sendLineMessage } from '@/lib/line';
 
+function checkAuth(req: NextRequest): boolean {
+  const envSecret = process.env.WEBHOOK_SECRET;
+  const provided  = req.headers.get('x-webhook-secret') ?? req.nextUrl.searchParams.get('secret');
+  if (envSecret && provided !== envSecret) return false;
+  return true;
+}
+
 // POST /api/test-line  { channelToken, userId }
 export async function POST(req: NextRequest) {
+  if (!checkAuth(req)) return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+
   try {
     const { channelToken, userId } = await req.json();
 

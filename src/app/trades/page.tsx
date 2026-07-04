@@ -86,7 +86,7 @@ export default function TradesPage() {
   const [mTP2,       setMTP2]       = useState('');
   const [mSL,        setMSL]        = useState('');
   const [mError,     setMError]     = useState('');
-  const now = Date.now();
+  const now = useMemo(() => Date.now(), [dateFilter]);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
@@ -326,6 +326,7 @@ export default function TradesPage() {
   };
 
   const handleClearClosed = useCallback(async () => {
+    if (!window.confirm(`確定清除所有 ${closed.length} 筆已結束紀錄？\n此操作無法復原，雲端紀錄也會一併刪除。`)) return;
     const ids = closed.map(t => t.id);
     await Promise.all(ids.map(id => deleteTradePermanently(id)));
   }, [closed]);
@@ -382,6 +383,8 @@ export default function TradesPage() {
     if (isNaN(entry) || entry <= 0) { setMError('請輸入有效的進場價格'); return; }
     if (isNaN(tp1) || tp1 <= 0) { setMError('請輸入有效的 TP1'); return; }
     if (isNaN(sl)  || sl  <= 0) { setMError('請輸入有效的止損價格'); return; }
+    if (mDir === 'LONG'  && sl >= entry) { setMError('做多止損必須低於進場價'); return; }
+    if (mDir === 'SHORT' && sl <= entry) { setMError('做空止損必須高於進場價'); return; }
     if (trades.some(t => t.symbol === symbol && !t.result)) { setMError('此幣種已有進行中的交易'); return; }
     addManualTrade({ symbol, direction: mDir, entry, stopLoss: sl, tp1, tp2: isNaN(tp2) || tp2 <= 0 ? tp1 : tp2 });
     setShowManual(false);
