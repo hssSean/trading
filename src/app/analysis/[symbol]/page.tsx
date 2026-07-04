@@ -11,7 +11,7 @@ import { findOrderBlocks, findFairValueGaps } from '@/analysis/smc';
 import { findSRLevels } from '@/analysis/snr';
 import { Candle, TechnicalIndicators, Timeframe, OrderBlock, FairValueGap, SRLevel } from '@/types';
 
-const TFS: Timeframe[] = ['15m', '1h', '4h', '1d'];
+const TFS: Timeframe[] = ['5m', '15m', '1h', '4h', '1d'];
 
 // ── Next.js 14: params is a plain object, NOT a Promise ──
 export default function AnalysisPage({ params }: { params: { symbol: string } }) {
@@ -35,7 +35,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
 
   const handleUnlock = () => {
     const store  = useStore.getState();
-    fetch(`/api/analyze?secret=${encodeURIComponent(store.webhookSecret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
+    fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': store.webhookSecret } }).catch(() => {});
     setUnlockFlash(true);
     setTimeout(() => setUnlockFlash(false), 2500);
   };
@@ -66,7 +66,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
 
         // ── HTF bias: higher timeframe determines trend direction ──
         const htfMap: Partial<Record<Timeframe, Timeframe>> = {
-          '15m': '1h', '1h': '4h', '4h': '1d',
+          '5m': '15m', '15m': '1h', '1h': '4h', '4h': '1d',
         };
         const htfTf = htfMap[timeframe] ?? null;
         let bias: 'LONG' | 'SHORT' | null = null;
@@ -120,7 +120,11 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             const tHtfTf = htfMap[t as Timeframe] ?? null;
             if (tHtfTf) {
               if (!candleCache.has(tHtfTf)) {
-                try { candleCache.set(tHtfTf, await fetchCandles(symbol, tHtfTf, 250)); } catch { /* skip */ }
+                try {
+                  candleCache.set(tHtfTf, await fetchCandles(symbol, tHtfTf, 250));
+                } catch {
+                  candleCache.set(tHtfTf, []); // Cache empty to avoid re-fetching repeatedly
+                }
               }
               const htfC = candleCache.get(tHtfTf);
               if (htfC) {

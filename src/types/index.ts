@@ -8,7 +8,7 @@ export interface Candle {
   closeTime: number;
 }
 
-export type Timeframe = '15m' | '1h' | '4h' | '1d';
+export type Timeframe = '5m' | '15m' | '1h' | '4h' | '1d';
 export type SignalDirection = 'LONG' | 'SHORT';
 export type SignalStrength = 'WEAK' | 'MODERATE' | 'STRONG';
 
@@ -131,7 +131,7 @@ export interface TradeRecord {
   result?: TradeResult;
   exitPrice?: number;
   pnlPercent?: number;
-  status?: 'waiting' | 'active'; // 'waiting' = limit order not yet filled
+  status?: 'waiting' | 'active' | 'tp1_hit'; // 'tp1_hit' = TP1 reached, monitoring for TP2
   signalPrice?: number;           // market price when signal was generated
 }
 

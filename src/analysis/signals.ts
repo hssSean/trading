@@ -8,8 +8,8 @@ function simpleId(): string {
 }
 
 function scoreToStrength(score: number): SignalStrength {
-  if (score >= 19) return 'STRONG';
-  if (score >= 13) return 'MODERATE';
+  if (score >= 15) return 'STRONG';
+  if (score >= 10) return 'MODERATE';
   return 'WEAK';
 }
 
@@ -104,7 +104,7 @@ function detectRsiDivergence(
   const curRsi    = rsiValues[rsiValues.length - 1];
   if (isNaN(curRsi)) return { bullish: false, bearish: false };
 
-  const start = closes.length - lookback - 1;
+  const start = Math.max(0, closes.length - lookback - 1);
   let lowestClose = Infinity,  lowestRsi  = Infinity;
   let highestClose = -Infinity, highestRsi = -Infinity;
 
@@ -124,19 +124,30 @@ function detectRsiDivergence(
 }
 
 // ════════════════════════════════════════════════════════════════
-// Gate  : EMA200 position decides allowed direction.
-//         ±1.5% zone around EMA200 → both directions scored.
-// Score : Minimum 9 to fire a signal.
-// RR    : Minimum 2.0 (raised from 1.5 for better risk management).
-// Stop  : ATR × 1.5 (dynamic).
-// Volatility gate: ATR > 3% of price requires score +4.
+// Intraday SMC — high win rate setup
+//
+// Three hard gates (intraday only):
+//   1. Ranging market → return [] immediately (no signal)
+//   2. Candle confirmation required (engulfing / hammer / shooting star)
+//   3. 5m must have HTF bias from 15m/1h; no bias → no 5m signal
+//
+// Scoring thresholds:
+//   MIN_SCORE  : 12 (intraday) / 13 (swing) — enough to be selective
+//   MIN_RR     : 1.2 (intraday) / 2.0 (swing)
+//   TP caps    : TP1 ≤ 1.2× risk, TP2 ≤ 2.0× risk (achievable in hours)
 // ════════════════════════════════════════════════════════════════
-const MIN_SCORE        = 13;   // raised: fewer but higher-quality signals
-const MIN_RR           = 2.0;
-const HIGH_VOLIT_PCT   = 0.03; // ATR > 3% = high volatility
-const HIGH_VOLIT_EXTRA = 5;    // raised from 4
-const RANGING_PENALTY  = 4;    // extra required when market is ranging/choppy
-const NO_LEVEL_PENALTY = 3;    // deducted when no OB/SR limit level exists
+const MIN_SCORE_INTRADAY = 12;
+const MIN_SCORE_SWING    = 13;
+const MIN_RR_INTRADAY    = 1.2;
+const MIN_RR_SWING       = 2.0;
+const HIGH_VOLIT_PCT     = 0.03;
+const HIGH_VOLIT_EXTRA   = 5;
+const RANGING_PENALTY    = 4;
+const NO_LEVEL_PENALTY   = 3;
+
+function isIntradayTF(tf: Timeframe): boolean {
+  return tf === '5m' || tf === '15m';
+}
 
 // htfBias: if provided, bonus +3 for aligned direction, penalty -2 for opposite
 export function generateSignals(
@@ -147,21 +158,37 @@ export function generateSignals(
 ): TradingSignal[] {
   if (candles.length < 55) return [];
 
+  const intraday = isIntradayTF(timeframe);
+  const MIN_SCORE = intraday ? MIN_SCORE_INTRADAY : MIN_SCORE_SWING;
+  const MIN_RR    = intraday ? MIN_RR_INTRADAY    : MIN_RR_SWING;
+
   const cur             = candles[candles.length - 1];
   const price           = cur.close;
   const isBullishCandle = cur.close > cur.open;
 
-  const ind       = computeIndicators(candles);
-  const prevInd   = computeIndicators(candles.slice(0, -1));
+  // ── Hard gate 1 (intraday): skip ranging markets entirely ────
+  // Ranging = no momentum = no clean TP target reachable in a day.
+  // Structure is also used later, so compute it once here.
   const structure = analyzeMarketStructure(candles);
-  const obs       = findOrderBlocks(candles).filter((ob) => !ob.mitigated);
+  if (intraday) {
+    if (structure.trend === 'ranging') return [];
+    // Hard gate 2 (5m only): must have HTF bias — no counter-trend 5m entries
+    if (timeframe === '5m' && !htfBias) return [];
+  }
+
+  const ind     = computeIndicators(candles);
+  const prevInd = computeIndicators(candles.slice(0, -1));
+  // structure already computed above for hard gate 1
+  const obs     = findOrderBlocks(candles).filter((ob) => !ob.mitigated);
   const fvgs      = findFairValueGaps(candles).filter((f) => !f.filled);
   const srLevels  = findSRLevels(candles);
 
   const atrVal     = calcAtr(candles);
   const atrPct     = atrVal / price;
+  // For intraday: require 1.3x volume (easier threshold), swing: 1.5x
   const volRatio   = calcVolRatio(candles);
-  const ema50Slope = calcEmaSlope(candles, 50);
+  const volTrigger = intraday ? 1.3 : 1.5;
+  const ema50Slope = calcEmaSlope(candles, intraday ? 20 : 50); // faster slope for intraday
   const patterns   = detectCandlePatterns(candles);
   const divergence = detectRsiDivergence(candles);
 
@@ -169,9 +196,11 @@ export function generateSignals(
   const rangingPenalty    = structure.trend === 'ranging' ? RANGING_PENALTY : 0;
   const effectiveMinScore = MIN_SCORE + rangingPenalty + (atrPct > HIGH_VOLIT_PCT ? HIGH_VOLIT_EXTRA : 0);
 
+  // EMA200 zone: wider for short TF (5m/15m EMA200 fluctuates more)
+  const ema200Zone  = intraday ? 0.015 : 0.008;
   const aboveEma200     = price > ind.ema200;
   const ema20AboveEma50 = ind.ema20 > ind.ema50;
-  const nearEma200      = Math.abs(price - ind.ema200) / ind.ema200 < 0.008; // tightened ±1.5% → ±0.8%
+  const nearEma200      = Math.abs(price - ind.ema200) / ind.ema200 < ema200Zone;
   const allowLong       = aboveEma200 || nearEma200;
   const allowShort      = !aboveEma200 || nearEma200;
 
@@ -236,7 +265,7 @@ export function generateSignals(
       longScore += 1; longReasons.push('MACD 動能增強');
     }
 
-    if (volRatio >= 1.5 && isBullishCandle) { longScore += 2; longReasons.push(`多頭量能放大 ${volRatio.toFixed(1)}×`); }
+    if (volRatio >= volTrigger && isBullishCandle) { longScore += 2; longReasons.push(`多頭量能放大 ${volRatio.toFixed(1)}×`); }
 
     // Candle patterns
     if (patterns.bullishEngulfing) { longScore += 2; longReasons.push('看漲吞噬K線'); }
@@ -299,7 +328,7 @@ export function generateSignals(
       shortScore += 1; shortReasons.push('MACD 跌勢加速');
     }
 
-    if (volRatio >= 1.5 && !isBullishCandle) { shortScore += 2; shortReasons.push(`空頭量能放大 ${volRatio.toFixed(1)}×`); }
+    if (volRatio >= volTrigger && !isBullishCandle) { shortScore += 2; shortReasons.push(`空頭量能放大 ${volRatio.toFixed(1)}×`); }
 
     // Candle patterns
     if (patterns.bearishEngulfing) { shortScore += 2; shortReasons.push('看跌吞噬K線'); }
@@ -361,18 +390,33 @@ export function generateSignals(
   }
 
   // ── BUILD SIGNALS ─────────────────────────────────────────────
-  const slBuffer  = Math.max(atrVal * 1.5, price * 0.01);
+  // Dynamic SL buffer: scale ATR multiplier by current volatility vs 1.5% baseline.
+  // High-vol markets widen the buffer so SL isn't prematurely triggered.
+  const atrMulti = intraday
+    ? Math.min(Math.max(1.0, atrPct / 0.015), 2.0)
+    : Math.min(Math.max(1.5, atrPct / 0.015), 2.5);
+  const slBuffer = intraday
+    ? Math.max(atrVal * atrMulti, price * 0.004)
+    : Math.max(atrVal * atrMulti, price * 0.010);
 
-  // ── LONG: find best limit-order entry level BELOW current price ─
-  // Strategy: higher-TF sets direction; lower-TF waits for pullback to OB/SR
+  // Entry zone thresholds — how far below/above current price counts as a limit order
+  //   5m  : ±0.3%  (price moves fast, entries must be close)
+  //   15m : ±0.5%
+  //   1h+ : ±0.7% (original ±0.3% was too tight even for swing)
+  const entryThreshLong  = timeframe === '5m' ? 0.003 : timeframe === '15m' ? 0.005 : 0.007;
+  const entryThreshShort = entryThreshLong;
+  // Search window for pending OB/SR: tighter for intraday
+  const searchWindow = timeframe === '5m' ? 0.015 : timeframe === '15m' ? 0.025 : 0.07;
+
+  // ── LONG: find best entry level ──────────────────────────────
   let longEntry = price;
   const pendingBullOB = obs
     .filter(o => o.type === 'bullish' && !o.mitigated
-               && o.high < price * 0.997 && o.high > price * 0.93)
-    .sort((a, b) => b.high - a.high)[0]; // closest bullish OB below
+               && o.high < price * (1 - entryThreshLong) && o.high > price * (1 - searchWindow))
+    .sort((a, b) => b.high - a.high)[0];
   const pendingSupport = srLevels
-    .filter(l => l.type === 'support' && l.price < price * 0.997 && l.price > price * 0.93)
-    .sort((a, b) => b.price - a.price)[0]; // closest support below
+    .filter(l => l.type === 'support' && l.price < price * (1 - entryThreshLong) && l.price > price * (1 - searchWindow))
+    .sort((a, b) => b.price - a.price)[0];
   if (pendingBullOB && (!pendingSupport || pendingBullOB.high >= pendingSupport.price)) {
     longEntry = (pendingBullOB.high + pendingBullOB.low) / 2;
     longOB    = pendingBullOB;
@@ -380,23 +424,32 @@ export function generateSignals(
     longEntry = pendingSupport.price;
     longSR    = pendingSupport;
   }
-  if (longEntry < price * 0.997) {
-    longReasons.push('掛限價單，待回測入場');
-  } else {
-    // No OB/SR level found → would enter at market price; penalise to filter weak setups
+
+  // For intraday: if price is AT or just above an OB/FVG → allow near-market entry
+  const atBullOB  = obs.find(o => o.type === 'bullish' && !o.mitigated && price >= o.low && price <= o.high * 1.002);
+  const atBullFVG = fvgs.find(f => f.type === 'bullish' && !f.filled && price >= f.bottom && price <= f.top * 1.002);
+  if (intraday && (atBullOB || atBullFVG) && longEntry >= price * (1 - entryThreshLong)) {
+    longEntry = price; // enter at market since price is inside OB/FVG now
+    if (atBullOB)  { longOB = atBullOB;   longReasons.push('現價在多頭 OB 內，市價入場'); }
+    if (atBullFVG) { longFVG = atBullFVG; longReasons.push('現價在 FVG 內，市價補位'); }
+  }
+
+  if (longEntry < price * (1 - entryThreshLong)) {
+    longReasons.push(intraday ? `等待回測 $${longEntry.toFixed(4)} 入場` : '掛限價單，待回測入場');
+  } else if (!atBullOB && !atBullFVG) {
     longScore -= NO_LEVEL_PENALTY;
     longReasons.push('⚠ 無明確回測位，扣 3 分');
   }
 
-  // ── SHORT: find best limit-order entry level ABOVE current price ─
+  // ── SHORT: find best entry level ─────────────────────────────
   let shortEntry = price;
   const pendingBearOB = obs
     .filter(o => o.type === 'bearish' && !o.mitigated
-               && o.low > price * 1.003 && o.low < price * 1.07)
-    .sort((a, b) => a.low - b.low)[0]; // closest bearish OB above
+               && o.low > price * (1 + entryThreshShort) && o.low < price * (1 + searchWindow))
+    .sort((a, b) => a.low - b.low)[0];
   const pendingResistance = srLevels
-    .filter(l => l.type === 'resistance' && l.price > price * 1.003 && l.price < price * 1.07)
-    .sort((a, b) => a.price - b.price)[0]; // closest resistance above
+    .filter(l => l.type === 'resistance' && l.price > price * (1 + entryThreshShort) && l.price < price * (1 + searchWindow))
+    .sort((a, b) => a.price - b.price)[0];
   if (pendingBearOB && (!pendingResistance || pendingBearOB.low <= pendingResistance.price)) {
     shortEntry = (pendingBearOB.high + pendingBearOB.low) / 2;
     shortOB    = pendingBearOB;
@@ -404,24 +457,57 @@ export function generateSignals(
     shortEntry = pendingResistance.price;
     shortSR    = pendingResistance;
   }
-  if (shortEntry > price * 1.003) {
-    shortReasons.push('掛限價單，待反彈入場');
-  } else {
+
+  const atBearOB  = obs.find(o => o.type === 'bearish' && !o.mitigated && price <= o.high && price >= o.low * 0.998);
+  const atBearFVG = fvgs.find(f => f.type === 'bearish' && !f.filled && price <= f.top && price >= f.bottom * 0.998);
+  if (intraday && (atBearOB || atBearFVG) && shortEntry <= price * (1 + entryThreshShort)) {
+    shortEntry = price;
+    if (atBearOB)  { shortOB = atBearOB;   shortReasons.push('現價在空頭 OB 內，市價入場'); }
+    if (atBearFVG) { shortFVG = atBearFVG; shortReasons.push('現價在空頭 FVG 內，市價做空'); }
+  }
+
+  if (shortEntry > price * (1 + entryThreshShort)) {
+    shortReasons.push(intraday ? `等待反彈 $${shortEntry.toFixed(4)} 入場` : '掛限價單，待反彈入場');
+  } else if (!atBearOB && !atBearFVG) {
     shortScore -= NO_LEVEL_PENALTY;
     shortReasons.push('⚠ 無明確回測位，扣 3 分');
   }
 
-  // LONG — only fires when clearly stronger than short
-  if (longScore >= effectiveMinScore && longScore > shortScore) {
-    const sl  = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
-              : longSR  ? Math.min(longSR.price * 0.995, longEntry - slBuffer)
-              : longEntry - slBuffer;
-    const risk   = Math.max(longEntry - sl, 1e-6);
-    const tp1Raw = resistance ? resistance.price : longEntry + risk * 2.0;
+  // ── Hard gate 3 (intraday): candle pattern + trend alignment ─
+  // For intraday we need the current candle to CONFIRM the direction.
+  // Without confirmation, the price may be mid-move and the level hasn't held yet.
+  const hasLongPattern  = patterns.bullishEngulfing || patterns.hammer;
+  const hasShortPattern = patterns.bearishEngulfing || patterns.shootingStar;
+
+  const longIntradayOk = !intraday || (
+    hasLongPattern &&                        // candle confirms bullish
+    structure.trend !== 'bearish'            // not trading against main trend
+  );
+  const shortIntradayOk = !intraday || (
+    hasShortPattern &&                       // candle confirms bearish
+    structure.trend !== 'bullish'            // not trading against main trend
+  );
+
+  // ── LONG signal ──────────────────────────────────────────────
+  if (longScore >= effectiveMinScore && longScore > shortScore && longIntradayOk) {
+    const sl   = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
+               : longSR  ? Math.min(longSR.price * 0.995, longEntry - slBuffer)
+               : longEntry - slBuffer;
+    const risk = Math.max(longEntry - sl, 1e-6);
+
+    // Intraday: conservative TP1 (1.2× risk), TP2 (2.0× risk) — achievable in hours
+    // Swing: wider TP1 (2.0× risk), TP2 (3.5× risk)
+    const tp1Max = intraday ? longEntry + risk * 1.5 : longEntry + risk * 2.0;
+    const tp1Raw = resistance ? Math.min(resistance.price, tp1Max) : tp1Max;
     const tp1    = Math.max(tp1Raw, longEntry + risk * MIN_RR);
-    const nextR  = srLevels.find((l) => l.type === 'resistance' && l.price > tp1 * 1.005);
-    const tp2    = nextR ? nextR.price : longEntry + risk * 3.5;
+    const tp2Cap = intraday ? longEntry + risk * 2.0 : longEntry + risk * 3.5;
+    const nextR  = srLevels.find(l => l.type === 'resistance' && l.price > tp1 * 1.003 && l.price <= tp2Cap);
+    const tp2    = nextR ? Math.min(nextR.price, tp2Cap) : tp2Cap;
     const rr     = parseFloat(((tp1 - longEntry) / risk).toFixed(2));
+
+    if (intraday) {
+      longReasons.push(`⏱ 日內單 · TP1 ${((tp1 - longEntry) / longEntry * 100).toFixed(2)}% · SL ${((longEntry - sl) / longEntry * 100).toFixed(2)}%`);
+    }
     signals.push({
       id: simpleId(), symbol, direction: 'LONG',
       strength: scoreToStrength(longScore), score: longScore,
@@ -433,17 +519,24 @@ export function generateSignals(
     });
   }
 
-  // SHORT — only fires when clearly stronger than long
-  if (shortScore >= effectiveMinScore && shortScore > longScore) {
-    const sl  = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)
-              : shortSR ? Math.max(shortSR.price * 1.005, shortEntry + slBuffer)
-              : shortEntry + slBuffer;
-    const risk   = Math.max(sl - shortEntry, 1e-6);
-    const tp1Raw = support ? support.price : shortEntry - risk * 2.0;
+  // ── SHORT signal ─────────────────────────────────────────────
+  if (shortScore >= effectiveMinScore && shortScore > longScore && shortIntradayOk) {
+    const sl   = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)
+               : shortSR ? Math.max(shortSR.price * 1.005, shortEntry + slBuffer)
+               : shortEntry + slBuffer;
+    const risk = Math.max(sl - shortEntry, 1e-6);
+
+    const tp1Max = intraday ? shortEntry - risk * 1.5 : shortEntry - risk * 2.0;
+    const tp1Raw = support ? Math.max(support.price, tp1Max) : tp1Max;
     const tp1    = Math.min(tp1Raw, shortEntry - risk * MIN_RR);
-    const nextS  = srLevels.find((l) => l.type === 'support' && l.price < tp1 * 0.995);
-    const tp2    = nextS ? nextS.price : shortEntry - risk * 3.5;
+    const tp2Cap = intraday ? shortEntry - risk * 2.0 : shortEntry - risk * 3.5;
+    const nextS  = srLevels.find(l => l.type === 'support' && l.price < tp1 * 0.997 && l.price >= tp2Cap);
+    const tp2    = nextS ? Math.max(nextS.price, tp2Cap) : tp2Cap;
     const rr     = parseFloat(((shortEntry - tp1) / risk).toFixed(2));
+
+    if (intraday) {
+      shortReasons.push(`⏱ 日內單 · TP1 ${((shortEntry - tp1) / shortEntry * 100).toFixed(2)}% · SL ${((sl - shortEntry) / shortEntry * 100).toFixed(2)}%`);
+    }
     signals.push({
       id: simpleId(), symbol, direction: 'SHORT',
       strength: scoreToStrength(shortScore), score: shortScore,
@@ -460,7 +553,7 @@ export function generateSignals(
 
 // Highest timeframe's direction is the master — filter out conflicting directions.
 // Prevents simultaneous LONG (1h) + SHORT (4h) signals for the same coin.
-const TF_RANK: Partial<Record<Timeframe, number>> = { '1d': 4, '4h': 3, '1h': 2, '15m': 1 };
+const TF_RANK: Partial<Record<Timeframe, number>> = { '1d': 5, '4h': 4, '1h': 3, '15m': 2, '5m': 1 };
 
 export function unifySignalDirection(signals: TradingSignal[]): TradingSignal[] {
   if (signals.length === 0) return [];

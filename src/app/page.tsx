@@ -5,10 +5,10 @@ import { CoinCard } from '@/components/CoinCard';
 import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, searchSymbols } from '@/api/binance';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { computeIndicators } from '@/analysis/indicators';
-import { Timeframe, TradingSignal } from '@/types';
+import { Candle, Timeframe, TradingSignal } from '@/types';
 
 const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
-  '15m': '1h', '1h': '4h', '4h': '1d',
+  '5m': '15m', '15m': '1h', '1h': '4h', '4h': '1d',
 };
 
 const DEFAULT_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
@@ -27,7 +27,8 @@ async function checkCoinPrice(symbol: string) {
     });
 
     const fresh = useStore.getState();
-    const pending = fresh.trades.filter((t) => t.symbol === symbol && !t.result);
+    // Skip waiting limit orders — they aren't filled yet, no TP/SL to monitor
+    const pending = fresh.trades.filter((t) => t.symbol === symbol && !t.result && t.status !== 'waiting');
     for (const trade of pending) {
       let autoResult: 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | null = null;
       let autoExit = 0;
@@ -46,7 +47,7 @@ async function checkCoinPrice(symbol: string) {
           : (trade.entry - autoExit) / trade.entry * 100;
         fresh.closeTrade(trade.id, autoResult, autoExit);
         fresh.addAutoCloseAlert({ symbol, result: autoResult, pnlPercent: parseFloat(pnl.toFixed(2)), closedAt: Date.now() });
-        fetch(`/api/analyze?secret=${encodeURIComponent(fresh.webhookSecret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
+        fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': fresh.webhookSecret } }).catch(() => {});
       }
     }
   } catch { /* ignore */ }
@@ -63,13 +64,24 @@ async function runCoinAnalysis(symbol: string) {
     await checkCoinPrice(symbol);
 
     const allSignals: TradingSignal[] = [];
+    const candleCache = new Map<string, Candle[]>();
+
     for (const tf of coin.timeframes) {
-      const candles = await fetchCandles(symbol, tf as Timeframe, 200);
+      try {
+        if (!candleCache.has(tf)) {
+          candleCache.set(tf, await fetchCandles(symbol, tf as Timeframe, 200));
+        }
+      } catch { continue; }
+      const candles = candleCache.get(tf)!;
+
       let bias: 'LONG' | 'SHORT' | null = null;
       const htfTf = HTF_MAP[tf as Timeframe];
       if (htfTf) {
         try {
-          const htfC   = await fetchCandles(symbol, htfTf, 250);
+          if (!candleCache.has(htfTf)) {
+            candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 250));
+          }
+          const htfC   = candleCache.get(htfTf)!;
           const htfInd = computeIndicators(htfC);
           const htfPx  = htfC[htfC.length - 1].close;
           const e200   = htfInd.ema200;
@@ -108,9 +120,10 @@ export default function HomePage() {
   const analyzeAll = useCallback(async () => {
     setRefreshing(true);
     const symbols = useStore.getState().coins.map((c) => c.symbol);
-    for (const s of symbols) {
-      await runCoinAnalysis(s);
-      await new Promise((r) => setTimeout(r, 300));
+    // Parallel with concurrency=3 — faster than serial, avoids Binance rate limit
+    const CONC = 3;
+    for (let i = 0; i < symbols.length; i += CONC) {
+      await Promise.all(symbols.slice(i, i + CONC).map(s => runCoinAnalysis(s)));
     }
     setRefreshing(false);
   }, []);
@@ -128,9 +141,9 @@ export default function HomePage() {
         setAutoMsg('已載入成交量前 15 名，新增 ' + toAdd.length + ' 個幣種');
         setTimeout(() => setAutoMsg(''), 4000);
       }
-      for (const s of toAdd) {
-        await runCoinAnalysis(s);
-        await new Promise((r) => setTimeout(r, 300));
+      const CONC = 3;
+      for (let i = 0; i < toAdd.length; i += CONC) {
+        await Promise.all(toAdd.slice(i, i + CONC).map(s => runCoinAnalysis(s)));
       }
     } catch {
       if (!silent) {
@@ -186,7 +199,7 @@ export default function HomePage() {
       if (document.visibilityState !== 'visible') return;
       const secret = useStore.getState().webhookSecret;
       try {
-        const res = await fetch(`/api/analyze?secret=${encodeURIComponent(secret)}`, { method: 'POST' });
+        const res = await fetch('/api/analyze', { method: 'POST', headers: { 'x-webhook-secret': secret } });
         const data: { signals?: TradingSignal[] } = await res.json();
         for (const sig of data.signals ?? []) {
           const s = useStore.getState();

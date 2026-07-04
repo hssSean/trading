@@ -5,6 +5,7 @@ import { Candle, Timeframe } from '../types';
 const client = axios.create({ baseURL: 'https://fapi.binance.com/fapi/v1', timeout: 10000 });
 
 const INTERVAL_MAP: Record<Timeframe, string> = {
+  '5m':  '5m',
   '15m': '15m',
   '1h':  '1h',
   '4h':  '4h',
@@ -15,19 +16,29 @@ export async function fetchCandles(
   symbol: string,
   timeframe: Timeframe,
   limit = 200,
+  retries = 3,
 ): Promise<Candle[]> {
-  const res = await client.get('/klines', {
-    params: { symbol, interval: INTERVAL_MAP[timeframe], limit },
-  });
-  return res.data.map((k: unknown[]) => ({
-    openTime:  k[0] as number,
-    open:      parseFloat(k[1] as string),
-    high:      parseFloat(k[2] as string),
-    low:       parseFloat(k[3] as string),
-    close:     parseFloat(k[4] as string),
-    volume:    parseFloat(k[5] as string),
-    closeTime: k[6] as number,
-  }));
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await client.get('/klines', {
+        params: { symbol, interval: INTERVAL_MAP[timeframe], limit },
+      });
+      return res.data.map((k: unknown[]) => ({
+        openTime:  k[0] as number,
+        open:      parseFloat(k[1] as string),
+        high:      parseFloat(k[2] as string),
+        low:       parseFloat(k[3] as string),
+        close:     parseFloat(k[4] as string),
+        volume:    parseFloat(k[5] as string),
+        closeTime: k[6] as number,
+      }));
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries - 1) await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 export async function fetchTicker24h(symbol: string): Promise<{

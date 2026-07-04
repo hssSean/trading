@@ -26,6 +26,9 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   const riskUSDT      = accountSize * 0.01;
   const positionUSDT  = stopDistPct > 0 ? Math.round(riskUSDT / stopDistPct) : 0;
   const isHighVol     = signal.reasons.some((r) => r.startsWith('⚠ 高波動'));
+  const sp            = signal.signalPrice ?? 0;
+  const isLimit       = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
+  const isIntraday    = signal.timeframe === '5m' || signal.timeframe === '15m';
 
   const handleAddTrade = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -67,6 +70,8 @@ export function SignalCard({ signal, onClick, compact }: Props) {
             {signal.symbol.replace('USDT', '/USDT')}
           </span>
           <span className="badge-tf">{signal.timeframe}</span>
+          {isIntraday && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30 font-semibold">日內</span>}
+          {isLimit    && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 border border-yellow-500/30 font-semibold">限價</span>}
           {!signal.isRead && (
             <span className="w-2 h-2 rounded-full bg-[#F0B90B] animate-pulse" />
           )}
@@ -87,14 +92,20 @@ export function SignalCard({ signal, onClick, compact }: Props) {
 
       {/* ── Stats row ── */}
       <div className="flex gap-2 mb-3">
-        <StatChip label="風險回報比" value={`${signal.riskReward}:1`} />
-        <StatChip label="分析得分" value={`${signal.score}pt`} />
+        <StatChip label="風報比" value={`${signal.riskReward}:1`} />
+        <StatChip label="得分" value={`${signal.score}pt`} />
         {tp1 && (
           <StatChip
-            label={isLong ? '預期漲幅' : '預期跌幅'}
-            value={`${(Math.abs(tp1 - signal.entry) / signal.entry * 100).toFixed(1)}%`}
+            label="TP1 幅度"
+            value={`+${(Math.abs(tp1 - signal.entry) / signal.entry * 100).toFixed(1)}%`}
+            color="#00C851"
           />
         )}
+        <StatChip
+          label="SL 距離"
+          value={`-${(Math.abs(signal.stopLoss - signal.entry) / signal.entry * 100).toFixed(1)}%`}
+          color="#FF4444"
+        />
       </div>
 
       {/* ── Position size + volatility ── */}
@@ -177,11 +188,11 @@ function PriceBox({
   );
 }
 
-function StatChip({ label, value }: { label: string; value: string }) {
+function StatChip({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="flex-1 bg-yellow-400/10 rounded-xl px-2 py-2 text-center min-w-0">
+    <div className="flex-1 bg-[#1A1A26] rounded-xl px-2 py-2 text-center min-w-0">
       <p className="text-[#606080] text-[9px] truncate">{label}</p>
-      <p className="text-[#F0B90B] font-bold text-xs mt-0.5">{value}</p>
+      <p className="font-bold text-xs mt-0.5" style={{ color: color ?? '#F0B90B' }}>{value}</p>
     </div>
   );
 }
