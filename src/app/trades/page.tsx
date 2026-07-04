@@ -850,12 +850,24 @@ export default function TradesPage() {
           </div>
         ) : (
           filtered.map(trade => {
-            const isWaiting = trade.status === 'waiting';
+            const coinData  = coins.find(c => c.symbol === trade.symbol);
+            const livePx    = coinData?.currentPrice ?? 0;
+
+            // Detect unfilled limit orders even when DB status is NULL/stale.
+            // "掛限價單/待回測/待反彈" in reasons means this was generated as a limit order.
+            // If live price hasn't reached the entry yet → still waiting, not filled.
+            const hasLimitReason = (trade.reasons ?? []).some(
+              r => r.includes('掛限價單') || r.includes('待回測') || r.includes('待反彈')
+            );
+            const likelyUnfilled = !trade.result && hasLimitReason && livePx > 0 && (
+              trade.direction === 'LONG'  ? livePx > trade.entry :
+              trade.direction === 'SHORT' ? livePx < trade.entry :
+              false
+            );
+            const isWaiting = trade.status === 'waiting' || likelyUnfilled;
             const isTp1Hit  = trade.status === 'tp1_hit';
             const isPending = !trade.result && !isWaiting;
             const isWin     = trade.result === 'WIN_TP1' || trade.result === 'WIN_TP2';
-            const coinData  = coins.find(c => c.symbol === trade.symbol);
-            const livePx    = coinData?.currentPrice ?? 0;
 
             // 等待進場中的掛單：顯示距進場位的差距
             let distToEntry = 0;

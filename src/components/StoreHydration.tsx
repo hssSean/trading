@@ -188,9 +188,14 @@ async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive:
     if (t.result || t.status === 'waiting') return false;
     if (confirmedActive.has(t.id)) return false; // server confirmed legitimately filled → skip
     const sp = t.signalPrice ?? 0;
-    if (sp === 0) return false; // no signalPrice means we can't detect limit vs market safely
-    const isLongLimit  = t.direction === 'LONG'  && sp > t.entry * 1.003;
-    const isShortLimit = t.direction === 'SHORT' && sp < t.entry * 0.997;
+    // Use reasons as fallback when signalPrice absent (old trades whose signal_price
+    // column didn't exist in DB yet — the insert failed silently).
+    const hasLimitReason = (t.reasons ?? []).some(
+      r => r.includes('掛限價單') || r.includes('待回測') || r.includes('待反彈')
+    );
+    if (sp === 0 && !hasLimitReason) return false;
+    const isLongLimit  = t.direction === 'LONG'  && (sp > 0 ? sp > t.entry * 1.003 : hasLimitReason);
+    const isShortLimit = t.direction === 'SHORT' && (sp > 0 ? sp < t.entry * 0.997 : hasLimitReason);
     return isLongLimit || isShortLimit;
   });
   if (suspects.length === 0) return;
