@@ -8,7 +8,7 @@ export interface Candle {
   closeTime: number;
 }
 
-export type Timeframe = '15m' | '1h' | '4h' | '1d';
+export type Timeframe = '5m' | '15m' | '1h' | '4h' | '1d';
 export type SignalDirection = 'LONG' | 'SHORT';
 export type SignalStrength = 'WEAK' | 'MODERATE' | 'STRONG';
 

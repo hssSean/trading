@@ -7,7 +7,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   analysisIntervalMinutes: 15,
   notificationsEnabled: true,
   minSignalStrength: 'MODERATE',
-  defaultTimeframes: ['4h', '1h'],
+  defaultTimeframes: ['1h', '15m', '5m'],
   vibrationEnabled: true,
   soundEnabled: false,
   accountSize: 1000,

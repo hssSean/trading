@@ -9,7 +9,7 @@ import { sendLineMessage } from '@/lib/line';
 export const maxDuration = 60;
 
 const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
-  '15m': '1h', '1h': '4h', '4h': '1d',
+  '5m': '15m', '15m': '1h', '1h': '4h', '4h': '1d',
 };
 
 // ── Persistent lock via Upstash Redis ─────────────────────────
@@ -21,9 +21,11 @@ interface LockEntry {
   direction:    string;
   locked:       boolean; // true = active trade in journal
 }
-const LOCK_TTL_SEC  = 7 * 24 * 3600; // 7-day failsafe expiry
-const COOLDOWN_MS   = 6 * 60 * 60 * 1000;
-const STRONG_THRESHOLD = 19;
+const LOCK_TTL_SEC     = 24 * 3600;        // 24h lock for intraday trades
+const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2h cooldown between signals (was 6h)
+const STRONG_THRESHOLD = 15;                  // lowered from 19 (intraday scoring range)
+const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older than 24h
+const WAITING_EXPIRY_HOURS = 8;              // cancel unfilled limit orders after 8h
 
 let _redis: Redis | null = null;
 function getRedis(): Redis | null {
@@ -97,11 +99,15 @@ function current4hBucket(): number {
 }
 
 function checkAuth(req: NextRequest): boolean {
-  const secret       = req.nextUrl.searchParams.get('secret');
-  const envSecret    = process.env.WEBHOOK_SECRET;
-  const cronAuth     = req.headers.get('authorization');
-  const isVercelCron = cronAuth === `Bearer ${process.env.CRON_SECRET}`;
-  if (envSecret && secret !== envSecret && !isVercelCron) return false;
+  const envSecret  = process.env.WEBHOOK_SECRET;
+  const cronSecret = process.env.CRON_SECRET;
+  const cronAuth   = req.headers.get('authorization');
+  // Vercel cron — must have CRON_SECRET set
+  const isVercelCron = !!(cronSecret && cronAuth === `Bearer ${cronSecret}`);
+  if (isVercelCron) return true;
+  // Accept secret from header (preferred) or legacy query param
+  const provided = req.headers.get('x-webhook-secret') ?? req.nextUrl.searchParams.get('secret');
+  if (envSecret && provided !== envSecret) return false;
   return true;
 }
 
@@ -125,7 +131,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   // ── Fetch waiting and active trades separately ────────────────
   const baseQ = () => {
     let q = admin.from('trades').select(
-      'id, symbol, direction, entry, stop_loss, tp1, tp2, signal_price, strength, score, timeframe, reasons'
+      'id, symbol, direction, entry, stop_loss, tp1, tp2, signal_price, strength, score, timeframe, reasons, opened_at'
     ).is('result', null);
     if (ownerFilter) q = q.eq('user_id', ownerFilter);
     return q;
@@ -147,12 +153,25 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   // Fetch prices for all relevant symbols in one batch
   const allSymbols = Array.from(new Set([...waiting, ...active].map(t => t.symbol as string)));
   const prices: Record<string, number> = {};
-  await Promise.all(allSymbols.map(async sym => {
+  if (allSymbols.length > 0) {
     try {
-      const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`);
-      if (res.ok) prices[sym] = parseFloat((await res.json()).price);
-    } catch {}
-  }));
+      // Batch API: one request for all symbols
+      const symList = allSymbols.map(s => `"${s}"`).join(',');
+      const bRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbols=[${symList}]`);
+      if (bRes.ok) {
+        const bData = await bRes.json() as { symbol: string; price: string }[];
+        bData.forEach(d => { prices[d.symbol] = parseFloat(d.price); });
+      }
+    } catch {
+      // Fallback: individual fetches
+      await Promise.all(allSymbols.map(async sym => {
+        try {
+          const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`);
+          if (res.ok) prices[sym] = parseFloat((await res.json()).price);
+        } catch {}
+      }));
+    }
+  }
 
   let filled = 0, cancelled = 0, closed = 0;
 
@@ -163,18 +182,24 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
 
     const isLong = trade.direction === 'LONG';
 
-    // Fill: price reached the limit entry level (±0.3% tolerance for cron latency)
-    const isFilled = isLong
-      ? price <= trade.entry * 1.003
-      : price >= trade.entry * 0.997;
+    const sp = trade.signal_price ?? 0;
 
-    // Auto-cancel: TP1 was hit before entry — price moved in the right direction
-    // but the limit order was never triggered (missed trade)
-    const isCancelled = !isFilled && (
+    // Fill: price reached entry level.
+    // For LONG: signal_price must have been above entry (confirmed limit, not market)
+    // tolerance ±0.1% for cron polling latency.
+    const isFilled = isLong
+      ? price <= trade.entry * 1.001 && (sp === 0 || sp > trade.entry * 1.002)
+      : price >= trade.entry * 0.999 && (sp === 0 || sp < trade.entry * 0.998);
+
+    // Auto-expire: waiting limit order not filled within 8 hours → cancel
+    const isExpired = (Date.now() - (trade.opened_at ?? 0)) > WAITING_EXPIRY_HOURS * 60 * 60 * 1000;
+
+    // Auto-cancel: TP1 hit before entry (missed move)
+    const isCancelled = !isFilled && (isExpired || (
       isLong
-        ? price >= trade.tp1  // LONG: TP1 hit without pulling back to entry
-        : price <= trade.tp1  // SHORT: TP1 hit without bouncing up to entry
-    );
+        ? price >= trade.tp1
+        : price <= trade.tp1
+    ));
 
     if (isFilled) {
       await admin.from('trades')
@@ -201,16 +226,16 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       if (lineToken && lineUserId) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = trade.symbol.replace('USDT', '/USDT');
-        const msg =
-          `【⚠️ 掛單未成交】${sym}\n` +
-          `${dir} 價格未回測至進場位 $${trade.entry}\n` +
-          `直接到達 TP1 $${trade.tp1}，掛單已自動取消`;
+        const reason = isExpired
+          ? `掛單逾期 ${WAITING_EXPIRY_HOURS} 小時未成交，已自動取消`
+          : `價格未回測至進場位 $${trade.entry}，直接到達 TP1 $${trade.tp1}，掛單已自動取消`;
+        const msg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
         await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
     }
   }
 
-  // ── Phase 2: TP/SL monitoring for active trades ───────────────
+  // ── Phase 2: TP/SL monitoring + 24h intraday auto-close ──────
   for (const trade of active) {
     const price = prices[trade.symbol];
     if (!price) continue;
@@ -220,14 +245,22 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     let closePrice = 0;
 
     if (isLong) {
-      if      (price >= trade.tp2)       { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
-      else if (price >= trade.tp1)       { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
-      else if (price <= trade.stop_loss) { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
+      if      (price >= trade.tp2)       { closeResult = 'WIN_TP2';     closePrice = trade.tp2; }
+      else if (price >= trade.tp1)       { closeResult = 'WIN_TP1';     closePrice = trade.tp1; }
+      else if (price <= trade.stop_loss) { closeResult = 'LOSS';        closePrice = trade.stop_loss; }
     } else {
-      if      (price <= trade.tp2)       { closeResult = 'WIN_TP2'; closePrice = trade.tp2; }
-      else if (price <= trade.tp1)       { closeResult = 'WIN_TP1'; closePrice = trade.tp1; }
-      else if (price >= trade.stop_loss) { closeResult = 'LOSS';    closePrice = trade.stop_loss; }
+      if      (price <= trade.tp2)       { closeResult = 'WIN_TP2';     closePrice = trade.tp2; }
+      else if (price <= trade.tp1)       { closeResult = 'WIN_TP1';     closePrice = trade.tp1; }
+      else if (price >= trade.stop_loss) { closeResult = 'LOSS';        closePrice = trade.stop_loss; }
     }
+
+    // 24h intraday auto-close: if neither TP nor SL hit, force-close at current price
+    const ageHours = (Date.now() - (trade.opened_at ?? 0)) / (60 * 60 * 1000);
+    if (!closeResult && ageHours >= INTRADAY_CLOSE_HOURS) {
+      closeResult = 'MANUAL_CLOSE';
+      closePrice  = price;
+    }
+
     if (!closeResult) continue;
 
     const pnl = isLong
@@ -244,15 +277,20 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     await unlockSymbol(trade.symbol);
 
     if (lineToken && lineUserId) {
-      const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
-                  : closeResult === 'WIN_TP1' ? '✅ TP1 達標'
-                  : '❌ 止損出場';
       const dir = isLong ? '▲ 做多' : '▼ 做空';
       const sym = trade.symbol.replace('USDT', '/USDT');
-      const tp2Line = closeResult === 'WIN_TP1'
-        ? `\n💡 建議移止損到本金 $${trade.entry}，繼續抱 TP2 $${trade.tp2}`
-        : '';
-      const msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%${tp2Line}`;
+      let msg: string;
+      if (closeResult === 'MANUAL_CLOSE') {
+        msg = `【⏱ 日內單到期平倉】${sym}\n${dir} 超過 ${INTRADAY_CLOSE_HOURS}小時未達標，自動平倉\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+      } else {
+        const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
+                    : closeResult === 'WIN_TP1' ? '✅ TP1 達標'
+                    : '❌ 止損出場';
+        const tp2Line = closeResult === 'WIN_TP1'
+          ? `\n💡 建議移止損到成本 $${trade.entry}，繼續持有 TP2 $${trade.tp2}`
+          : '';
+        msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%${tp2Line}`;
+      }
       await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
     }
     closed++;
@@ -266,7 +304,7 @@ export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const coinsParam = req.nextUrl.searchParams.get('coins') ?? process.env.WATCH_COINS ?? '';
-  const tfParam    = process.env.ANALYSIS_TIMEFRAMES ?? '4h,1h';
+  const tfParam    = process.env.ANALYSIS_TIMEFRAMES ?? '5m,15m,1h';
   const lineToken  = process.env.LINE_CHANNEL_TOKEN ?? '';
   const lineUserId = process.env.LINE_USER_ID ?? '';
   const minScore   = parseInt(process.env.MIN_SCORE ?? '5', 10);
@@ -367,7 +405,7 @@ export async function GET(req: NextRequest) {
           const rp = getRedis();
           if (rp) {
             try {
-              await rp.lpush('pending_signals', topStrong);
+              await rp.lpush('pending_signals', JSON.stringify(topStrong));
               await rp.expire('pending_signals', 24 * 3600);
             } catch { pendingSignals.push(topStrong); }
           } else {
@@ -474,8 +512,8 @@ export async function POST(req: NextRequest) {
   const r = getRedis();
   if (r) {
     try {
-      const signals = await r.lrange<TradingSignal>('pending_signals', 0, -1);
-      // Do NOT delete — TTL set at lpush time handles expiry automatically
+      const raw = await r.lrange('pending_signals', 0, -1);
+      const signals = raw.map(s => (typeof s === 'string' ? JSON.parse(s) : s)) as TradingSignal[];
       const filtered = signals.filter(s => s && s.timestamp > cutoff);
       return NextResponse.json({ ok: true, signals: filtered, source: 'redis' });
     } catch { /* fall through to in-memory */ }

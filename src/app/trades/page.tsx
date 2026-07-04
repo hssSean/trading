@@ -1,7 +1,7 @@
 'use client';
 import { useState, useCallback, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
-import { deleteTradePermanently, loadFromSupabase } from '@/components/StoreHydration';
+import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
 import { TradeResult } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
@@ -39,7 +39,7 @@ function fmtDuration(ms: number) {
 
 function unlockCoin(symbol: string) {
   const secret = useStore.getState().webhookSecret;
-  fetch(`/api/analyze?secret=${encodeURIComponent(secret)}&symbol=${symbol}`, { method: 'DELETE' }).catch(() => {});
+  fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': secret } }).catch(() => {});
 }
 
 function calcPositionSize(entry: number, sl: number, accountSize: number) {
@@ -66,14 +66,18 @@ export default function TradesPage() {
   const [exitPrice,  setExitPrice]  = useState('');
   const [exitResult, setExitResult] = useState<TradeResult>('WIN_TP1');
   const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'CLOSED'>('ALL');
+  const [dirFilter,  setDirFilter]  = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
+  const [dateFilter, setDateFilter] = useState<'all' | 'week' | 'month'>('all');
+  const [sortBy,     setSortBy]     = useState<'time' | 'pnl' | 'score'>('time');
+  const [sortDir,    setSortDir]    = useState<'desc' | 'asc'>('desc');
   const [unlockMsg,  setUnlockMsg]  = useState<Record<string, boolean>>({});
   const [syncing,    setSyncing]    = useState(false);
   const [syncMsg,    setSyncMsg]    = useState('');
   const [showManual,      setShowManual]      = useState(false);
   const [showDetailStats, setShowDetailStats] = useState(false);
-  const [editingNote, setEditingNote] = useState<string | null>(null); // trade id
+  const [editingNote, setEditingNote] = useState<string | null>(null);
   const [noteText,    setNoteText]    = useState('');
-  const [actualEntry, setActualEntry] = useState(''); // in close modal
+  const [actualEntry, setActualEntry] = useState('');
   const [mSymbol,    setMSymbol]    = useState('');
   const [mDir,       setMDir]       = useState<'LONG' | 'SHORT'>('LONG');
   const [mEntry,     setMEntry]     = useState('');
@@ -82,23 +86,52 @@ export default function TradesPage() {
   const [mSL,        setMSL]        = useState('');
   const [mError,     setMError]     = useState('');
   const now = Date.now();
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
+  const waiting = trades.filter(t => t.status === 'waiting');
   const closed  = trades.filter(t => !!t.result);
-  const pending = trades.filter(t => !t.result);
+  // 持倉中 = active & not closed (exclude waiting)
+  const pending = trades.filter(t => !t.result && t.status !== 'waiting');
   const wins    = closed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
   const losses  = closed.filter(t => t.result === 'LOSS');
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
   const avgPnl  = closed.length > 0
     ? (closed.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / closed.length).toFixed(2)
     : null;
-  // Profit factor = sum(profit) / abs(sum(loss))
   const totalWin  = wins.reduce((a, t) => a + Math.max(t.pnlPercent ?? 0, 0), 0);
   const totalLoss = Math.abs(losses.reduce((a, t) => a + Math.min(t.pnlPercent ?? 0, 0), 0));
   const profitFactor = totalLoss > 0 ? (totalWin / totalLoss).toFixed(2) : null;
 
   // ── Extended stats ───────────────────────────────────────────
-  const avgWin  = wins.length  > 0 ? (wins.reduce((a, t)   => a + (t.pnlPercent ?? 0), 0) / wins.length).toFixed(2)  : null;
+  const avgWin  = wins.length   > 0 ? (wins.reduce((a, t)   => a + (t.pnlPercent ?? 0), 0) / wins.length).toFixed(2)   : null;
   const avgLoss = losses.length > 0 ? (losses.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / losses.length).toFixed(2) : null;
+
+  // RR analysis
+  const calcRR = (t: (typeof trades)[0]) => {
+    const risk = Math.abs(t.entry - t.stopLoss);
+    return risk > 0 ? Math.abs(t.tp2 - t.entry) / risk : 0;
+  };
+  const avgPlannedRR = useMemo(() => {
+    const all = [...pending, ...closed].filter(t => t.status !== 'waiting');
+    if (!all.length) return null;
+    return (all.reduce((a, t) => a + calcRR(t), 0) / all.length).toFixed(2);
+  }, [pending, closed]);
+  const avgActualRR = useMemo(() => {
+    if (!wins.length) return null;
+    return (wins.reduce((a, t) => {
+      const risk = Math.abs(t.entry - t.stopLoss);
+      return a + (risk > 0 ? Math.abs((t.exitPrice ?? t.tp1) - t.entry) / risk : 0);
+    }, 0) / wins.length).toFixed(2);
+  }, [wins]);
+  // Expected value per trade = winRate * avgWin + lossRate * avgLoss − trading cost (0.15% round-trip)
+  const expectedValue = useMemo(() => {
+    if (!closed.length || avgWin === null || avgLoss === null) return null;
+    const wr = wins.length / closed.length;
+    const COST_PCT = 0.15; // 0.15% round-trip (entry + exit taker fee)
+    const ev = wr * parseFloat(avgWin) + (1 - wr) * parseFloat(avgLoss) - COST_PCT;
+    return ev.toFixed(2);
+  }, [closed.length, wins.length, avgWin, avgLoss]);
 
   const longClosed  = closed.filter(t => t.direction === 'LONG');
   const shortClosed = closed.filter(t => t.direction === 'SHORT');
@@ -130,7 +163,128 @@ export default function TradesPage() {
     return { bestCoin: sorted[0], worstCoin: sorted[sorted.length - 1] };
   }, [closed]);
 
-  const filtered = filter === 'PENDING' ? pending : filter === 'CLOSED' ? closed : trades;
+  // ── 策略分析模組 ─────────────────────────────────────────────
+
+  // 累積資產曲線（按平倉時間排序）
+  const equityCurve = useMemo(() => {
+    let cum = 0;
+    return [...closed]
+      .filter(t => t.closedAt)
+      .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
+      .map(t => { cum += t.pnlPercent ?? 0; return parseFloat(cum.toFixed(2)); });
+  }, [closed]);
+
+  // 最大回撤（從高峰到谷底的最大下跌）
+  const maxDrawdown = useMemo(() => {
+    if (equityCurve.length < 2) return null;
+    let peak = 0, maxDD = 0;
+    equityCurve.forEach(v => {
+      if (v > peak) peak = v;
+      const dd = peak - v;
+      if (dd > maxDD) maxDD = dd;
+    });
+    return maxDD.toFixed(2);
+  }, [equityCurve]);
+
+  // 月度損益（最近 6 個月）
+  const monthlyPnl = useMemo(() => {
+    const map = new Map<string, { pnl: number; wins: number; total: number }>();
+    closed.filter(t => t.closedAt).forEach(t => {
+      const d = new Date(t.closedAt!);
+      const key = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const e = map.get(key) ?? { pnl: 0, wins: 0, total: 0 };
+      map.set(key, {
+        pnl:   e.pnl + (t.pnlPercent ?? 0),
+        wins:  e.wins + (t.result === 'WIN_TP1' || t.result === 'WIN_TP2' ? 1 : 0),
+        total: e.total + 1,
+      });
+    });
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-6)
+      .map(([key, v]) => ({ key, pnl: parseFloat(v.pnl.toFixed(2)), wins: v.wins, total: v.total }));
+  }, [closed]);
+
+  // 評分區間效益（哪個分數段勝率最高）
+  const scoreRanges = useMemo(() => [
+    { label: '12–14', min: 12, max: 14 },
+    { label: '15–17', min: 15, max: 17 },
+    { label: '18+',   min: 18, max: 999 },
+  ].map(r => {
+    const inRange = closed.filter(t => (t.score ?? 0) >= r.min && (t.score ?? 0) <= r.max);
+    const ws = inRange.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+    return {
+      label: r.label,
+      total: inRange.length,
+      wr: inRange.length ? Math.round(ws.length / inRange.length * 100) : null,
+      avgPnl: inRange.length ? parseFloat((inRange.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / inRange.length).toFixed(2)) : null,
+    };
+  }).filter(r => r.total > 0), [closed]);
+
+  // 信號因子效益（哪些技術條件勝率最高）
+  const reasonStats = useMemo(() => {
+    const KW = ['看漲 OB', '看跌 OB', 'FVG', 'ChoCH', 'BOS', 'RSI 超賣', 'RSI 超買', 'RSI 看漲背離', 'RSI 看跌背離', 'MACD 黃金交叉', 'MACD 死亡交叉', 'Fib 黃金口袋', 'EQL', 'EQH', '破壞塊'];
+    return KW.map(kw => {
+      const m = closed.filter(t => t.reasons?.some(r => r.includes(kw)));
+      if (m.length < 2) return null;
+      const ws = m.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+      return { label: kw, total: m.length, wr: Math.round(ws.length / m.length * 100) };
+    }).filter((x): x is NonNullable<typeof x> => x !== null)
+      .sort((a, b) => b.wr - a.wr).slice(0, 8);
+  }, [closed]);
+
+  // 時框效益（哪個時間週期勝率最高）
+  const tfStats = useMemo(() => {
+    const map = new Map<string, { wins: number; total: number; pnl: number }>();
+    closed.forEach(t => {
+      const tf = t.timeframe ?? '?';
+      const e = map.get(tf) ?? { wins: 0, total: 0, pnl: 0 };
+      map.set(tf, {
+        wins:  e.wins + (t.result === 'WIN_TP1' || t.result === 'WIN_TP2' ? 1 : 0),
+        total: e.total + 1,
+        pnl:   e.pnl + (t.pnlPercent ?? 0),
+      });
+    });
+    return Array.from(map.entries())
+      .map(([tf, v]) => ({ tf, wr: Math.round(v.wins / v.total * 100), total: v.total, avgPnl: parseFloat((v.pnl / v.total).toFixed(2)) }))
+      .sort((a, b) => b.wr - a.wr);
+  }, [closed]);
+
+  // 平均持倉時間
+  const avgHoldTime = useMemo(() => {
+    const with2 = closed.filter(t => t.openedAt && t.closedAt);
+    if (!with2.length) return null;
+    const avgMs = with2.reduce((a, t) => a + ((t.closedAt ?? 0) - t.openedAt), 0) / with2.length;
+    const h = Math.floor(avgMs / 3600000);
+    return h < 24 ? `${h}小時` : `${Math.floor(h / 24)}天${h % 24}時`;
+  }, [closed]);
+
+  const filtered = useMemo(() => {
+    // Base set
+    let base = filter === 'PENDING' ? [...pending, ...waiting]
+             : filter === 'CLOSED'  ? closed
+             : [...waiting, ...pending, ...closed];
+    // Direction filter
+    if (dirFilter !== 'ALL') base = base.filter(t => t.direction === dirFilter);
+    // Date filter
+    if (dateFilter !== 'all') {
+      const cutoff = dateFilter === 'week'
+        ? now - 7  * 24 * 3600 * 1000
+        : now - 30 * 24 * 3600 * 1000;
+      base = base.filter(t => t.openedAt >= cutoff);
+    }
+    // Sort (waiting always on top, then by sort key)
+    base.sort((a, b) => {
+      if (a.status === 'waiting' && b.status !== 'waiting') return -1;
+      if (b.status === 'waiting' && a.status !== 'waiting') return  1;
+      let diff = 0;
+      if (sortBy === 'pnl')   diff = (a.pnlPercent ?? 0) - (b.pnlPercent ?? 0);
+      if (sortBy === 'score') diff = (a.score ?? 0) - (b.score ?? 0);
+      if (sortBy === 'time')  diff = a.openedAt - b.openedAt;
+      return sortDir === 'desc' ? -diff : diff;
+    });
+    return base;
+  }, [filter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, now]);
 
   const exportCsv = () => {
     const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,分析依據,個人備註';
@@ -156,10 +310,18 @@ export default function TradesPage() {
     URL.revokeObjectURL(url);
   };
 
+  const handleClearClosed = useCallback(async () => {
+    const ids = closed.map(t => t.id);
+    await Promise.all(ids.map(id => deleteTradePermanently(id)));
+  }, [closed]);
+
   const handleClose = () => {
     if (!closeModal) return;
     const price = parseFloat(exitPrice);
     if (isNaN(price) || price <= 0) return;
+    // Warn if exit price deviates >50% from entry (likely typo)
+    const dev = Math.abs(price - closeModal.entry) / closeModal.entry;
+    if (dev > 0.5 && !window.confirm(`出場價 $${price} 距進場 $${fmtPrice(closeModal.entry)} 偏離 ${(dev * 100).toFixed(1)}%，確定嗎？`)) return;
     // Apply corrected actual entry price BEFORE closing so PnL is accurate
     const parsedActualEntry = parseFloat(actualEntry);
     if (!isNaN(parsedActualEntry) && parsedActualEntry > 0 && parsedActualEntry !== closeModal.entry) {
@@ -184,16 +346,15 @@ export default function TradesPage() {
     try {
       const uid = useStore.getState().userId;
       if (!uid) { setSyncMsg('請先登入'); return; }
-      const before = useStore.getState().trades.length;
-      await loadFromSupabase(uid);
-      const after = useStore.getState().trades.length;
-      const added = after - before;
-      setSyncMsg(added > 0 ? `已同步 ${added} 筆新紀錄` : '已是最新，無新紀錄');
+      // 完整雙向同步：先上傳本機 → 再以 Supabase 為主取代本機
+      // 解決「手機電腦紀錄不一致」問題
+      const changes = await fullSyncFromSupabase(uid);
+      setSyncMsg(changes > 0 ? `完整同步完成，${changes > 0 ? `差異 ${changes} 筆` : ''}資料已一致` : '完整同步完成，資料已一致');
     } catch {
       setSyncMsg('同步失敗，請重試');
     } finally {
       setSyncing(false);
-      setTimeout(() => setSyncMsg(''), 3000);
+      setTimeout(() => setSyncMsg(''), 4000);
     }
   }, []);
 
@@ -220,6 +381,23 @@ export default function TradesPage() {
     else if (result === 'LOSS')    setExitPrice(String(closeModal.sl));
   };
 
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleBulkDelete = useCallback(async () => {
+    if (!selectedIds.size) return;
+    const count = selectedIds.size;
+    if (!window.confirm(`確定永久刪除選取的 ${count} 筆紀錄？\n此操作無法復原，雲端同步後也會移除。`)) return;
+    await Promise.all(Array.from(selectedIds).map(id => deleteTradePermanently(id)));
+    setSelectedIds(new Set());
+    setSelectMode(false);
+  }, [selectedIds]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -227,7 +405,10 @@ export default function TradesPage() {
         <div className="flex items-center justify-between mb-3">
           <div>
             <h1 className="text-[#EAEAF4] text-xl font-extrabold tracking-tight">交易紀錄</h1>
-            <p className="text-[#606080] text-xs mt-0.5">{trades.length} 筆 · 自動偵測止盈止損</p>
+            <p className="text-[#606080] text-xs mt-0.5">
+              {closed.length} 已結束 · {pending.length} 持倉
+              {waiting.length > 0 && <span className="text-yellow-400"> · {waiting.length} 掛單中</span>}
+            </p>
           </div>
           <div className="flex gap-2 items-center">
             <button
@@ -247,6 +428,14 @@ export default function TradesPage() {
             </button>
             <button onClick={exportCsv} className="text-[#F0B90B] text-xs font-semibold px-3 py-1.5 border border-[#F0B90B]/40 rounded-full active:opacity-70">
               匯出
+            </button>
+            <button
+              onClick={() => { setSelectMode(v => !v); setSelectedIds(new Set()); setEditingNote(null); }}
+              className={`text-xs font-semibold px-3 py-1.5 border rounded-full active:opacity-70 ${
+                selectMode ? 'text-red-400 border-red-400/40' : 'text-[#606080] border-[#1E1E2E]'
+              }`}
+            >
+              {selectMode ? '取消' : '選取'}
             </button>
           </div>
         </div>
@@ -314,10 +503,10 @@ export default function TradesPage() {
                   </div>
                 </div>
 
-                {/* Avg win / loss + consecutive */}
+                {/* Avg win / loss + consecutive + hold time */}
                 <div>
                   <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">損益分析</p>
-                  <div className="grid grid-cols-3 gap-1.5">
+                  <div className="grid grid-cols-4 gap-1.5">
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
                       <p className="text-[#404060] text-[8px]">平均獲利</p>
                       <p className="text-[#00C851] text-xs font-bold">{avgWin ? `+${avgWin}%` : '—'}</p>
@@ -328,12 +517,134 @@ export default function TradesPage() {
                     </div>
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
                       <p className="text-[#404060] text-[8px]">最大連虧</p>
-                      <p className={`text-xs font-bold ${maxConsecLoss >= 3 ? 'text-red-400' : 'text-[#A0A0C0]'}`}>
-                        {maxConsecLoss} 筆
+                      <p className={`text-xs font-bold ${maxConsecLoss >= 3 ? 'text-red-400' : 'text-[#A0A0C0]'}`}>{maxConsecLoss}筆</p>
+                    </div>
+                    <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[#404060] text-[8px]">平均持倉</p>
+                      <p className="text-[#A0A0C0] text-xs font-bold">{avgHoldTime ?? '—'}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* RR analysis */}
+                <div>
+                  <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">風報比分析</p>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[#404060] text-[8px]">計畫平均 RR</p>
+                      <p className="text-[#A0A0C0] text-xs font-bold">{avgPlannedRR ? `1:${avgPlannedRR}` : '—'}</p>
+                    </div>
+                    <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[#404060] text-[8px]">實際達成 RR</p>
+                      <p className={`text-xs font-bold ${avgActualRR ? 'text-[#00C851]' : 'text-[#404060]'}`}>{avgActualRR ? `1:${avgActualRR}` : '—'}</p>
+                    </div>
+                    <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[#404060] text-[8px]">每筆期望值</p>
+                      <p className={`text-xs font-bold ${expectedValue ? (parseFloat(expectedValue) >= 0 ? 'text-[#00C851]' : 'text-red-400') : 'text-[#404060]'}`}>
+                        {expectedValue ? `${parseFloat(expectedValue) >= 0 ? '+' : ''}${expectedValue}%` : '—'}
                       </p>
                     </div>
                   </div>
                 </div>
+
+                {/* Equity curve + max drawdown */}
+                {equityCurve.length >= 2 && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest">資產曲線</p>
+                      <div className="flex gap-3 text-[9px]">
+                        <span className="text-[#606080]">
+                          累積 <span className={parseFloat((equityCurve[equityCurve.length - 1] ?? 0).toString()) >= 0 ? 'text-[#00C851] font-bold' : 'text-red-400 font-bold'}>
+                            {(equityCurve[equityCurve.length - 1] ?? 0) >= 0 ? '+' : ''}{equityCurve[equityCurve.length - 1]}%
+                          </span>
+                        </span>
+                        {maxDrawdown && parseFloat(maxDrawdown) > 0 && (
+                          <span className="text-[#606080]">最大回撤 <span className="text-red-400 font-bold">-{maxDrawdown}%</span></span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="bg-[#0A0A0F] rounded-xl p-2">
+                      <EquityCurve data={equityCurve} />
+                    </div>
+                  </div>
+                )}
+
+                {/* Monthly P&L */}
+                {monthlyPnl.length > 0 && (
+                  <div>
+                    <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">月度損益</p>
+                    <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${monthlyPnl.length}, 1fr)` }}>
+                      {monthlyPnl.map(m => (
+                        <div key={m.key} className={`rounded-lg px-1.5 py-2 text-center border ${m.pnl >= 0 ? 'bg-green-400/5 border-green-400/20' : 'bg-red-400/5 border-red-400/20'}`}>
+                          <p className="text-[#404060] text-[8px] mb-0.5">{m.key.slice(5)}</p>
+                          <p className={`text-xs font-bold ${m.pnl >= 0 ? 'text-[#00C851]' : 'text-red-400'}`}>{m.pnl >= 0 ? '+' : ''}{m.pnl}%</p>
+                          <p className="text-[#404060] text-[7px] mt-0.5">{m.wins}W/{m.total - m.wins}L</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* TF win rate */}
+                {tfStats.length > 0 && (
+                  <div>
+                    <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">時框效益</p>
+                    <div className="space-y-1">
+                      {tfStats.map(r => (
+                        <div key={r.tf} className="flex items-center gap-2">
+                          <span className="text-[#EAEAF4] text-[10px] font-mono w-8 shrink-0">{r.tf}</span>
+                          <div className="flex-1 h-3 bg-[#1A1A26] rounded-full overflow-hidden">
+                            <div className="h-full rounded-full" style={{ width: `${r.wr}%`, background: r.wr >= 60 ? '#00C851' : r.wr >= 45 ? '#F0B90B' : '#FF4444' }} />
+                          </div>
+                          <span className="text-[10px] font-bold w-8 text-right shrink-0" style={{ color: r.wr >= 60 ? '#00C851' : r.wr >= 45 ? '#F0B90B' : '#FF4444' }}>{r.wr}%</span>
+                          <span className="text-[#404060] text-[9px] w-8 text-right shrink-0">{r.total}筆</span>
+                          <span className={`text-[9px] w-10 text-right shrink-0 ${r.avgPnl >= 0 ? 'text-[#00C851]' : 'text-red-400'}`}>{r.avgPnl >= 0 ? '+' : ''}{r.avgPnl}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Score range analysis */}
+                {scoreRanges.length > 0 && (
+                  <div>
+                    <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">評分效益（高分 = 高勝率？）</p>
+                    <div className="space-y-1">
+                      {scoreRanges.map(r => (
+                        <div key={r.label} className="flex items-center gap-2">
+                          <span className="text-[#F0B90B] text-[10px] font-mono w-12 shrink-0">{r.label}分</span>
+                          <div className="flex-1 h-3 bg-[#1A1A26] rounded-full overflow-hidden">
+                            <div className="h-full rounded-full" style={{ width: `${r.wr ?? 0}%`, background: (r.wr ?? 0) >= 60 ? '#00C851' : (r.wr ?? 0) >= 45 ? '#F0B90B' : '#FF4444' }} />
+                          </div>
+                          <span className="text-[10px] font-bold w-8 text-right shrink-0" style={{ color: (r.wr ?? 0) >= 60 ? '#00C851' : (r.wr ?? 0) >= 45 ? '#F0B90B' : '#FF4444' }}>{r.wr ?? '—'}%</span>
+                          <span className="text-[#404060] text-[9px] w-8 text-right shrink-0">{r.total}筆</span>
+                          {r.avgPnl !== null && (
+                            <span className={`text-[9px] w-10 text-right shrink-0 ${r.avgPnl >= 0 ? 'text-[#00C851]' : 'text-red-400'}`}>{r.avgPnl >= 0 ? '+' : ''}{r.avgPnl}%</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Signal reason win rate */}
+                {reasonStats.length > 0 && (
+                  <div>
+                    <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">信號因子效益（哪個條件最準）</p>
+                    <div className="space-y-1">
+                      {reasonStats.map(r => (
+                        <div key={r.label} className="flex items-center gap-2">
+                          <span className="text-[#A0A0C0] text-[9px] flex-1 truncate">{r.label}</span>
+                          <div className="w-20 h-2.5 bg-[#1A1A26] rounded-full overflow-hidden shrink-0">
+                            <div className="h-full rounded-full" style={{ width: `${r.wr}%`, background: r.wr >= 65 ? '#00C851' : r.wr >= 50 ? '#F0B90B' : '#FF4444' }} />
+                          </div>
+                          <span className="text-[10px] font-bold w-7 text-right shrink-0" style={{ color: r.wr >= 65 ? '#00C851' : r.wr >= 50 ? '#F0B90B' : '#FF4444' }}>{r.wr}%</span>
+                          <span className="text-[#404060] text-[9px] w-6 text-right shrink-0">{r.total}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Best / worst coin */}
                 {(bestCoin || worstCoin) && (
@@ -388,14 +699,58 @@ export default function TradesPage() {
           </div>
         )}
 
-        {/* Filter tabs */}
-        <div className="flex gap-2">
-          {(['ALL', 'PENDING', 'CLOSED'] as const).map(f => (
+        {/* Row 1: 狀態 filter */}
+        <div className="flex gap-1.5 mb-2">
+          {([['ALL', '全部'], ['PENDING', `持倉 (${pending.length + waiting.length})`], ['CLOSED', `結束 (${closed.length})`]] as const).map(([f, label]) => (
             <button key={f} onClick={() => setFilter(f)}
               className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${filter === f ? 'bg-[#F0B90B] border-[#F0B90B] text-[#0A0A0F]' : 'border-[#1E1E2E] text-[#606080]'}`}>
-              {f === 'ALL' ? '全部' : f === 'PENDING' ? `持倉中 (${pending.length})` : `已結束 (${closed.length})`}
+              {label}
             </button>
           ))}
+        </div>
+
+        {/* Row 2: 方向 + 時間 + 排序 */}
+        <div className="flex gap-1.5 flex-wrap items-center">
+          {/* Direction */}
+          {(['ALL', 'LONG', 'SHORT'] as const).map(d => (
+            <button key={d} onClick={() => setDirFilter(d)}
+              className={`text-xs px-2.5 py-1 rounded-full font-semibold border transition-colors ${dirFilter === d
+                ? d === 'LONG'  ? 'bg-green-500/20 border-green-500/50 text-green-400'
+                : d === 'SHORT' ? 'bg-red-500/20 border-red-500/50 text-red-400'
+                :                 'bg-[#F0B90B]/20 border-[#F0B90B]/50 text-[#F0B90B]'
+                : 'border-[#1E1E2E] text-[#404060]'}`}>
+              {d === 'ALL' ? '多/空' : d === 'LONG' ? '▲ 多' : '▼ 空'}
+            </button>
+          ))}
+          <div className="w-px h-4 bg-[#1E1E2E]" />
+          {/* Date range */}
+          {([['all', '全部'], ['week', '本週'], ['month', '本月']] as const).map(([d, label]) => (
+            <button key={d} onClick={() => setDateFilter(d)}
+              className={`text-xs px-2.5 py-1 rounded-full font-semibold border transition-colors ${dateFilter === d ? 'bg-blue-500/20 border-blue-500/40 text-blue-400' : 'border-[#1E1E2E] text-[#404060]'}`}>
+              {label}
+            </button>
+          ))}
+          <div className="w-px h-4 bg-[#1E1E2E]" />
+          {/* Sort */}
+          <button
+            onClick={() => {
+              if (sortBy === 'time')  { setSortBy('pnl');  setSortDir('desc'); }
+              else if (sortBy === 'pnl')   { setSortBy('score'); setSortDir('desc'); }
+              else { setSortBy('time'); setSortDir('desc'); }
+            }}
+            className="text-xs px-2.5 py-1 rounded-full border border-[#1E1E2E] text-[#404060] font-semibold"
+          >
+            {sortBy === 'time' ? '⏱ 時間' : sortBy === 'pnl' ? '📊 損益' : '⭐ 得分'}
+            {sortDir === 'desc' ? '↓' : '↑'}
+          </button>
+          {closed.length > 0 && (
+            <button
+              onClick={handleClearClosed}
+              className="ml-auto text-xs px-2.5 py-1 rounded-full border border-red-500/30 text-red-400/70 font-semibold active:opacity-70"
+            >
+              清除已結束
+            </button>
+          )}
         </div>
       </div>
 
@@ -409,16 +764,22 @@ export default function TradesPage() {
           </div>
         ) : (
           filtered.map(trade => {
-            const isPending = !trade.result;
+            const isWaiting = trade.status === 'waiting';
+            const isPending = !trade.result && !isWaiting;
             const isWin     = trade.result === 'WIN_TP1' || trade.result === 'WIN_TP2';
             const coinData  = coins.find(c => c.symbol === trade.symbol);
             const livePx    = coinData?.currentPrice ?? 0;
 
-            // Live PnL and distances (only for pending trades with live price)
-            let livePnl    = 0;
-            let distTP1    = 0;
-            let distSL     = 0;
-            let nearSL     = false;
+            // 等待進場中的掛單：顯示距進場位的差距
+            let distToEntry = 0;
+            if (isWaiting && livePx > 0) {
+              distToEntry = trade.direction === 'LONG'
+                ? (livePx - trade.entry) / trade.entry * 100  // 正值 = 還差多少才到進場
+                : (trade.entry - livePx) / trade.entry * 100;
+            }
+
+            // Live PnL and distances (only for active pending trades)
+            let livePnl = 0, distTP1 = 0, distSL = 0, nearSL = false;
             if (isPending && livePx > 0) {
               livePnl = trade.direction === 'LONG'
                 ? (livePx - trade.entry) / trade.entry * 100
@@ -429,27 +790,49 @@ export default function TradesPage() {
               distSL = trade.direction === 'LONG'
                 ? (livePx - trade.stopLoss) / livePx * 100
                 : (trade.stopLoss - livePx) / livePx * 100;
-              nearSL = distSL < 1.5; // within 1.5% of SL
+              nearSL = distSL < 1.5;
             }
 
             return (
-              <div key={trade.id} className={`bg-[#12121A] rounded-2xl p-4 mb-3 border ${
-                isPending && nearSL ? 'border-red-500/50' : 'border-[#1E1E2E]'
-              }`}>
+              <div
+                key={trade.id}
+                onClick={selectMode ? () => toggleSelect(trade.id) : undefined}
+                className={`relative rounded-2xl p-4 mb-3 border${selectMode ? ' cursor-pointer select-none' : ''} ${
+                  selectMode && selectedIds.has(trade.id)
+                    ? 'border-[#F0B90B]/50 bg-[#F0B90B]/5'
+                    : isWaiting      ? 'bg-[#0D0D16] border-yellow-500/30 border-dashed'
+                    : isPending && nearSL ? 'bg-[#12121A] border-red-500/50'
+                    : 'bg-[#12121A] border-[#1E1E2E]'
+                }`}
+              >
+                {selectMode && (
+                  <div
+                    className="absolute top-4 right-4 w-5 h-5 rounded-full border-2 flex items-center justify-center"
+                    style={{ borderColor: selectedIds.has(trade.id) ? '#F0B90B' : '#3A3A50', background: selectedIds.has(trade.id) ? '#F0B90B' : 'transparent' }}
+                  >
+                    {selectedIds.has(trade.id) && <span className="text-[#0A0A0F] text-[9px] font-extrabold leading-none">✓</span>}
+                  </div>
+                )}
                 {/* Top row */}
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={`text-sm font-extrabold ${trade.direction === 'LONG' ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
                       {trade.direction === 'LONG' ? '▲ 做多' : '▼ 做空'}
                     </span>
-                    <span className="text-[#EAEAF4] font-bold">{trade.symbol.replace('USDT', '/USDT')}</span>
+                    <span className={`font-bold ${isWaiting ? 'text-[#A0A0C0]' : 'text-[#EAEAF4]'}`}>
+                      {trade.symbol.replace('USDT', '/USDT')}
+                    </span>
                     <span className="text-[#606080] text-xs">{trade.timeframe}</span>
-                    {isPending && (
+                    {(isPending || isWaiting) && (
                       <span className="text-xs text-[#404060]">{fmtDuration(now - trade.openedAt)}</span>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {isPending ? (
+                    {isWaiting ? (
+                      <span className="text-xs bg-yellow-500/15 text-yellow-400 px-2 py-0.5 rounded-full font-semibold border border-yellow-500/30">
+                        ⏳ 等待進場
+                      </span>
+                    ) : isPending ? (
                       <>
                         {livePx > 0 && (
                           <span className={`text-xs font-bold ${livePnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
@@ -476,7 +859,25 @@ export default function TradesPage() {
                   <PriceCell label="止損" value={`$${fmtPrice(trade.stopLoss)}`} color="#FF4444" />
                 </div>
 
-                {/* Distance bars for pending trades */}
+                {/* Waiting: distance to entry */}
+                {isWaiting && livePx > 0 && (
+                  <div className="grid grid-cols-2 gap-1.5 mb-2">
+                    <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-xl p-2 text-center">
+                      <p className="text-[#606080] text-[9px]">距進場位</p>
+                      <p className={`text-xs font-bold ${distToEntry > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                        {distToEntry > 0
+                          ? `還差 ${distToEntry.toFixed(2)}%`
+                          : `已達進場 等待確認`}
+                      </p>
+                    </div>
+                    <div className="bg-[#0A0A0F] rounded-xl p-2 text-center">
+                      <p className="text-[#606080] text-[9px]">現價</p>
+                      <p className="text-[#A0A0C0] text-xs font-bold">${fmtPrice(livePx)}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Distance bars for active pending trades */}
                 {isPending && livePx > 0 && (
                   <div className="grid grid-cols-2 gap-1.5 mb-2">
                     <div className={`rounded-xl p-2 text-center ${distTP1 > 0 ? 'bg-green-400/5' : 'bg-green-400/15'}`}>
@@ -552,11 +953,11 @@ export default function TradesPage() {
                     <div className="flex-1 min-w-0">
                       {trade.entryNotes
                         ? <p className="text-[#A0A0C0] text-xs leading-5 bg-[#1A1A26] rounded-xl px-3 py-2">{trade.entryNotes}</p>
-                        : <button onClick={() => { setEditingNote(trade.id); setNoteText(''); }}
+                        : !selectMode && <button onClick={() => { setEditingNote(trade.id); setNoteText(''); }}
                             className="text-[#404060] text-xs">＋ 個人備註</button>
                       }
                     </div>
-                    {trade.entryNotes && (
+                    {trade.entryNotes && !selectMode && (
                       <button onClick={() => { setEditingNote(trade.id); setNoteText(trade.entryNotes ?? ''); }}
                         className="text-[#404060] text-xs shrink-0">✏️</button>
                     )}
@@ -564,7 +965,7 @@ export default function TradesPage() {
                 )}
 
                 {/* Result row for closed trades */}
-                {!isPending && trade.exitPrice !== undefined && (
+                {!isPending && !isWaiting && trade.exitPrice !== undefined && (
                   <div className="flex items-center justify-between mt-1 pt-2 border-t border-[#1E1E2E]">
                     <span className="text-[#606080] text-xs">出場 ${fmtPrice(trade.exitPrice)}</span>
                     <span className={`text-sm font-extrabold ${isWin ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
@@ -576,7 +977,7 @@ export default function TradesPage() {
                 {/* Timestamp + actions */}
                 <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#1E1E2E]">
                   <span className="text-[#404060] text-xs">{fmtDate(trade.openedAt)}</span>
-                  <div className="flex gap-2 flex-wrap justify-end">
+                  {!selectMode && <div className="flex gap-2 flex-wrap justify-end">
                     <a
                       href={`https://www.tradingview.com/chart/?symbol=BINANCE:${trade.symbol}`}
                       target="_blank"
@@ -585,6 +986,19 @@ export default function TradesPage() {
                     >
                       圖表
                     </a>
+                    {isWaiting && (
+                      <button
+                        onClick={() => handleManualUnlock(trade.symbol)}
+                        title="手動取消掛單並解鎖推播"
+                        className={`text-xs px-2 py-1 rounded-xl border transition-colors ${
+                          unlockMsg[trade.symbol]
+                            ? 'bg-green-400/10 text-green-400 border-green-400/30'
+                            : 'text-yellow-400/70 border-yellow-500/30 active:opacity-70'
+                        }`}
+                      >
+                        {unlockMsg[trade.symbol] ? '✓ 已取消' : '取消掛單'}
+                      </button>
+                    )}
                     {isPending && (
                       <>
                         <button
@@ -609,10 +1023,18 @@ export default function TradesPage() {
                         </button>
                       </>
                     )}
-                    <button onClick={() => deleteTradePermanently(trade.id)} className="text-xs px-2 py-1 rounded-xl text-[#404060] active:opacity-70">
+                    <button
+                      onClick={() => {
+                        const label = trade.result ? `已結束的 ${trade.symbol.replace('USDT', '')} 紀錄` : `${trade.symbol.replace('USDT', '')} 持倉紀錄`;
+                        if (window.confirm(`確定永久刪除${label}？\n此操作無法復原，雲端同步後也會移除。`)) {
+                          deleteTradePermanently(trade.id);
+                        }
+                      }}
+                      className="text-xs px-2 py-1 rounded-xl text-[#404060] active:opacity-70"
+                    >
                       刪除
                     </button>
-                  </div>
+                  </div>}
                 </div>
               </div>
             );
@@ -620,6 +1042,32 @@ export default function TradesPage() {
         )}
         <div className="h-4" />
       </div>
+
+      {/* Multi-select delete bar */}
+      {selectMode && (
+        <div className="bg-[#0D0D16] border-t border-[#1E1E2E] px-4 py-3 flex items-center gap-3 shrink-0">
+          <span className="text-[#606080] text-sm">
+            已選 <span className="text-[#EAEAF4] font-bold">{selectedIds.size}</span> 筆
+          </span>
+          <div className="flex-1" />
+          <button
+            onClick={() => {
+              const allIds = new Set(filtered.map(t => t.id));
+              setSelectedIds(prev => prev.size === filtered.length ? new Set() : allIds);
+            }}
+            className="text-xs px-3 py-1.5 rounded-full border border-[#1E1E2E] text-[#A0A0C0] font-semibold active:opacity-70"
+          >
+            {selectedIds.size === filtered.length ? '取消全選' : '全選'}
+          </button>
+          <button
+            onClick={handleBulkDelete}
+            disabled={selectedIds.size === 0}
+            className="text-xs px-4 py-1.5 rounded-full bg-red-500/20 border border-red-500/40 text-red-400 font-semibold disabled:opacity-40 active:opacity-70"
+          >
+            刪除{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
+          </button>
+        </div>
+      )}
 
       {/* Manual create trade modal */}
       {showManual && (
@@ -683,11 +1131,21 @@ export default function TradesPage() {
       )}
 
       {/* Manual close modal */}
-      {closeModal && (
+      {closeModal && (() => {
+        const livePxClose = coins.find(c => c.symbol === closeModal.symbol)?.currentPrice ?? 0;
+        return (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-end" onClick={e => { if (e.target === e.currentTarget) { setCloseModal(null); setActualEntry(''); } }}>
           <div className="w-full max-w-xl mx-auto bg-[#12121A] rounded-t-3xl p-6 pb-10 border-t border-[#1E1E2E]">
             <div className="w-12 h-1 bg-[#1E1E2E] rounded-full mx-auto mb-5" />
-            <h2 className="text-[#EAEAF4] text-lg font-extrabold mb-1">手動記錄結果</h2>
+            <div className="flex items-center justify-between mb-1">
+              <h2 className="text-[#EAEAF4] text-lg font-extrabold">手動記錄結果</h2>
+              {livePxClose > 0 && (
+                <div className="text-right">
+                  <p className="text-[#606080] text-[10px]">即時價格</p>
+                  <p className="text-[#EAEAF4] font-bold text-sm font-mono">${fmtPrice(livePxClose)}</p>
+                </div>
+              )}
+            </div>
             <p className="text-[#606080] text-xs mb-4">記錄後自動解除 LINE 推播鎖定</p>
 
             <p className="text-[#606080] text-xs mb-2">選擇結果（自動填入出場價）</p>
@@ -731,8 +1189,32 @@ export default function TradesPage() {
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
+  );
+}
+
+function EquityCurve({ data }: { data: number[] }) {
+  if (data.length < 2) return null;
+  const W = 300, H = 72, P = 8;
+  const minV = Math.min(0, ...data);
+  const maxV = Math.max(0, ...data);
+  const range = maxV - minV || 1;
+  const sy = (v: number) => H - P - ((v - minV) / range) * (H - P * 2);
+  const sx = (i: number) => P + (i / (data.length - 1)) * (W - P * 2);
+  const zero = sy(0);
+  const path = data.map((v, i) => `${i === 0 ? 'M' : 'L'}${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(' ');
+  const area = `${path} L${sx(data.length - 1).toFixed(1)},${zero} L${P},${zero}Z`;
+  const last = data[data.length - 1];
+  const col  = last >= 0 ? '#00C851' : '#FF4444';
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 72 }}>
+      <line x1={P} y1={zero} x2={W - P} y2={zero} stroke="#252535" strokeWidth="1" strokeDasharray="4,3" />
+      <path d={area} fill={`${col}18`} />
+      <path d={path} stroke={col} strokeWidth="2" fill="none" strokeLinejoin="round" />
+      <circle cx={sx(data.length - 1)} cy={sy(last)} r="3.5" fill={col} />
+    </svg>
   );
 }
 
