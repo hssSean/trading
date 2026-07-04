@@ -152,8 +152,11 @@ export async function sendLineMessage(
     });
     if (res.ok) return { ok: true };
     const body = await res.json().catch(() => ({}));
-    return { ok: false, error: body?.message ?? `HTTP ${res.status}` };
+    const errMsg = body?.message ?? `HTTP ${res.status}`;
+    console.error(`[LINE] push failed — HTTP ${res.status}: ${errMsg}`);
+    return { ok: false, error: errMsg };
   } catch (e) {
+    console.error(`[LINE] push exception — ${String(e)}`);
     return { ok: false, error: String(e) };
   }
 }

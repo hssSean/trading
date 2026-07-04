@@ -372,9 +372,28 @@ export async function GET(req: NextRequest) {
 
   const coinsParam = req.nextUrl.searchParams.get('coins') ?? process.env.WATCH_COINS ?? '';
   const tfParam    = process.env.ANALYSIS_TIMEFRAMES ?? '5m,15m,1h';
-  const lineToken  = process.env.LINE_CHANNEL_TOKEN ?? '';
   const lineUserId = process.env.LINE_USER_ID ?? '';
   const minScore   = parseInt(process.env.MIN_SCORE ?? '5', 10);
+
+  // ── Resolve LINE token: profile (user-managed) > env fallback ──────────────
+  // profiles.line_token is updated whenever the user saves settings in the app,
+  // so it stays fresh. LINE_CHANNEL_TOKEN env var expires every 30 days and
+  // requires manual renewal in Vercel — reading from the profile avoids that.
+  let lineToken = process.env.LINE_CHANNEL_TOKEN ?? '';
+  {
+    const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+    const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    if (lineUserId && sbUrl && sbKey) {
+      try {
+        const { createClient: mkLineAdmin } = await import('@supabase/supabase-js');
+        const lineAdmin = mkLineAdmin(sbUrl, sbKey);
+        const { data: lp } = await lineAdmin
+          .from('profiles').select('line_token')
+          .eq('line_user_id', lineUserId).maybeSingle();
+        if (lp?.line_token) lineToken = lp.line_token;
+      } catch { /* keep env fallback */ }
+    }
+  }
 
   const coins: string[] = coinsParam
     ? coinsParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
@@ -692,5 +711,7 @@ async function sendLineWithRetry(token: string, uid: string, msgs: object[]) {
   const first = await sendLineMessage(token, uid, msgs);
   if (first.ok) return first;
   await delay(1500);
-  return sendLineMessage(token, uid, msgs);
+  const second = await sendLineMessage(token, uid, msgs);
+  if (!second.ok) console.error(`[LINE] both attempts failed: ${second.error ?? 'unknown'}`);
+  return second;
 }
