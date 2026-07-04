@@ -69,6 +69,8 @@ export async function loadFromSupabase(userId: string) {
   if (tr && tr.length > 0) {
     const existingMap       = new Map(store.trades.map(t => [t.id, t]));
     const existingSignalIds = new Set(store.trades.map(t => t.signalId).filter(Boolean));
+    // reverse lookup: signalId → local trade (for reconciling server trades with different IDs)
+    const existingBySignal  = new Map(store.trades.filter(t => !!t.signalId).map(t => [t.signalId!, t]));
     const activeSymbols     = new Set(store.trades.filter(t => !t.result && t.status !== 'waiting').map(t => t.symbol));
     const incoming: TradeRecord[] = [];
 
@@ -76,6 +78,7 @@ export async function loadFromSupabase(userId: string) {
       if (sessionDeletedIds.has(r.id as string)) continue;
 
       if (existingMap.has(r.id as string)) {
+        // Same ID — propagate server status to local record
         const local = existingMap.get(r.id as string)!;
         if (r.result && !local.result) {
           useStore.getState().closeTrade(r.id as string, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
@@ -90,14 +93,30 @@ export async function loadFromSupabase(userId: string) {
             trades: s.trades.map(t => t.id === r.id ? { ...t, status: 'tp1_hit' as const } : t),
           }));
         }
-      } else if (
-        !existingSignalIds.has((r.signal_id as string) ?? '') &&
-        (r.result != null || r.status === 'waiting' || !activeSymbols.has(r.symbol as string))
-      ) {
-        const record = rowToRecord(r);
-        incoming.push(record);
-        existingSignalIds.add((r.signal_id as string) ?? '');
-        if (!r.result) activeSymbols.add(r.symbol as string);
+      } else {
+        const srvSignalId = (r.signal_id as string) ?? '';
+        const localBySig  = srvSignalId ? existingBySignal.get(srvSignalId) : undefined;
+        if (localBySig) {
+          // Different ID but same signalId — server is authoritative; push status to local trade
+          if (r.status === 'active' && localBySig.status === 'waiting') {
+            useStore.setState(s => ({
+              trades: s.trades.map(t => t.signalId === srvSignalId ? { ...t, status: 'active' as const } : t),
+            }));
+          }
+          if (r.status === 'tp1_hit' && localBySig.status !== 'tp1_hit') {
+            useStore.setState(s => ({
+              trades: s.trades.map(t => t.signalId === srvSignalId ? { ...t, status: 'tp1_hit' as const } : t),
+            }));
+          }
+          if (r.result && !localBySig.result) {
+            useStore.getState().closeTrade(localBySig.id, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
+          }
+        } else if (r.result != null || r.status === 'waiting' || !activeSymbols.has(r.symbol as string)) {
+          const record = rowToRecord(r);
+          incoming.push(record);
+          if (srvSignalId) existingSignalIds.add(srvSignalId);
+          if (!r.result) activeSymbols.add(r.symbol as string);
+        }
       }
     }
 

@@ -177,6 +177,8 @@ export const useStore = create<StoreState>()(
         if (existing.some((t) => t.signalId === signal.id)) return;
         // Skip if there's already an open trade for this symbol
         if (existing.some((t) => t.symbol === signal.symbol && !t.result)) return;
+        const sp = signal.signalPrice ?? 0;
+        const isLimitOrder = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
         const trade: TradeRecord = {
           id: `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           signalId: signal.id,
@@ -191,6 +193,8 @@ export const useStore = create<StoreState>()(
           tp2: signal.takeProfits[1] ?? signal.takeProfits[0],
           reasons: signal.reasons,
           openedAt: Date.now(),
+          status: isLimitOrder ? 'waiting' : 'active',
+          signalPrice: sp > 0 ? sp : undefined,
         };
         set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
       },
