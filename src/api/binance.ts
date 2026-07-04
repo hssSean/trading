@@ -17,12 +17,18 @@ export async function fetchCandles(
   timeframe: Timeframe,
   limit = 200,
   retries = 3,
+  startTime?: number,
 ): Promise<Candle[]> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       const res = await client.get('/klines', {
-        params: { symbol, interval: INTERVAL_MAP[timeframe], limit },
+        params: {
+          symbol,
+          interval: INTERVAL_MAP[timeframe],
+          limit,
+          ...(startTime !== undefined ? { startTime } : {}),
+        },
       });
       return res.data.map((k: unknown[]) => ({
         openTime:  k[0] as number,

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
+import { fetchCandles } from '@/api/binance';
 import { TradeRecord } from '@/types';
 
 // Tracks IDs deleted in this session so loadFromSupabase won't re-add them.
@@ -184,12 +185,13 @@ async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> 
 // then confirms via Binance live price. Skips trades the server confirmed as 'active'.
 async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive: Set<string> = new Set()): Promise<void> {
   const store = useStore.getState();
+  // Suspects: open trades that look like limit orders but whose fill status is uncertain.
+  // Status may be null-defaulted to 'active' because the DB status column didn't exist.
+  // Confirmed-active trades (server verified) are excluded — no need to re-check.
   const suspects = store.trades.filter(t => {
     if (t.result || t.status === 'waiting') return false;
-    if (confirmedActive.has(t.id)) return false; // server confirmed legitimately filled → skip
+    if (confirmedActive.has(t.id)) return false;
     const sp = t.signalPrice ?? 0;
-    // Use reasons as fallback when signalPrice absent (old trades whose signal_price
-    // column didn't exist in DB yet — the insert failed silently).
     const hasLimitReason = (t.reasons ?? []).some(
       r => r.includes('掛限價單') || r.includes('待回測') || r.includes('待反彈')
     );
@@ -200,38 +202,54 @@ async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive:
   });
   if (suspects.length === 0) return;
 
-  const symbols = Array.from(new Set(suspects.map(t => t.symbol)));
-  const prices: Record<string, number> = {};
-  try {
-    const symList = symbols.map(s => `"${s}"`).join(',');
-    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbols=[${symList}]`);
-    if (res.ok) {
-      const data = await res.json() as { symbol: string; price: string }[];
-      data.forEach((d: { symbol: string; price: string }) => { prices[d.symbol] = parseFloat(d.price); });
-    }
-  } catch { return; }
+  // For each suspect: fetch 4h K-lines from openedAt to now and check whether
+  // price EVER touched the entry. 4h × 500 ≈ 83 days of coverage — enough for any
+  // realistic open trade. If touched → latch 'active'. If never touched → 'waiting'.
+  const toActivate: string[] = [];
+  const toWaiting:  string[] = [];
 
-  const toRevert: string[] = [];
   for (const t of suspects) {
-    const price = prices[t.symbol];
-    if (!price) continue;
-    const clearlyUnfilled = t.direction === 'LONG'
-      ? price > t.entry * 1.003
-      : price < t.entry * 0.997;
-    if (clearlyUnfilled) toRevert.push(t.id);
+    try {
+      const candles = await fetchCandles(t.symbol, '4h', 500, 2, t.openedAt);
+      const entryTouched = candles.some(c =>
+        t.direction === 'LONG'  ? c.low  <= t.entry :
+        t.direction === 'SHORT' ? c.high >= t.entry :
+        false
+      );
+      if (entryTouched) {
+        toActivate.push(t.id);
+      } else {
+        toWaiting.push(t.id);
+      }
+    } catch {
+      // API failure — leave this trade's status unchanged; retry on next load
+    }
+    await new Promise(r => setTimeout(r, 250)); // stagger to avoid 429
   }
-  if (toRevert.length === 0) return;
 
-  const toRevertSet = new Set(toRevert);
-  useStore.setState(s => ({
-    trades: s.trades.map(t => toRevertSet.has(t.id) ? { ...t, status: 'waiting' as const } : t),
-  }));
+  // Update Zustand store
+  const activateSet = new Set(toActivate);
+  const waitingSet  = new Set(toWaiting);
+  if (activateSet.size > 0 || waitingSet.size > 0) {
+    useStore.setState(s => ({
+      trades: s.trades.map(t => {
+        if (activateSet.has(t.id)) return { ...t, status: 'active'  as const };
+        if (waitingSet.has(t.id))  return { ...t, status: 'waiting' as const };
+        return t;
+      }),
+    }));
+  }
+
+  // Persist to DB (best-effort; safe to fail if status column not yet migrated)
   if (userId) {
-    await Promise.allSettled(
-      toRevert.map(id =>
+    await Promise.allSettled([
+      ...toActivate.map(id =>
+        supabase.from('trades').update({ status: 'active'  }).eq('id', id).eq('user_id', userId)
+      ),
+      ...toWaiting.map(id =>
         supabase.from('trades').update({ status: 'waiting' }).eq('id', id).eq('user_id', userId)
-      )
-    );
+      ),
+    ]);
   }
 }
 
