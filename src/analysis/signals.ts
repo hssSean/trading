@@ -158,8 +158,10 @@ export function generateSignals(
 ): TradingSignal[] {
   if (candles.length < 55) return [];
 
-  const intraday = isIntradayTF(timeframe);
-  const MIN_SCORE = intraday ? MIN_SCORE_INTRADAY : MIN_SCORE_SWING;
+  const intraday  = isIntradayTF(timeframe);
+  const isLongTF  = timeframe === '4h' || timeframe === '1d';
+  // 4h/1d signals need stronger confluence — require 2 extra points above the swing base
+  const MIN_SCORE = intraday ? MIN_SCORE_INTRADAY : isLongTF ? MIN_SCORE_SWING + 2 : MIN_SCORE_SWING;
   const MIN_RR    = intraday ? MIN_RR_INTRADAY    : MIN_RR_SWING;
 
   const cur             = candles[candles.length - 1];
