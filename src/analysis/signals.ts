@@ -196,6 +196,9 @@ export function generateSignals(
   const rangingPenalty    = structure.trend === 'ranging' ? RANGING_PENALTY : 0;
   const effectiveMinScore = MIN_SCORE + rangingPenalty + (atrPct > HIGH_VOLIT_PCT ? HIGH_VOLIT_EXTRA : 0);
 
+  // Hard gate: ATR > 40% means the coin swings too wildly to set a meaningful SL
+  if (atrPct > 0.40) return [];
+
   // EMA200 zone: wider for short TF (5m/15m EMA200 fluctuates more)
   const ema200Zone  = intraday ? 0.015 : 0.008;
   const aboveEma200     = price > ind.ema200;
@@ -395,9 +398,14 @@ export function generateSignals(
   const atrMulti = intraday
     ? Math.min(Math.max(1.0, atrPct / 0.015), 2.0)
     : Math.min(Math.max(1.5, atrPct / 0.015), 2.5);
-  const slBuffer = intraday
-    ? Math.max(atrVal * atrMulti, price * 0.004)
-    : Math.max(atrVal * atrMulti, price * 0.010);
+  // Cap SL distance: never wider than 5% (intraday) or 12% (swing) of price
+  const MAX_SL_PCT = intraday ? 0.05 : 0.12;
+  const slBuffer = Math.min(
+    intraday
+      ? Math.max(atrVal * atrMulti, price * 0.004)
+      : Math.max(atrVal * atrMulti, price * 0.010),
+    price * MAX_SL_PCT,
+  );
 
   // Entry zone thresholds — how far below/above current price counts as a limit order
   //   5m  : ±0.3%  (price moves fast, entries must be close)
