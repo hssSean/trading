@@ -90,7 +90,7 @@ export default function TradesPage() {
   } | null>(null);
   const [exitPrice,  setExitPrice]  = useState('');
   const [exitResult, setExitResult] = useState<TradeResult>('WIN_TP1');
-  const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'CLOSED' | 'PROFIT' | 'LOSS_LIVE'>('ALL');
+  const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'WAITING' | 'CLOSED' | 'PROFIT' | 'LOSS_LIVE'>('ALL');
   const [resultFilter, setResultFilter] = useState<'ALL' | 'WIN' | 'LOSS'>('ALL');
   const [dirFilter,  setDirFilter]  = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
   const [dateFilter, setDateFilter] = useState<'all' | 'week' | 'month'>('all');
@@ -297,7 +297,8 @@ export default function TradesPage() {
         ? (livePx - t.entry) / t.entry * 100
         : (t.entry - livePx) / t.entry * 100;
     };
-    let base = filter === 'PENDING'   ? [...pending, ...waiting]
+    let base = filter === 'PENDING'   ? pending
+             : filter === 'WAITING'   ? waiting
              : filter === 'CLOSED'    ? closed
              : filter === 'PROFIT'    ? pending.filter(t => (calcLivePnl(t) ?? -1) > 0)
              : filter === 'LOSS_LIVE' ? pending.filter(t => (calcLivePnl(t) ?? 1) < 0)
@@ -751,7 +752,8 @@ export default function TradesPage() {
         <div className="flex gap-1.5 mb-2 flex-wrap">
           {([
             ['ALL',       '全部'],
-            ['PENDING',   `持倉 (${pending.length + waiting.length})`],
+            ['PENDING',   `持倉 (${pending.length})`],
+            ['WAITING',   waiting.length > 0 ? `等待進場 (${waiting.length})` : '等待進場'],
             ['CLOSED',    `結束 (${closed.length})`],
             ['PROFIT',    '浮盈'],
             ['LOSS_LIVE', '浮虧'],
@@ -761,9 +763,11 @@ export default function TradesPage() {
                 filter === f
                   ? f === 'PROFIT'    ? 'bg-green-500 border-green-500 text-white'
                   : f === 'LOSS_LIVE' ? 'bg-red-500 border-red-500 text-white'
+                  : f === 'WAITING'   ? 'bg-yellow-500 border-yellow-500 text-black'
                   : 'bg-[#F0B90B] border-[#F0B90B] text-[#0A0A0F]'
                   : f === 'PROFIT'    ? 'border-green-500/30 text-green-500/70'
                   : f === 'LOSS_LIVE' ? 'border-red-500/30 text-red-400/70'
+                  : f === 'WAITING'   ? 'border-yellow-500/30 text-yellow-400/70'
                   : 'border-[#1E1E2E] text-[#606080]'
               }`}>
               {label}

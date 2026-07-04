@@ -4,7 +4,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
 import { fetchCandles } from '@/api/binance';
-import { TradeRecord } from '@/types';
+import { TradeRecord, TradingSignal } from '@/types';
 
 // Tracks IDs deleted in this session so loadFromSupabase won't re-add them.
 // Module-level so it persists across re-renders and periodic syncs.
@@ -424,6 +424,28 @@ export async function saveToSupabase(userId: string) {
   if (tradeRows.length > 0) await supabase.from('trades').upsert(tradeRows, { onConflict: 'id' });
 }
 
+// ── Pending signal pickup (runs on any page, not just home) ───────
+// Ensures market-entry signals sent by server get picked up even when
+// the user opens the app directly to the trades page (bypassing page.tsx).
+async function pickupServerSignals(): Promise<void> {
+  const secret = useStore.getState().webhookSecret;
+  if (!secret) return;
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'x-webhook-secret': secret },
+    });
+    if (!res.ok) return;
+    const data = await res.json() as { signals?: TradingSignal[] };
+    for (const sig of data.signals ?? []) {
+      const s = useStore.getState();
+      if (s.trades.some(t => t.signalId === sig.id)) continue;
+      if (!s.coins.find(c => c.symbol === sig.symbol)) s.addCoin(sig.symbol);
+      if (!s.hasActiveTrade(sig.symbol)) s.addTrade(sig);
+    }
+  } catch { /* ignore network errors */ }
+}
+
 // ── Component ──────────────────────────────────────────────────────
 
 export function StoreHydration({ children }: { children: React.ReactNode }) {
@@ -472,9 +494,9 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     if (!userId || !hasHydrated || syncDoneRef.current) return;
     syncDoneRef.current = true;
 
-    // Server writes trades directly to Supabase with status='waiting'|'active',
-    // so we only need to load from Supabase — no manual pickup needed.
-    loadFromSupabase(userId).catch(() => {});
+    loadFromSupabase(userId)
+      .then(() => pickupServerSignals())  // pick up any Redis-queued signals missed on other pages
+      .catch(() => {});
 
     // Auto-save on state changes (debounced 4s)
     const unsub = useStore.subscribe(() => {
@@ -509,6 +531,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
       if (!uid) return;
       // Load first so we pick up closes from other devices before uploading our state.
       await loadFromSupabase(uid).catch(() => {});
+      await pickupServerSignals(); // catch any signals queued since last visit
       await saveToSupabase(uid).catch(() => {});
     };
     document.addEventListener('visibilitychange', handleVisibility);

@@ -507,7 +507,7 @@ export async function GET(req: NextRequest) {
                   const sp = topStrong.signalPrice ?? 0;
                   const isLimitOrder = sp > 0 && Math.abs(topStrong.entry - sp) / sp > 0.003;
                   const tradeId = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                  await admin.from('trades').insert({
+                  const insertData = {
                     id:           tradeId,
                     user_id:      profile.id,
                     signal_id:    topStrong.id,
@@ -525,7 +525,14 @@ export async function GET(req: NextRequest) {
                     opened_at:    Date.now(),
                     status:       isLimitOrder ? 'waiting' : 'active',
                     signal_price: sp,
-                  });
+                  };
+                  const ir = await admin.from('trades').insert(insertData);
+                  if (ir.error?.code === '42703') {
+                    // status / signal_price columns not yet in DB schema — retry without them
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    const { status: _s, signal_price: _sp, ...baseData } = insertData;
+                    await admin.from('trades').insert(baseData);
+                  }
                 }
               }
             } catch { /* non-critical — Redis fallback still covers client pickup */ }
