@@ -111,7 +111,8 @@ function checkAuth(req: NextRequest): boolean {
   return true;
 }
 
-// ── Server-side monitor: fill detection + TP/SL (runs every cron tick) ──
+// ── Server-side monitor: fill detection + TP/SL via K-line scan ──
+// Uses 1h candlestick high/low so events between cron runs are never missed.
 async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -140,8 +141,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
 
   // ── Fetch waiting and active trades separately ────────────────
   const baseQ = () => {
-    // select('*') is intentional: avoids 42703 errors when new columns (e.g. filled_at) are added
-    // without requiring a schema-aware column list update here.
+    // select('*') avoids 42703 when new columns are added without updating this list
     let q = admin.from('trades').select('*').is('result', null);
     if (ownerFilter) q = q.eq('user_id', ownerFilter);
     return q;
@@ -160,177 +160,201 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
   }
 
-  // Fetch prices for all relevant symbols in one batch
-  const allSymbols = Array.from(new Set([...waiting, ...active].map(t => t.symbol as string)));
-  const prices: Record<string, number> = {};
-  if (allSymbols.length > 0) {
-    try {
-      // Batch API: one request for all symbols
-      const symList = allSymbols.map(s => `"${s}"`).join(',');
-      const bRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbols=[${symList}]`);
-      if (bRes.ok) {
-        const bData = await bRes.json() as { symbol: string; price: string }[];
-        bData.forEach(d => { prices[d.symbol] = parseFloat(d.price); });
-      }
-    } catch {
-      // Fallback: individual fetches
-      await Promise.all(allSymbols.map(async sym => {
-        try {
-          const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`);
-          if (res.ok) prices[sym] = parseFloat((await res.json()).price);
-        } catch {}
-      }));
-    }
-  }
-
+  const now = Date.now();
   let filled = 0, cancelled = 0, closed = 0;
+
+  // Update last_monitored_at after each check so the next run only fetches new candles.
+  // 42703 = column not yet migrated → skip silently (non-critical optimisation).
+  async function touchMonitoredAt(id: string) {
+    const r = await admin.from('trades').update({ last_monitored_at: now }).eq('id', id);
+    if (r.error && r.error.code !== '42703') { /* non-critical */ }
+  }
 
   // ── Phase 1: fill detection for waiting (limit) orders ───────
   for (const trade of waiting) {
-    const price = prices[trade.symbol];
-    if (!price) continue;
+    // Resume scan from last check; fall back to order placement time
+    const startMs = (trade.last_monitored_at ?? trade.opened_at ?? (now - WAITING_EXPIRY_HOURS * 3_600_000)) as number;
+
+    let candles: Candle[] = [];
+    try {
+      // limit=168 covers up to 7 days of 1h bars (safety net for first run before last_monitored_at is set)
+      candles = await fetchCandles(trade.symbol as string, '1h', 168, 3, startMs);
+    } catch {
+      await delay(200);
+      continue;
+    }
+    await delay(200); // stagger per-trade fetches to avoid Binance 429
 
     const isLong = trade.direction === 'LONG';
+    const sp     = (trade.signal_price ?? 0) as number;
+    const entry  = trade.entry as number;
 
-    const sp = trade.signal_price ?? 0;
-
-    // Fill: price reached entry level.
-    // For LONG: signal_price must have been above entry (confirmed limit, not market)
-    // tolerance ±0.1% for cron polling latency.
-    const isFilled = isLong
-      ? price <= trade.entry * 1.001 && (sp === 0 || sp > trade.entry * 1.002)
-      : price >= trade.entry * 0.999 && (sp === 0 || sp < trade.entry * 0.998);
-
-    // Auto-expire: waiting limit order not filled within 8 hours → cancel
-    const isExpired = (Date.now() - (trade.opened_at ?? 0)) > WAITING_EXPIRY_HOURS * 60 * 60 * 1000;
-
-    // Auto-cancel: TP1 hit before entry (missed move)
-    const isCancelled = !isFilled && (isExpired || (
+    // Fill: any 1h candle's low (LONG) / high (SHORT) touched entry ±0.1%
+    const fillCandle = candles.find(c =>
       isLong
-        ? price >= trade.tp1
-        : price <= trade.tp1
-    ));
+        ? c.low  <= entry * 1.001 && (sp === 0 || sp > entry * 1.002)
+        : c.high >= entry * 0.999 && (sp === 0 || sp < entry * 0.998)
+    );
+    const isFilled = !!fillCandle;
+
+    // Cancel: expired, OR any candle shows TP1 reached without price pulling back to entry
+    const isExpired = (now - ((trade.opened_at ?? 0) as number)) > WAITING_EXPIRY_HOURS * 3_600_000;
+    const tpAlreadyPassed = !isFilled && candles.some(c =>
+      isLong ? c.high >= (trade.tp1 as number) : c.low <= (trade.tp1 as number)
+    );
+    const isCancelled = !isFilled && (isExpired || tpAlreadyPassed);
 
     if (isFilled) {
-      // Record fill time in filled_at; preserve original opened_at (order placement time).
-      // Fallback: if filled_at column doesn't exist yet, reset opened_at as before.
-      const now = Date.now();
-      const fillRes = await admin.from('trades')
-        .update({ status: 'active', filled_at: now })
+      const filledAt = fillCandle!.closeTime ?? now;
+      const fillRes  = await admin.from('trades')
+        .update({ status: 'active', filled_at: filledAt, last_monitored_at: now })
         .eq('id', trade.id);
       if (fillRes.error?.code === '42703') {
-        await admin.from('trades').update({ status: 'active', opened_at: now }).eq('id', trade.id);
+        // columns not yet migrated — fall back without the new fields
+        await admin.from('trades').update({ status: 'active', opened_at: filledAt }).eq('id', trade.id);
       }
       filled++;
 
       if (lineToken && lineUserId) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
-        const sym = trade.symbol.replace('USDT', '/USDT');
+        const sym = (trade.symbol as string).replace('USDT', '/USDT');
         const msg =
           `【✅ 掛單成交】${sym}\n` +
           `${dir} 進場已確認，已自動加入交易日誌\n` +
-          `成交價：$${price}\n` +
+          `成交價：$${fillCandle!.close}\n` +
           `TP1：$${trade.tp1} ｜ SL：$${trade.stop_loss}`;
         await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
     } else if (isCancelled) {
-      // Price hit TP before entry — delete the pending record and unlock
       await admin.from('trades').delete().eq('id', trade.id);
-      await unlockSymbol(trade.symbol);
+      await unlockSymbol(trade.symbol as string);
       cancelled++;
 
       if (lineToken && lineUserId) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
-        const sym = trade.symbol.replace('USDT', '/USDT');
+        const sym = (trade.symbol as string).replace('USDT', '/USDT');
         const reason = isExpired
           ? `掛單逾期 ${WAITING_EXPIRY_HOURS} 小時未成交，已自動取消`
-          : `價格未回測至進場位 $${trade.entry}，直接到達 TP1 $${trade.tp1}，掛單已自動取消`;
+          : `價格未回測至進場位 $${entry}，直接到達 TP1 $${trade.tp1}，掛單已自動取消`;
         const msg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
         await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
+    } else {
+      // No state change — record we've checked up to now so next run fetches only new candles
+      await touchMonitoredAt(trade.id as string);
     }
   }
 
-  // ── Phase 2: TP/SL monitoring + 24h intraday auto-close ──────
+  // ── Phase 2: TP/SL monitoring + timeframe-aware auto-close ───
   for (const trade of active) {
-    const price = prices[trade.symbol];
-    if (!price) continue;
+    const startMs = (trade.last_monitored_at ?? trade.filled_at ?? trade.opened_at ?? (now - 168 * 3_600_000)) as number;
 
-    const isLong    = trade.direction === 'LONG';
-    const isTp1Hit  = trade.status === 'tp1_hit';
+    let candles: Candle[] = [];
+    try {
+      candles = await fetchCandles(trade.symbol as string, '1h', 168, 3, startMs);
+    } catch {
+      await delay(200);
+      continue;
+    }
+    await delay(200);
+
+    const isLong   = trade.direction === 'LONG';
+    const isTp1Hit = trade.status === 'tp1_hit';
+
     let closeResult: string | null = null;
     let closePrice  = 0;
     let justHitTp1  = false;
+    // localTp1Hit tracks TP1 across this scan (DB state + any new hit found in candles)
+    let localTp1Hit = isTp1Hit;
 
-    if (isLong) {
-      if (price >= trade.tp2) {
-        closeResult = 'WIN_TP2'; closePrice = trade.tp2;
-      } else if (!isTp1Hit && price >= trade.tp1) {
-        justHitTp1 = true; // TP1 reached — mark and keep monitoring
-      } else if (price <= trade.stop_loss) {
-        // After TP1 hit → WIN_TP1 (partial win); before → LOSS
-        closeResult = isTp1Hit ? 'WIN_TP1' : 'LOSS';
-        closePrice  = trade.stop_loss;
-      }
-    } else {
-      if (price <= trade.tp2) {
-        closeResult = 'WIN_TP2'; closePrice = trade.tp2;
-      } else if (!isTp1Hit && price <= trade.tp1) {
-        justHitTp1 = true;
-      } else if (price >= trade.stop_loss) {
-        closeResult = isTp1Hit ? 'WIN_TP1' : 'LOSS';
-        closePrice  = trade.stop_loss;
+    // Scan candles in chronological order.
+    // Same-candle conflict (SL + TP in one candle): SL wins — conservative, protects capital.
+    for (const c of candles) {
+      if (isLong) {
+        if (c.low <= (trade.stop_loss as number)) {
+          closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
+          closePrice  = trade.stop_loss as number;
+          break;
+        }
+        if (c.high >= (trade.tp2 as number)) {
+          closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
+        }
+        if (!localTp1Hit && c.high >= (trade.tp1 as number)) {
+          localTp1Hit = true; justHitTp1 = true; // keep scanning — later candles may still hit SL/TP2
+        }
+      } else {
+        if (c.high >= (trade.stop_loss as number)) {
+          closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
+          closePrice  = trade.stop_loss as number;
+          break;
+        }
+        if (c.low <= (trade.tp2 as number)) {
+          closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
+        }
+        if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
+          localTp1Hit = true; justHitTp1 = true;
+        }
       }
     }
 
-    // TP1 just reached: mark status and send LINE — do NOT close the trade
-    if (justHitTp1) {
-      await admin.from('trades').update({ status: 'tp1_hit' }).eq('id', trade.id);
+    // TP1 newly reached in this scan, no close yet → mark and notify
+    if (justHitTp1 && !closeResult) {
+      const tp1Res = await admin.from('trades')
+        .update({ status: 'tp1_hit', last_monitored_at: now })
+        .eq('id', trade.id);
+      if (tp1Res.error?.code === '42703') {
+        await admin.from('trades').update({ status: 'tp1_hit' }).eq('id', trade.id);
+      }
       if (lineToken && lineUserId) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
-        const sym = trade.symbol.replace('USDT', '/USDT');
+        const sym = (trade.symbol as string).replace('USDT', '/USDT');
         const msg =
           `【🎯 TP1 達標】${sym}\n` +
           `${dir} TP1 $${trade.tp1} 已達標，繼續持有等待 TP2 $${trade.tp2}\n` +
           `💡 建議立刻將止損移至成本 $${trade.entry}`;
         await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
-      continue; // Skip close logic this tick
+      continue;
     }
 
-    // Timeframe-aware auto-close: 4h needs more runway than 1h
+    // Timeframe-aware auto-close: use last candle close as exit price (no spot fetch needed)
     const autoCloseHours = trade.timeframe === '4h' ? 72 : trade.timeframe === '1d' ? 168 : INTRADAY_CLOSE_HOURS;
-    // Use filled_at (fill time) if available, otherwise opened_at (order placement time)
-    const ageHours = (Date.now() - (trade.filled_at ?? trade.opened_at ?? 0)) / (60 * 60 * 1000);
-    if (!closeResult && ageHours >= autoCloseHours) {
-      closeResult = isTp1Hit ? 'WIN_TP1' : 'MANUAL_CLOSE';
-      closePrice  = price;
+    const ageHours       = (now - ((trade.filled_at ?? trade.opened_at ?? 0) as number)) / 3_600_000;
+    const lastClose      = candles.length > 0 ? candles[candles.length - 1].close : null;
+
+    if (!closeResult && ageHours >= autoCloseHours && lastClose !== null) {
+      closeResult = localTp1Hit ? 'WIN_TP1' : 'MANUAL_CLOSE';
+      closePrice  = lastClose;
     }
 
-    if (!closeResult) continue;
+    if (!closeResult) {
+      await touchMonitoredAt(trade.id as string);
+      continue;
+    }
 
-    const pnl = isLong
-      ? ((closePrice - trade.entry) / trade.entry) * 100
-      : ((trade.entry - closePrice) / trade.entry) * 100;
+    const entry = trade.entry as number;
+    const pnl   = isLong
+      ? ((closePrice - entry) / entry) * 100
+      : ((entry - closePrice) / entry) * 100;
 
     await admin.from('trades').update({
       result:      closeResult,
       exit_price:  closePrice,
-      closed_at:   Date.now(),
+      closed_at:   now,
       pnl_percent: parseFloat(pnl.toFixed(2)),
     }).eq('id', trade.id);
 
-    await unlockSymbol(trade.symbol);
+    await unlockSymbol(trade.symbol as string);
 
     if (lineToken && lineUserId) {
       const dir = isLong ? '▲ 做多' : '▼ 做空';
-      const sym = trade.symbol.replace('USDT', '/USDT');
+      const sym = (trade.symbol as string).replace('USDT', '/USDT');
       let msg: string;
       if (closeResult === 'MANUAL_CLOSE') {
-        msg = `【⏱ 日內單到期平倉】${sym}\n${dir} 超過 ${INTRADAY_CLOSE_HOURS}小時未達標，自動平倉\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+        msg = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       } else {
         const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
-                    : closeResult === 'WIN_TP1' ? (isTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
+                    : closeResult === 'WIN_TP1' ? (localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
                     : '❌ 止損出場';
         msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       }
