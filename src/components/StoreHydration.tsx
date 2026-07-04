@@ -78,45 +78,19 @@ export async function loadFromSupabase(userId: string) {
       if (sessionDeletedIds.has(r.id as string)) continue;
 
       if (existingMap.has(r.id as string)) {
-        // Same ID — propagate server status to local record
+        // Same ID — only propagate result; status transitions handled by reconcileFromServer()
+        // because the 'status' column is not accessible to the authenticated role (42703 error),
+        // so r.status always defaults to 'active' — we must NOT overwrite local 'waiting' with it.
         const local = existingMap.get(r.id as string)!;
         if (r.result && !local.result) {
           useStore.getState().closeTrade(r.id as string, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
-        }
-        if (r.status === 'active' && local.status === 'waiting') {
-          useStore.setState(s => ({
-            trades: s.trades.map(t => t.id === r.id ? { ...t, status: 'active' as const } : t),
-          }));
-        }
-        if (r.status === 'tp1_hit' && local.status !== 'tp1_hit') {
-          useStore.setState(s => ({
-            trades: s.trades.map(t => t.id === r.id ? { ...t, status: 'tp1_hit' as const } : t),
-          }));
         }
       } else {
         const srvSignalId = (r.signal_id as string) ?? '';
         const localBySig  = srvSignalId ? existingBySignal.get(srvSignalId) : undefined;
         if (localBySig) {
-          // Different ID but same signalId — server is authoritative; push status to local trade
-          if (r.status === 'waiting' && localBySig.status !== 'waiting') {
-            // Server correctly has 'waiting' but local (created by old addTrade) has wrong status
-            useStore.setState(s => ({
-              trades: s.trades.map(t => t.signalId === srvSignalId
-                ? { ...t, status: 'waiting' as const, signalPrice: (r.signal_price as number | null) ?? t.signalPrice }
-                : t
-              ),
-            }));
-          }
-          if (r.status === 'active' && localBySig.status === 'waiting') {
-            useStore.setState(s => ({
-              trades: s.trades.map(t => t.signalId === srvSignalId ? { ...t, status: 'active' as const } : t),
-            }));
-          }
-          if (r.status === 'tp1_hit' && localBySig.status !== 'tp1_hit') {
-            useStore.setState(s => ({
-              trades: s.trades.map(t => t.signalId === srvSignalId ? { ...t, status: 'tp1_hit' as const } : t),
-            }));
-          }
+          // Different ID but same signalId — close if server has result;
+          // status transitions handled by reconcileFromServer() (status column not readable by client).
           if (r.result && !localBySig.result) {
             useStore.getState().closeTrade(localBySig.id, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
           }
@@ -145,21 +119,67 @@ export async function loadFromSupabase(userId: string) {
     }));
   }
 
-  // Backup reconciliation: for open trades whose Supabase record is also 'active'
-  // (incorrectly created without waiting status), verify via current price and revert.
-  // Handles the case where both local and Supabase have wrong status.
-  await reconcileIncorrectlyActiveTrades(userId);
+  // Step 1: Ask server for actual status (service role bypasses column-grant restrictions).
+  // This fixes the root cause: 'status' and 'signal_price' columns return 42703 for the
+  // authenticated role, so we can't trust what loadFromSupabase reads from Supabase directly.
+  const webhookSecret = useStore.getState().webhookSecret;
+  const confirmedActive = await reconcileFromServer(webhookSecret);
+
+  // Step 2: Fallback price-based reconcile for trades the server returned null status for.
+  await reconcileIncorrectlyActiveTrades(userId, confirmedActive);
 }
 
-// Finds open trades that are marked active/undefined but whose signalPrice clearly
-// indicates an unfilled limit order, then confirms via Binance price before reverting
-// to 'waiting'. Only acts when price is >0.5% away from entry (safe margin).
-async function reconcileIncorrectlyActiveTrades(userId: string): Promise<void> {
+// Calls /api/trade-status (server uses service role key to read the status column that
+// the authenticated role cannot access). Returns a Set of IDs the server confirmed as
+// legitimately 'active' (filled), so the price-based fallback doesn't false-positive them.
+async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> {
+  const confirmedActive = new Set<string>();
+  const store = useStore.getState();
+  const openTrades = store.trades.filter(t => !t.result);
+  if (openTrades.length === 0) return confirmedActive;
+
+  try {
+    const res = await fetch('/api/trade-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-webhook-secret': webhookSecret },
+      body: JSON.stringify({ ids: openTrades.map(t => t.id) }),
+    });
+    if (!res.ok) return confirmedActive;
+
+    const { statuses } = await res.json() as {
+      statuses: Record<string, { status: string | null; signalPrice: number | null }>
+    };
+
+    useStore.setState(s => ({
+      trades: s.trades.map(t => {
+        if (t.result) return t;
+        const srv = statuses[t.id];
+        // null status = legacy record before status column existed; keep local state unchanged
+        if (!srv || srv.status == null) return t;
+        const newStatus = srv.status as 'waiting' | 'active' | 'tp1_hit';
+        if (newStatus === 'active') confirmedActive.add(t.id);
+        return {
+          ...t,
+          status: newStatus,
+          ...(srv.signalPrice != null ? { signalPrice: srv.signalPrice } : {}),
+        };
+      }),
+    }));
+  } catch { /* network error — fall through to price-based reconcile */ }
+
+  return confirmedActive;
+}
+
+// Fallback for trades where the server returned null status (legacy records) or the
+// server endpoint was unreachable. Uses signalPrice to identify unfilled limit orders,
+// then confirms via Binance live price. Skips trades the server confirmed as 'active'.
+async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive: Set<string> = new Set()): Promise<void> {
   const store = useStore.getState();
   const suspects = store.trades.filter(t => {
     if (t.result || t.status === 'waiting') return false;
+    if (confirmedActive.has(t.id)) return false; // server confirmed legitimately filled → skip
     const sp = t.signalPrice ?? 0;
-    if (sp === 0) return false;
+    if (sp === 0) return false; // no signalPrice means we can't detect limit vs market safely
     const isLongLimit  = t.direction === 'LONG'  && sp > t.entry * 1.003;
     const isShortLimit = t.direction === 'SHORT' && sp < t.entry * 0.997;
     return isLongLimit || isShortLimit;
@@ -181,19 +201,19 @@ async function reconcileIncorrectlyActiveTrades(userId: string): Promise<void> {
   for (const t of suspects) {
     const price = prices[t.symbol];
     if (!price) continue;
-    // 0.5% buffer: only revert when price is clearly away from entry (not just bouncing)
     const clearlyUnfilled = t.direction === 'LONG'
-      ? price > t.entry * 1.005
-      : price < t.entry * 0.995;
+      ? price > t.entry * 1.003
+      : price < t.entry * 0.997;
     if (clearlyUnfilled) toRevert.push(t.id);
   }
   if (toRevert.length === 0) return;
 
+  const toRevertSet = new Set(toRevert);
   useStore.setState(s => ({
-    trades: s.trades.map(t => toRevert.includes(t.id) ? { ...t, status: 'waiting' as const } : t),
+    trades: s.trades.map(t => toRevertSet.has(t.id) ? { ...t, status: 'waiting' as const } : t),
   }));
   if (userId) {
-    await Promise.all(
+    await Promise.allSettled(
       toRevert.map(id =>
         supabase.from('trades').update({ status: 'waiting' }).eq('id', id).eq('user_id', userId)
       )
@@ -317,6 +337,12 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
       settings:      prof.settings ? { ...s.settings, ...(prof.settings as object) } : s.settings,
     }));
   }
+
+  // Fix status for all open trades (rowToRecord defaults to 'active' since status column
+  // is not readable by client; reconcileFromServer uses service role to get actual status).
+  const webhookSecret = useStore.getState().webhookSecret;
+  const confirmedActive = await reconcileFromServer(webhookSecret);
+  await reconcileIncorrectlyActiveTrades(userId, confirmedActive);
 
   return Math.abs(merged.length - before);
 }
