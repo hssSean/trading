@@ -131,7 +131,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   // ── Fetch waiting and active trades separately ────────────────
   const baseQ = () => {
     let q = admin.from('trades').select(
-      'id, symbol, direction, entry, stop_loss, tp1, tp2, signal_price, strength, score, timeframe, reasons, opened_at'
+      'id, symbol, direction, entry, stop_loss, tp1, tp2, signal_price, strength, score, timeframe, reasons, opened_at, status'
     ).is('result', null);
     if (ownerFilter) q = q.eq('user_id', ownerFilter);
     return q;
@@ -139,8 +139,8 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
 
   const [{ data: waitingRaw }, { data: activeRaw }] = await Promise.all([
     baseQ().eq('status', 'waiting'),
-    // active OR legacy rows (null status from before migration)
-    baseQ().or('status.eq.active,status.is.null'),
+    // active, tp1_hit, or legacy rows (null status from before migration)
+    baseQ().or('status.eq.active,status.is.null,status.eq.tp1_hit'),
   ]);
 
   const waiting = (waitingRaw ?? []) as any[];
@@ -240,24 +240,52 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     const price = prices[trade.symbol];
     if (!price) continue;
 
-    const isLong = trade.direction === 'LONG';
+    const isLong    = trade.direction === 'LONG';
+    const isTp1Hit  = trade.status === 'tp1_hit';
     let closeResult: string | null = null;
-    let closePrice = 0;
+    let closePrice  = 0;
+    let justHitTp1  = false;
 
     if (isLong) {
-      if      (price >= trade.tp2)       { closeResult = 'WIN_TP2';     closePrice = trade.tp2; }
-      else if (price >= trade.tp1)       { closeResult = 'WIN_TP1';     closePrice = trade.tp1; }
-      else if (price <= trade.stop_loss) { closeResult = 'LOSS';        closePrice = trade.stop_loss; }
+      if (price >= trade.tp2) {
+        closeResult = 'WIN_TP2'; closePrice = trade.tp2;
+      } else if (!isTp1Hit && price >= trade.tp1) {
+        justHitTp1 = true; // TP1 reached — mark and keep monitoring
+      } else if (price <= trade.stop_loss) {
+        // After TP1 hit → WIN_TP1 (partial win); before → LOSS
+        closeResult = isTp1Hit ? 'WIN_TP1' : 'LOSS';
+        closePrice  = trade.stop_loss;
+      }
     } else {
-      if      (price <= trade.tp2)       { closeResult = 'WIN_TP2';     closePrice = trade.tp2; }
-      else if (price <= trade.tp1)       { closeResult = 'WIN_TP1';     closePrice = trade.tp1; }
-      else if (price >= trade.stop_loss) { closeResult = 'LOSS';        closePrice = trade.stop_loss; }
+      if (price <= trade.tp2) {
+        closeResult = 'WIN_TP2'; closePrice = trade.tp2;
+      } else if (!isTp1Hit && price <= trade.tp1) {
+        justHitTp1 = true;
+      } else if (price >= trade.stop_loss) {
+        closeResult = isTp1Hit ? 'WIN_TP1' : 'LOSS';
+        closePrice  = trade.stop_loss;
+      }
     }
 
-    // 24h intraday auto-close: if neither TP nor SL hit, force-close at current price
+    // TP1 just reached: mark status and send LINE — do NOT close the trade
+    if (justHitTp1) {
+      await admin.from('trades').update({ status: 'tp1_hit' }).eq('id', trade.id);
+      if (lineToken && lineUserId) {
+        const dir = isLong ? '▲ 做多' : '▼ 做空';
+        const sym = trade.symbol.replace('USDT', '/USDT');
+        const msg =
+          `【🎯 TP1 達標】${sym}\n` +
+          `${dir} TP1 $${trade.tp1} 已達標，繼續持有等待 TP2 $${trade.tp2}\n` +
+          `💡 建議立刻將止損移至成本 $${trade.entry}`;
+        await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+      }
+      continue; // Skip close logic this tick
+    }
+
+    // 24h intraday auto-close
     const ageHours = (Date.now() - (trade.opened_at ?? 0)) / (60 * 60 * 1000);
     if (!closeResult && ageHours >= INTRADAY_CLOSE_HOURS) {
-      closeResult = 'MANUAL_CLOSE';
+      closeResult = isTp1Hit ? 'WIN_TP1' : 'MANUAL_CLOSE';
       closePrice  = price;
     }
 
@@ -284,12 +312,9 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
         msg = `【⏱ 日內單到期平倉】${sym}\n${dir} 超過 ${INTRADAY_CLOSE_HOURS}小時未達標，自動平倉\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       } else {
         const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
-                    : closeResult === 'WIN_TP1' ? '✅ TP1 達標'
+                    : closeResult === 'WIN_TP1' ? (isTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
                     : '❌ 止損出場';
-        const tp2Line = closeResult === 'WIN_TP1'
-          ? `\n💡 建議移止損到成本 $${trade.entry}，繼續持有 TP2 $${trade.tp2}`
-          : '';
-        msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%${tp2Line}`;
+        msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       }
       await sendLineMessage(lineToken, lineUserId, [{ type: 'text', text: msg }]);
     }

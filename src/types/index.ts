@@ -131,7 +131,7 @@ export interface TradeRecord {
   result?: TradeResult;
   exitPrice?: number;
   pnlPercent?: number;
-  status?: 'waiting' | 'active'; // 'waiting' = limit order not yet filled
+  status?: 'waiting' | 'active' | 'tp1_hit'; // 'tp1_hit' = TP1 reached, monitoring for TP2
   signalPrice?: number;           // market price when signal was generated
 }
 

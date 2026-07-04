@@ -42,7 +42,7 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     result:      (r.result as TradeRecord['result']) ?? undefined,
     exitPrice:   (r.exit_price as number | null) ?? undefined,
     pnlPercent:  (r.pnl_percent as number | null) ?? undefined,
-    status:      ((r.status as string | null) as 'waiting' | 'active' | undefined) ?? 'active',
+    status:      ((r.status as string | null) as 'waiting' | 'active' | 'tp1_hit' | undefined) ?? 'active',
     signalPrice: (r.signal_price as number | null) ?? undefined,
   };
 }
@@ -83,6 +83,11 @@ export async function loadFromSupabase(userId: string) {
         if (r.status === 'active' && local.status === 'waiting') {
           useStore.setState(s => ({
             trades: s.trades.map(t => t.id === r.id ? { ...t, status: 'active' as const } : t),
+          }));
+        }
+        if (r.status === 'tp1_hit' && local.status !== 'tp1_hit') {
+          useStore.setState(s => ({
+            trades: s.trades.map(t => t.id === r.id ? { ...t, status: 'tp1_hit' as const } : t),
           }));
         }
       } else if (

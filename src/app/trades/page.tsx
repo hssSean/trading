@@ -65,7 +65,7 @@ export default function TradesPage() {
   } | null>(null);
   const [exitPrice,  setExitPrice]  = useState('');
   const [exitResult, setExitResult] = useState<TradeResult>('WIN_TP1');
-  const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'CLOSED'>('ALL');
+  const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'CLOSED' | 'PROFIT' | 'LOSS_LIVE'>('ALL');
   const [dirFilter,  setDirFilter]  = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
   const [dateFilter, setDateFilter] = useState<'all' | 'week' | 'month'>('all');
   const [sortBy,     setSortBy]     = useState<'time' | 'pnl' | 'score'>('time');
@@ -261,8 +261,17 @@ export default function TradesPage() {
 
   const filtered = useMemo(() => {
     // Base set
-    let base = filter === 'PENDING' ? [...pending, ...waiting]
-             : filter === 'CLOSED'  ? closed
+    const calcLivePnl = (t: (typeof trades)[0]) => {
+      const livePx = coins.find(c => c.symbol === t.symbol)?.currentPrice ?? 0;
+      if (!livePx) return null;
+      return t.direction === 'LONG'
+        ? (livePx - t.entry) / t.entry * 100
+        : (t.entry - livePx) / t.entry * 100;
+    };
+    let base = filter === 'PENDING'   ? [...pending, ...waiting]
+             : filter === 'CLOSED'    ? closed
+             : filter === 'PROFIT'    ? pending.filter(t => (calcLivePnl(t) ?? -1) > 0)
+             : filter === 'LOSS_LIVE' ? pending.filter(t => (calcLivePnl(t) ?? 1) < 0)
              : [...waiting, ...pending, ...closed];
     // Direction filter
     if (dirFilter !== 'ALL') base = base.filter(t => t.direction === dirFilter);
@@ -284,7 +293,7 @@ export default function TradesPage() {
       return sortDir === 'desc' ? -diff : diff;
     });
     return base;
-  }, [filter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, now]);
+  }, [filter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, now, coins]);
 
   const exportCsv = () => {
     const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,分析依據,個人備註';
@@ -700,10 +709,24 @@ export default function TradesPage() {
         )}
 
         {/* Row 1: 狀態 filter */}
-        <div className="flex gap-1.5 mb-2">
-          {([['ALL', '全部'], ['PENDING', `持倉 (${pending.length + waiting.length})`], ['CLOSED', `結束 (${closed.length})`]] as const).map(([f, label]) => (
+        <div className="flex gap-1.5 mb-2 flex-wrap">
+          {([
+            ['ALL',       '全部'],
+            ['PENDING',   `持倉 (${pending.length + waiting.length})`],
+            ['CLOSED',    `結束 (${closed.length})`],
+            ['PROFIT',    '浮盈'],
+            ['LOSS_LIVE', '浮虧'],
+          ] as const).map(([f, label]) => (
             <button key={f} onClick={() => setFilter(f)}
-              className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${filter === f ? 'bg-[#F0B90B] border-[#F0B90B] text-[#0A0A0F]' : 'border-[#1E1E2E] text-[#606080]'}`}>
+              className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${
+                filter === f
+                  ? f === 'PROFIT'    ? 'bg-green-500 border-green-500 text-white'
+                  : f === 'LOSS_LIVE' ? 'bg-red-500 border-red-500 text-white'
+                  : 'bg-[#F0B90B] border-[#F0B90B] text-[#0A0A0F]'
+                  : f === 'PROFIT'    ? 'border-green-500/30 text-green-500/70'
+                  : f === 'LOSS_LIVE' ? 'border-red-500/30 text-red-400/70'
+                  : 'border-[#1E1E2E] text-[#606080]'
+              }`}>
               {label}
             </button>
           ))}
@@ -765,6 +788,7 @@ export default function TradesPage() {
         ) : (
           filtered.map(trade => {
             const isWaiting = trade.status === 'waiting';
+            const isTp1Hit  = trade.status === 'tp1_hit';
             const isPending = !trade.result && !isWaiting;
             const isWin     = trade.result === 'WIN_TP1' || trade.result === 'WIN_TP2';
             const coinData  = coins.find(c => c.symbol === trade.symbol);
@@ -839,7 +863,11 @@ export default function TradesPage() {
                             {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
                           </span>
                         )}
-                        <span className="text-xs bg-[#F0B90B]/20 text-[#F0B90B] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
+                        {isTp1Hit ? (
+                          <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-semibold border border-green-500/40">✅ TP1·等TP2</span>
+                        ) : (
+                          <span className="text-xs bg-[#F0B90B]/20 text-[#F0B90B] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
+                        )}
                       </>
                     ) : (
                       <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
@@ -880,12 +908,21 @@ export default function TradesPage() {
                 {/* Distance bars for active pending trades */}
                 {isPending && livePx > 0 && (
                   <div className="grid grid-cols-2 gap-1.5 mb-2">
-                    <div className={`rounded-xl p-2 text-center ${distTP1 > 0 ? 'bg-green-400/5' : 'bg-green-400/15'}`}>
-                      <p className="text-[#606080] text-[9px]">距 TP1</p>
-                      <p className={`text-xs font-bold ${distTP1 > 0 ? 'text-green-400' : 'text-[#00C851]'}`}>
-                        {distTP1 > 0 ? `還差 ${distTP1.toFixed(2)}%` : `超過 ${Math.abs(distTP1).toFixed(2)}%`}
-                      </p>
-                    </div>
+                    {isTp1Hit ? (
+                      <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-2 text-center">
+                        <p className="text-green-400 text-[9px] font-semibold">✅ TP1 已達標</p>
+                        <p className="text-green-400 text-xs font-bold">
+                          {distTP1 > 0 ? `距TP2 還差 ${distTP1.toFixed(2)}%` : `已超過 TP2 ${Math.abs(distTP1).toFixed(2)}%`}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className={`rounded-xl p-2 text-center ${distTP1 > 0 ? 'bg-green-400/5' : 'bg-green-400/15'}`}>
+                        <p className="text-[#606080] text-[9px]">距 TP1</p>
+                        <p className={`text-xs font-bold ${distTP1 > 0 ? 'text-green-400' : 'text-[#00C851]'}`}>
+                          {distTP1 > 0 ? `還差 ${distTP1.toFixed(2)}%` : `超過 ${Math.abs(distTP1).toFixed(2)}%`}
+                        </p>
+                      </div>
+                    )}
                     <div className={`rounded-xl p-2 text-center ${nearSL ? 'bg-red-500/15' : 'bg-red-400/5'}`}>
                       <p className="text-[#606080] text-[9px]">{nearSL ? '⚠ 接近止損' : '距 SL'}</p>
                       <p className={`text-xs font-bold ${nearSL ? 'text-red-400' : 'text-[#A0A0C0]'}`}>
@@ -920,6 +957,14 @@ export default function TradesPage() {
                     </div>
                   );
                 })()}
+
+                {/* TP1 hit: breakeven reminder */}
+                {isTp1Hit && (
+                  <div className="mb-2 bg-green-500/5 border border-green-500/20 rounded-xl px-3 py-2 flex items-center gap-2">
+                    <span className="text-green-400 text-xs">💡</span>
+                    <p className="text-green-400/80 text-xs">TP1 已達標，建議將止損移至成本 <span className="font-bold text-green-400">${fmtPrice(trade.entry)}</span>，繼續持有等待 TP2</p>
+                  </div>
+                )}
 
                 {/* Auto-generated entry reasons from signal analysis */}
                 {trade.reasons && trade.reasons.length > 0 && (
