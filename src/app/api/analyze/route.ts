@@ -454,6 +454,42 @@ export async function GET(req: NextRequest) {
         }
       }
 
+      // ── Notify user when a real signal is blocked only by active-trade guard ──
+      // Conditions: either Redis lock (locked) or Supabase hard-stop found existing trade.
+      // Dedup via Redis NX key per (symbol, direction, 4h-bucket) so the same skipped
+      // signal doesn't flood LINE every cron tick.
+      const isActiveTradeSkip =
+        (locked && !!topStrong && confluenceMet) ||
+        skipReason === `LINE skipped — 同幣種已有持倉 (${symbol})`;
+
+      if (isActiveTradeSkip && topStrong && lineReady) {
+        const skipNotifKey = `skip-notif:${symbol}:${topStrong.direction}:${nowBucket}`;
+        let skipAlreadyNotified = false;
+        const rSkipN = getRedis();
+        if (rSkipN) {
+          try {
+            const setResult = await rSkipN.set(skipNotifKey, 1, { nx: true, ex: 5 * 3600 });
+            // null = key existed (NX failed) → already notified this 4h bucket
+            skipAlreadyNotified = setResult === null;
+          } catch { /* Redis unavailable — send anyway */ }
+        }
+        if (!skipAlreadyNotified) {
+          const skipDir = topStrong.direction === 'LONG' ? '做多▲' : '做空▼';
+          const skipSym = symbol.replace('USDT', '/USDT');
+          const skipTp1 = topStrong.takeProfits[0];
+          const skipTp2 = topStrong.takeProfits[1] ?? skipTp1;
+          const skipMsg =
+            `⚠️ 已有 ${skipSym} 持倉，略過新訊號\n\n` +
+            `新訊號方向：${skipDir}\n` +
+            `進場價：$${topStrong.entry}\n` +
+            `TP1：$${skipTp1}  TP2：$${skipTp2}\n` +
+            `止損：$${topStrong.stopLoss}\n` +
+            `得分：${topStrong.score}  RR ${topStrong.riskReward}:1\n\n` +
+            `如需處理請手動在 app 新增，或等現有單結束後自動接單。`;
+          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: skipMsg }]);
+        }
+      }
+
       if (topStrong && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
         const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(topStrong));
         lineSent  = ok;
