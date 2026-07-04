@@ -415,8 +415,28 @@ export async function GET(req: NextRequest) {
         skipReason = `LINE skipped — cooldown (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min left)`;
       else if (topStrong && !confluenceMet)
         skipReason = `LINE skipped — 多框架未確認 (${agreeTFs}/2 TF 同向)`;
+      else if (topStrong) {
+        // Supabase hard-stop: prevents duplicate trades when Redis lock is lost (Vercel container recycle)
+        const _su = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+        const _sk = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+        if (_su && _sk && lineUserId) {
+          try {
+            const { createClient: mkChk } = await import('@supabase/supabase-js');
+            const chk = mkChk(_su, _sk);
+            const { data: prof } = await chk.from('profiles').select('id')
+              .eq('line_user_id', lineUserId).maybeSingle();
+            if (prof?.id) {
+              const { count: c } = await chk.from('trades')
+                .select('id', { count: 'exact', head: true })
+                .eq('user_id', prof.id).eq('symbol', topStrong.symbol).is('result', null);
+              if (c !== null && c > 0)
+                skipReason = `LINE skipped — 同幣種已有持倉 (${symbol})`;
+            }
+          } catch { /* non-critical: Redis lock is still the primary guard */ }
+        }
+      }
 
-      if (topStrong && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet) {
+      if (topStrong && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
         const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(topStrong));
         lineSent  = ok;
         lineError = error;
@@ -464,7 +484,7 @@ export async function GET(req: NextRequest) {
                   .eq('symbol', topStrong.symbol)
                   .is('result', null);
 
-                if (!count) {
+                if (count === 0) {
                   // Determine if this is a limit order (entry differs from current price by >0.3%)
                   const sp = topStrong.signalPrice ?? 0;
                   const isLimitOrder = sp > 0 && Math.abs(topStrong.entry - sp) / sp > 0.003;

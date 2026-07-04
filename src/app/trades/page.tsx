@@ -303,13 +303,13 @@ export default function TradesPage() {
 
   const exportCsv = () => {
     const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,分析依據,個人備註';
-    const rows = trades.map(t =>
+    const rows = closed.map(t =>
       [
         t.id, t.symbol, t.direction, t.timeframe, t.strength, t.score,
         t.entry, t.stopLoss, t.tp1, t.tp2,
         fmtDate(t.openedAt),
-        t.closedAt ? fmtDate(t.closedAt) : '',
-        t.result ? RESULT_LABEL[t.result] : '持倉中',
+        fmtDate(t.closedAt ?? t.openedAt),
+        RESULT_LABEL[t.result ?? 'MANUAL_CLOSE'],
         t.exitPrice ?? '',
         t.pnlPercent ?? '',
         `"${(t.reasons ?? []).join(' | ').replace(/"/g, '""')}"`,
