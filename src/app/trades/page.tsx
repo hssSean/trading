@@ -66,6 +66,7 @@ export default function TradesPage() {
   const [exitPrice,  setExitPrice]  = useState('');
   const [exitResult, setExitResult] = useState<TradeResult>('WIN_TP1');
   const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'CLOSED' | 'PROFIT' | 'LOSS_LIVE'>('ALL');
+  const [resultFilter, setResultFilter] = useState<'ALL' | 'WIN' | 'LOSS'>('ALL');
   const [dirFilter,  setDirFilter]  = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
   const [dateFilter, setDateFilter] = useState<'all' | 'week' | 'month'>('all');
   const [sortBy,     setSortBy]     = useState<'time' | 'pnl' | 'score'>('time');
@@ -273,6 +274,11 @@ export default function TradesPage() {
              : filter === 'PROFIT'    ? pending.filter(t => (calcLivePnl(t) ?? -1) > 0)
              : filter === 'LOSS_LIVE' ? pending.filter(t => (calcLivePnl(t) ?? 1) < 0)
              : [...waiting, ...pending, ...closed];
+    // Closed result sub-filter
+    if (filter === 'CLOSED' && resultFilter !== 'ALL') {
+      if (resultFilter === 'WIN')  base = base.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+      if (resultFilter === 'LOSS') base = base.filter(t => t.result === 'LOSS');
+    }
     // Direction filter
     if (dirFilter !== 'ALL') base = base.filter(t => t.direction === dirFilter);
     // Date filter
@@ -293,7 +299,7 @@ export default function TradesPage() {
       return sortDir === 'desc' ? -diff : diff;
     });
     return base;
-  }, [filter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, now, coins]);
+  }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, now, coins]);
 
   const exportCsv = () => {
     const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,分析依據,個人備註';
@@ -717,7 +723,7 @@ export default function TradesPage() {
             ['PROFIT',    '浮盈'],
             ['LOSS_LIVE', '浮虧'],
           ] as const).map(([f, label]) => (
-            <button key={f} onClick={() => setFilter(f)}
+            <button key={f} onClick={() => { setFilter(f); if (f !== 'CLOSED') setResultFilter('ALL'); }}
               className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${
                 filter === f
                   ? f === 'PROFIT'    ? 'bg-green-500 border-green-500 text-white'
@@ -731,6 +737,30 @@ export default function TradesPage() {
             </button>
           ))}
         </div>
+
+        {/* Row 1b: 已結束 result sub-filter */}
+        {filter === 'CLOSED' && (
+          <div className="flex gap-1.5 mb-2">
+            {([
+              ['ALL',  '全部'],
+              ['WIN',  `獲利 (${wins.length})`],
+              ['LOSS', `止損 (${losses.length})`],
+            ] as const).map(([f, label]) => (
+              <button key={f} onClick={() => setResultFilter(f)}
+                className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${
+                  resultFilter === f
+                    ? f === 'WIN'  ? 'bg-green-500 border-green-500 text-white'
+                    : f === 'LOSS' ? 'bg-red-500 border-red-500 text-white'
+                    : 'bg-[#F0B90B] border-[#F0B90B] text-[#0A0A0F]'
+                    : f === 'WIN'  ? 'border-green-500/30 text-green-500/70'
+                    : f === 'LOSS' ? 'border-red-500/30 text-red-400/70'
+                    : 'border-[#1E1E2E] text-[#606080]'
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Row 2: 方向 + 時間 + 排序 */}
         <div className="flex gap-1.5 flex-wrap items-center">
