@@ -103,6 +103,9 @@ export default function TradesPage() {
   const totalWin  = wins.reduce((a, t) => a + Math.max(t.pnlPercent ?? 0, 0), 0);
   const totalLoss = Math.abs(losses.reduce((a, t) => a + Math.min(t.pnlPercent ?? 0, 0), 0));
   const profitFactor = totalLoss > 0 ? (totalWin / totalLoss).toFixed(2) : null;
+  const totalReturn  = closed.length > 0
+    ? closed.reduce((a, t) => a + (t.pnlPercent ?? 0), 0)
+    : null;
 
   // ── Extended stats ───────────────────────────────────────────
   const avgWin  = wins.length   > 0 ? (wins.reduce((a, t)   => a + (t.pnlPercent ?? 0), 0) / wins.length).toFixed(2)   : null;
@@ -475,16 +478,18 @@ export default function TradesPage() {
             color={winRate !== null ? (winRate >= 50 ? '#00C851' : '#FF4444') : undefined}
           />
           <StatCard
-            label="平均損益"
-            value={avgPnl !== null ? `${parseFloat(avgPnl) >= 0 ? '+' : ''}${avgPnl}%` : '—'}
-            sub="每筆"
-            color={avgPnl !== null ? (parseFloat(avgPnl) >= 0 ? '#00C851' : '#FF4444') : undefined}
+            label="累積報酬"
+            value={totalReturn !== null ? `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(2)}%` : '—'}
+            sub="全部加起來"
+            color={totalReturn !== null ? (totalReturn >= 0 ? '#00C851' : '#FF4444') : undefined}
           />
           <StatCard
-            label="獲利因子"
-            value={profitFactor ?? '—'}
-            sub="利/損比"
-            color={profitFactor ? (parseFloat(profitFactor) >= 1 ? '#00C851' : '#FF4444') : undefined}
+            label="賺賠比"
+            value={avgWin !== null ? `+${parseFloat(avgWin).toFixed(1)}%` : '—'}
+            color={avgWin !== null ? '#00C851' : undefined}
+            value2={avgLoss !== null ? `${parseFloat(avgLoss).toFixed(1)}%` : undefined}
+            color2={avgLoss !== null ? '#FF4444' : undefined}
+            sub={avgWin !== null || avgLoss !== null ? '平均賺 vs 平均賠' : '尚無結束交易'}
           />
         </div>
 
@@ -1296,11 +1301,17 @@ function EquityCurve({ data }: { data: number[] }) {
   );
 }
 
-function StatCard({ label, value, sub, color }: { label: string; value: string; sub: string; color?: string }) {
+function StatCard({ label, value, sub, color, value2, color2 }: {
+  label: string; value: string; sub: string; color?: string;
+  value2?: string; color2?: string;
+}) {
   return (
     <div className="bg-[#12121A] border border-[#1E1E2E] rounded-2xl p-2.5 text-center">
       <p className="text-[#606080] text-[9px] mb-0.5">{label}</p>
-      <p className="font-extrabold text-base" style={{ color: color ?? '#EAEAF4' }}>{value}</p>
+      <p className={`font-extrabold ${value2 !== undefined ? 'text-sm leading-tight' : 'text-base'}`} style={{ color: color ?? '#EAEAF4' }}>{value}</p>
+      {value2 !== undefined && (
+        <p className="font-extrabold text-sm leading-tight" style={{ color: color2 ?? '#EAEAF4' }}>{value2}</p>
+      )}
       <p className="text-[#404060] text-[9px]">{sub}</p>
     </div>
   );
