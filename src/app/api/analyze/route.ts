@@ -282,9 +282,10 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       continue; // Skip close logic this tick
     }
 
-    // 24h intraday auto-close
+    // Timeframe-aware auto-close: 4h needs more runway than 1h
+    const autoCloseHours = trade.timeframe === '4h' ? 72 : trade.timeframe === '1d' ? 168 : INTRADAY_CLOSE_HOURS;
     const ageHours = (Date.now() - (trade.opened_at ?? 0)) / (60 * 60 * 1000);
-    if (!closeResult && ageHours >= INTRADAY_CLOSE_HOURS) {
+    if (!closeResult && ageHours >= autoCloseHours) {
       closeResult = isTp1Hit ? 'WIN_TP1' : 'MANUAL_CLOSE';
       closePrice  = price;
     }
