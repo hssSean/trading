@@ -131,27 +131,24 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   const { createClient } = await import('@supabase/supabase-js');
   const admin = createClient(url, key);
 
-  // Resolve the LINE user's profile so we only touch their trades
-  let ownerFilter: string | null = null;
-  if (lineUserId) {
-    const { data: prof } = await admin
-      .from('profiles').select('id').eq('line_user_id', lineUserId).maybeSingle();
-    ownerFilter = prof?.id ?? null;
-  }
-
   // ── Fetch waiting and active trades separately ────────────────
-  const baseQ = () => {
-    // select('*') avoids 42703 when new columns are added without updating this list
-    let q = admin.from('trades').select('*').is('result', null);
-    if (ownerFilter) q = q.eq('user_id', ownerFilter);
-    return q;
-  };
+  // No user_id filter: admin (service role) has full table access and should
+  // process all open trades.  LINE notifications are already scoped to
+  // lineUserId / lineToken so they reach the correct recipient.
+  const baseQ = () =>
+    admin.from('trades').select('*').is('result', null);
 
-  const [{ data: waitingRaw }, { data: activeRaw }] = await Promise.all([
+  const [
+    { data: waitingRaw, error: waitErr },
+    { data: activeRaw,  error: activeErr },
+  ] = await Promise.all([
     baseQ().eq('status', 'waiting'),
     // active, tp1_hit, or legacy rows (null status from before migration)
     baseQ().or('status.eq.active,status.is.null,status.eq.tp1_hit'),
   ]);
+
+  if (waitErr)  console.error('[monitor] waiting query error:', waitErr.message);
+  if (activeErr) console.error('[monitor] active query error:',  activeErr.message);
 
   const waiting = (waitingRaw ?? []) as any[];
   const active  = (activeRaw  ?? []) as any[];
