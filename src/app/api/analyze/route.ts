@@ -116,7 +116,19 @@ function checkAuth(req: NextRequest): boolean {
 async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  if (!url || !key) return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
+
+  // ── Debug snapshot (temporary — remove after root-cause confirmed) ──
+  const dbg: Record<string, unknown> = {
+    build:       'build-847e38a-debug-v2',
+    urlSet:      !!url,
+    keyType:     key ? 'service_role_key_present' : 'MISSING',
+    redisLock:   'not_checked_yet',
+  };
+
+  if (!url || !key) {
+    dbg.earlyReturn = 'missing_url_or_key';
+    return { monitored: 0, closed: 0, filled: 0, cancelled: 0, debug: dbg };
+  }
 
   // Distributed mutex: if two cron invocations overlap, only one runs the monitor.
   // Lock TTL=55s so it always expires before the next 1-minute cron tick.
@@ -124,8 +136,14 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   if (rLock) {
     try {
       const acquired = await rLock.set('monitor-run-lock', 1, { nx: true, ex: 55 });
-      if (!acquired) return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
-    } catch { /* Redis unavailable — proceed without lock */ }
+      dbg.redisLock = acquired ? 'acquired' : 'blocked_by_other_run';
+      if (!acquired) {
+        dbg.earlyReturn = 'redis_mutex_blocked';
+        return { monitored: 0, closed: 0, filled: 0, cancelled: 0, debug: dbg };
+      }
+    } catch { dbg.redisLock = 'redis_unavailable_proceeding'; }
+  } else {
+    dbg.redisLock = 'no_redis_proceeding';
   }
 
   const { createClient } = await import('@supabase/supabase-js');
@@ -147,6 +165,20 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     baseQ().or('status.eq.active,status.is.null,status.eq.tp1_hit'),
   ]);
 
+  dbg.waitingQuery = {
+    count: waitingRaw?.length ?? null,
+    errorCode:    waitErr ? (waitErr as any).code    : null,
+    errorMessage: waitErr ? waitErr.message          : null,
+    errorDetails: waitErr ? (waitErr as any).details : null,
+  };
+  dbg.activeQuery = {
+    count: activeRaw?.length ?? null,
+    errorCode:    activeErr ? (activeErr as any).code    : null,
+    errorMessage: activeErr ? activeErr.message          : null,
+    errorDetails: activeErr ? (activeErr as any).details : null,
+  };
+  dbg.filters = 'result.is.null + status.eq.waiting | or(status.eq.active,status.is.null,status.eq.tp1_hit) — no user_id filter';
+
   if (waitErr)  console.error('[monitor] waiting query error:', waitErr.message);
   if (activeErr) console.error('[monitor] active query error:',  activeErr.message);
 
@@ -154,7 +186,8 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
   const active  = (activeRaw  ?? []) as any[];
 
   if (waiting.length === 0 && active.length === 0) {
-    return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
+    dbg.earlyReturn = 'zero_trades_found';
+    return { monitored: 0, closed: 0, filled: 0, cancelled: 0, debug: dbg };
   }
 
   const now = Date.now();
@@ -383,7 +416,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     closed++;
   }
 
-  return { monitored: active.length + waiting.length, closed, filled, cancelled };
+  return { monitored: active.length + waiting.length, closed, filled, cancelled, debug: dbg };
 }
 
 // ── GET — run analysis + send LINE ────────────────────────────
@@ -627,10 +660,15 @@ export async function GET(req: NextRequest) {
   }
 
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
-  const monitor = await monitorActiveTrades(lineToken, lineUserId).catch(() => ({ monitored: 0, closed: 0 }));
+  const monitor = await monitorActiveTrades(lineToken, lineUserId)
+    .catch((e: unknown) => ({
+      monitored: 0, closed: 0,
+      debug: { build: 'build-847e38a-debug-v2', earlyReturn: 'monitorActiveTrades_threw', error: String(e) },
+    }));
 
   return NextResponse.json({
     ok: true, analyzedAt: new Date().toISOString(),
+    deployedBuild: 'build-847e38a-debug-v2',
     minScore, lineReady, usingRedis, coins: coins.length, notified, results,
     monitor,
   });
