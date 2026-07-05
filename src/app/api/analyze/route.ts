@@ -476,6 +476,9 @@ export async function GET(req: NextRequest) {
     : await getDefaultCoins();
 
   const timeframes = tfParam.split(',').map(s => s.trim()) as Timeframe[];
+  // Entry timeframe: multi-TF analysis confirms direction; only this TF produces the entry/TP/SL.
+  // Override via ENTRY_TIMEFRAME env var; default 1h (the faster TF in a 4h+1h setup).
+  const entryTf    = (process.env.ENTRY_TIMEFRAME ?? '1h').trim() as Timeframe;
   const lineReady  = !!(lineToken && lineUserId);
   const usingRedis = !!getRedis();
 
@@ -522,9 +525,12 @@ export async function GET(req: NextRequest) {
       }
 
       // Direction unification: highest TF's direction is master, drop conflicting signals
-      const unified   = unifySignalDirection(allSignals);
-      const strong    = unified.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
-      const topStrong = strong.find(s => s.score >= STRONG_THRESHOLD);
+      const unified    = unifySignalDirection(allSignals);
+      const strong     = unified.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
+      const topStrong  = strong.find(s => s.score >= STRONG_THRESHOLD);
+      // Entry signal: only from the designated entry TF. Multi-TF confluence confirms direction;
+      // this signal's entry/TP/SL are what get pushed to LINE and inserted into DB.
+      const entrySignal = strong.find(s => s.score >= STRONG_THRESHOLD && s.timeframe === entryTf);
 
       // Multi-TF confluence gate ─────────────────────────────────
       // Count distinct TFs producing signals in the master direction.
@@ -552,8 +558,12 @@ export async function GET(req: NextRequest) {
         skipReason = `LINE skipped — cooldown (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min left)`;
       else if (topStrong && !confluenceMet)
         skipReason = `LINE skipped — 多框架未確認 (${agreeTFs}/2 TF 同向)`;
-      else if (topStrong) {
-        // Supabase hard-stop: prevents duplicate trades when Redis lock is lost (Vercel container recycle)
+      else if (topStrong && !entrySignal)
+        // Direction confirmed but entry TF (e.g. 1h) has no qualifying signal — don't send.
+        skipReason = `LINE skipped — no signal from entry TF (${entryTf})`;
+      else if (entrySignal) {
+        // Supabase hard-stop: prevents duplicate trades when Redis lock is lost (Vercel container recycle).
+        // Default-block on exception — safer than default-allow which risks duplicate trades.
         const _su = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
         const _sk = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
         if (_su && _sk && lineUserId) {
@@ -565,45 +575,48 @@ export async function GET(req: NextRequest) {
             if (prof?.id) {
               const { count: c } = await chk.from('trades')
                 .select('id', { count: 'exact', head: true })
-                .eq('user_id', prof.id).eq('symbol', topStrong.symbol).is('result', null);
+                .eq('user_id', prof.id).eq('symbol', entrySignal.symbol).is('result', null);
               if (c !== null && c > 0)
                 skipReason = `LINE skipped — 同幣種已有持倉 (${symbol})`;
             }
-          } catch { /* non-critical: Redis lock is still the primary guard */ }
+          } catch (e) {
+            // Default-block: treat Supabase error as "assume duplicate exists" to prevent double trade.
+            skipReason = `LINE skipped — duplicate check failed (${String(e).slice(0, 80)})`;
+            console.error(`[analyze] hard-stop check threw for ${symbol}:`, String(e));
+          }
         }
       }
 
-      if (topStrong && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
-        const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(topStrong));
+      if (entrySignal && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
+        const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(entrySignal));
         lineSent  = ok;
         lineError = error;
         if (ok) {
           notified.push(symbol);
           await setLock(symbol, {
             sentAt: now, candleBucket: nowBucket,
-            direction: topStrong.direction, locked: true,
+            direction: entrySignal.direction, locked: true,
           });
           // Persist pending signal in Redis so client can reliably pick it up
           const rp = getRedis();
           if (rp) {
             try {
-              await rp.lpush('pending_signals', JSON.stringify(topStrong));
+              await rp.lpush('pending_signals', JSON.stringify(entrySignal));
               await rp.expire('pending_signals', 24 * 3600);
-            } catch { pendingSignals.push(topStrong); }
+            } catch { pendingSignals.push(entrySignal); }
           } else {
-            pendingSignals.push(topStrong);
+            pendingSignals.push(entrySignal);
             if (pendingSignals.length > 50) pendingSignals.splice(0, pendingSignals.length - 50);
           }
 
           // ── Write trade directly to Supabase ─────────────────────
-          // This ensures the client always gets the EXACT entry/TP/SL
-          // sent to LINE, regardless of when they open the app.
-          // Uses line_user_id to find the Supabase account owner.
+          // Uses entrySignal (entry TF) for all fields — not topStrong (any TF).
+          // This ensures a single trade per symbol from a single entry TF.
           const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
           const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
           if (!sbUrl || !sbKey || !lineUserId) {
             console.error(
-              `[analyze] trade insert skipped for ${topStrong.symbol} —`,
+              `[analyze] trade insert skipped for ${entrySignal.symbol} —`,
               !sbUrl ? 'NEXT_PUBLIC_SUPABASE_URL missing' :
               !sbKey ? 'SUPABASE_SERVICE_ROLE_KEY missing' :
               'LINE_USER_ID missing',
@@ -625,28 +638,28 @@ export async function GET(req: NextRequest) {
                   .from('trades')
                   .select('id', { count: 'exact', head: true })
                   .eq('user_id', profile.id)
-                  .eq('symbol', topStrong.symbol)
+                  .eq('symbol', entrySignal.symbol)
                   .is('result', null);
 
                 if (count === 0) {
                   // Determine if this is a limit order (entry differs from current price by >0.3%)
-                  const sp = topStrong.signalPrice ?? 0;
-                  const isLimitOrder = sp > 0 && Math.abs(topStrong.entry - sp) / sp > 0.003;
+                  const sp = entrySignal.signalPrice ?? 0;
+                  const isLimitOrder = sp > 0 && Math.abs(entrySignal.entry - sp) / sp > 0.003;
                   const tradeId = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
                   const insertData = {
                     id:           tradeId,
                     user_id:      profile.id,
-                    signal_id:    topStrong.id,
-                    symbol:       topStrong.symbol,
-                    direction:    topStrong.direction,
-                    timeframe:    topStrong.timeframe,
-                    strength:     topStrong.strength,
-                    score:        topStrong.score,
-                    entry:        topStrong.entry,
-                    stop_loss:    topStrong.stopLoss,
-                    tp1:          topStrong.takeProfits[0],
-                    tp2:          topStrong.takeProfits[1] ?? topStrong.takeProfits[0],
-                    reasons:      topStrong.reasons,
+                    signal_id:    entrySignal.id,
+                    symbol:       entrySignal.symbol,
+                    direction:    entrySignal.direction,
+                    timeframe:    entrySignal.timeframe,
+                    strength:     entrySignal.strength,
+                    score:        entrySignal.score,
+                    entry:        entrySignal.entry,
+                    stop_loss:    entrySignal.stopLoss,
+                    tp1:          entrySignal.takeProfits[0],
+                    tp2:          entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0],
+                    reasons:      entrySignal.reasons,
                     entry_notes:  '',
                     opened_at:    Date.now(),
                     status:       isLimitOrder ? 'waiting' : 'active',
@@ -663,12 +676,12 @@ export async function GET(req: NextRequest) {
                       const { status: _s, signal_price: _sp, ...baseData } = insertData;
                       const ir2 = await admin.from('trades').insert(baseData);
                       if (ir2.error) {
-                        console.error(`[analyze] trade insert failed for ${topStrong.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
+                        console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
                       } else {
                         insertOk = true;
                       }
                     } else {
-                      console.error(`[analyze] trade insert failed for ${topStrong.symbol}: [${ir.error.code}] ${ir.error.message}`);
+                      console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir.error.code}] ${ir.error.message}`);
                     }
                   }
 
@@ -677,20 +690,20 @@ export async function GET(req: NextRequest) {
                   // Duplicate prevention: tlock:symbol is already set to locked=true (signal gate),
                   // and count===0 guard above ensures no re-insert, so this fires exactly once.
                   if (insertOk && !isLimitOrder && lineToken && lineUserId) {
-                    const dir = topStrong.direction === 'LONG' ? '做多▲' : '做空▼';
-                    const sym = topStrong.symbol.replace('USDT', '/USDT');
-                    const tp2 = topStrong.takeProfits[1] ?? topStrong.takeProfits[0];
+                    const dir = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
+                    const sym = entrySignal.symbol.replace('USDT', '/USDT');
+                    const tp2 = entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0];
                     const msg =
                       `【✅ 市場入場】${sym}\n` +
                       `${dir} 已進場\n` +
-                      `進場價：$${fmtPrice(topStrong.entry)}\n` +
-                      `TP1：$${fmtPrice(topStrong.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(topStrong.stopLoss)}`;
+                      `進場價：$${fmtPrice(entrySignal.entry)}\n` +
+                      `TP1：$${fmtPrice(entrySignal.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(entrySignal.stopLoss)}`;
                     await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
                   }
                 }
               }
             } catch (e) {
-              console.error(`[analyze] trade insert threw for ${topStrong.symbol}: ${String(e)}`);
+              console.error(`[analyze] trade insert threw for ${entrySignal.symbol}: ${String(e)}`);
             }
           }
         }
