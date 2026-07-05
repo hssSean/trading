@@ -10,6 +10,11 @@ import { TradeRecord, TradingSignal } from '@/types';
 // Module-level so it persists across re-renders and periodic syncs.
 const sessionDeletedIds = new Set<string>();
 
+// Set to true during a full reset to block all sync from running concurrently.
+let isResetting = false;
+export function setIsResetting(v: boolean) { isResetting = v; }
+export function clearSessionDeletedIds() { sessionDeletedIds.clear(); }
+
 export async function deleteTradePermanently(tradeId: string): Promise<void> {
   sessionDeletedIds.add(tradeId);
   useStore.getState().deleteTrade(tradeId);
@@ -53,6 +58,7 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
 // Only adds trades that are new or have been updated on the server.
 // Does NOT remove local trades — safe for background use.
 export async function loadFromSupabase(userId: string) {
+  if (isResetting) return;
   const store = useStore.getState();
 
   // Load watchlist
@@ -113,6 +119,24 @@ export async function loadFromSupabase(userId: string) {
   // Load profile
   const { data: prof } = await supabase.from('profiles').select('*').eq('id', userId).single();
   if (prof) {
+    // Cross-device reset guard: if another device triggered a full reset after our last
+    // load, wipe local data and adopt the server's (empty) state.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const serverResetAt = (prof as any).reset_at as number | null | undefined;
+    const localResetAt  = useStore.getState().lastResetAt;
+    if (serverResetAt && serverResetAt > localResetAt) {
+      useStore.setState({ trades: [], lastResetAt: serverResetAt });
+      useStore.getState().clearSignals();
+      // Sync profile settings then return — no trades to reconcile
+      useStore.setState(s => ({
+        lineToken:     prof.line_token  || s.lineToken,
+        lineUserId:    prof.line_user_id || s.lineUserId,
+        webhookSecret: prof.webhook_secret || s.webhookSecret,
+        settings:      prof.settings ? { ...s.settings, ...(prof.settings as object) } : s.settings,
+      }));
+      return;
+    }
+
     useStore.setState(s => ({
       lineToken:     prof.line_token  || s.lineToken,
       lineUserId:    prof.line_user_id || s.lineUserId,
@@ -379,6 +403,7 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
 }
 
 export async function saveToSupabase(userId: string) {
+  if (isResetting) return;
   const s = useStore.getState();
 
   // Upsert profile

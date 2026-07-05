@@ -56,6 +56,9 @@ interface StoreState {
   _hasHydrated: boolean;
   autoCloseAlerts: AutoCloseAlert[];   // ephemeral — not persisted
 
+  lastResetAt: number;
+  setLastResetAt: (ts: number) => void;
+
   setHasHydrated: (v: boolean) => void;
   addCoin: (symbol: string) => void;
   removeCoin: (symbol: string) => void;
@@ -104,8 +107,10 @@ export const useStore = create<StoreState>()(
       _hasHydrated: false,
       autoCloseAlerts: [],
       syncWarning: null,
+      lastResetAt: 0,
 
       setHasHydrated: (v) => set({ _hasHydrated: v }),
+      setLastResetAt: (ts) => set({ lastResetAt: ts }),
 
       addCoin: (symbol) => {
         if (get().coins.some((c) => c.symbol === symbol)) return;
@@ -274,6 +279,7 @@ export const useStore = create<StoreState>()(
         lineUserId: s.lineUserId,
         webhookSecret: s.webhookSecret,
         userId: s.userId,
+        lastResetAt: s.lastResetAt,
         // autoCloseAlerts intentionally excluded — ephemeral
       }),
       onRehydrateStorage: () => (state) => {

@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
+import { setIsResetting, clearSessionDeletedIds } from '@/components/StoreHydration';
 import { SignalStrength, Timeframe } from '@/types';
 
 const INTERVALS = [5, 15, 30, 60];
@@ -72,6 +73,8 @@ export default function SettingsPage() {
   const [diagLoading, setDiagLoading] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetMsg,    setResetMsg]    = useState('');
+  const [fullResetting, setFullResetting] = useState(false);
+  const [fullResetMsg,  setFullResetMsg]  = useState('');
 
   useEffect(() => {
     if (typeof window !== 'undefined') setAppUrl(window.location.origin);
@@ -89,6 +92,56 @@ export default function SettingsPage() {
     } finally {
       setResetting(false);
       setTimeout(() => setResetMsg(''), 4000);
+    }
+  };
+
+  const handleFullReset = async () => {
+    if (!confirm(
+      '⚠️ 警告：此操作將永久刪除全部交易紀錄與推薦單，無法復原，且所有已登入的裝置都會同步清空。\n\n確定要清空所有紀錄並重置嗎？'
+    )) return;
+
+    setFullResetting(true);
+    setFullResetMsg('');
+
+    try {
+      // Block all background syncs so in-flight saves can't resurrect old data
+      setIsResetting(true);
+      clearSessionDeletedIds();
+
+      // Wipe local state immediately (persist middleware synchronously clears localStorage)
+      useStore.setState({ trades: [] });
+      useStore.getState().clearSignals();
+
+      // Get Supabase JWT for server-side user verification
+      const { data: { session } } = await supabase.auth.getSession();
+      const jwt = session?.access_token ?? '';
+
+      const res = await fetch('/api/reset', {
+        method: 'POST',
+        headers: {
+          'x-webhook-secret': secret.trim() || 'abc123',
+          ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+        },
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `HTTP ${res.status}`);
+      }
+
+      const data = await res.json() as { deletedTrades: number; clearedKeys: number; resetAt: number };
+
+      // Stamp the local store with the server reset time so other open devices
+      // detect the change on their next 2-min sync and also wipe their local cache.
+      useStore.getState().setLastResetAt(data.resetAt);
+
+      setFullResetMsg(`已清空 ${data.deletedTrades} 筆交易、解除 ${data.clearedKeys} 個 Redis 鎖定`);
+    } catch (e) {
+      setFullResetMsg(`重置失敗：${String(e).slice(0, 80)}`);
+    } finally {
+      setIsResetting(false);
+      setFullResetting(false);
+      setTimeout(() => setFullResetMsg(''), 8000);
     }
   };
 
@@ -445,6 +498,31 @@ export default function SettingsPage() {
           >
             清除所有歷史信號
           </button>
+
+          {/* Full atomic reset */}
+          <div className="mt-5 pt-4 border-t border-[#1E1E2E]">
+            {fullResetMsg && (
+              <div className={`mb-3 px-3 py-2 rounded-xl text-xs font-semibold ${
+                fullResetMsg.includes('失敗') ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'
+              }`}>{fullResetMsg}</div>
+            )}
+            <button
+              onClick={handleFullReset}
+              disabled={fullResetting}
+              className="w-full py-3 rounded-xl bg-red-600/15 border border-red-500/50 text-red-400 text-sm font-bold disabled:opacity-40"
+            >
+              {fullResetting ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="w-4 h-4 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                  重置中…
+                </span>
+              ) : '🗑️ 清空所有紀錄並重置'}
+            </button>
+            <p className="text-[#404060] text-xs mt-2 leading-5">
+              永久刪除全部交易紀錄、推薦單與 Redis 鎖定，所有裝置同步清空，無法復原
+            </p>
+          </div>
+
           <p className="text-[#606080] text-xs mt-4 text-center leading-6">
             資料來源：Binance API（僅讀取，不交易）<br />
             分析引擎：SMC · SNR · RSI · MACD · EMA<br />
