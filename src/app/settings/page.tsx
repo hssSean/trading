@@ -124,7 +124,13 @@ export default function SettingsPage() {
       return;
     }
     try {
-      const reg = await navigator.serviceWorker.ready;
+      // getRegistration resolves immediately (undefined if no SW yet);
+      // serviceWorker.ready hangs forever when no SW is registered.
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      if (!reg) {
+        setPushStatus('disabled');
+        return;
+      }
       const sub = await reg.pushManager.getSubscription();
       if (sub) {
         setPushSub(sub);
