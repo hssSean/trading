@@ -495,21 +495,39 @@ export async function GET(req: NextRequest) {
   // so it stays fresh. LINE_CHANNEL_TOKEN env var expires every 30 days and
   // requires manual renewal in Vercel — reading from the profile avoids that.
   let lineToken = process.env.LINE_CHANNEL_TOKEN ?? '';
-  // Resolved Supabase profile UUID — used for Web Push subscription lookup
+  // Resolved Supabase profile UUID — used for trade insert + Web Push subscription lookup.
+  // Fallback order: (1) line_user_id column match, (2) SUPABASE_PROFILE_ID env var (direct override).
   let profileId = '';
   {
     const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
     const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-    if (lineUserId && sbUrl && sbKey) {
+    if (sbUrl && sbKey) {
       try {
         const { createClient: mkLineAdmin } = await import('@supabase/supabase-js');
-        const lineAdmin = mkLineAdmin(sbUrl, sbKey);
-        const { data: lp } = await lineAdmin
-          .from('profiles').select('id, line_token')
-          .eq('line_user_id', lineUserId).maybeSingle();
-        if (lp?.line_token) lineToken = lp.line_token;
-        if (lp?.id) profileId = lp.id;
-      } catch { /* keep env fallback */ }
+        const lineAdmin = mkLineAdmin(sbUrl, sbKey, {
+          auth: { autoRefreshToken: false, persistSession: false },
+        });
+        if (lineUserId) {
+          const { data: lp } = await lineAdmin
+            .from('profiles').select('id, line_token')
+            .eq('line_user_id', lineUserId).maybeSingle();
+          if (lp?.line_token) lineToken = lp.line_token;
+          if (lp?.id) profileId = lp.id;
+        }
+        // Direct-UUID override: set SUPABASE_PROFILE_ID in Vercel env vars to bypass
+        // line_user_id lookup (useful when line_user_id column is null or mismatched).
+        if (!profileId && process.env.SUPABASE_PROFILE_ID) {
+          profileId = process.env.SUPABASE_PROFILE_ID;
+          console.log('[analyze] profileId resolved via SUPABASE_PROFILE_ID env var');
+        }
+      } catch (e) {
+        console.error('[analyze] profile lookup threw:', String(e));
+        if (process.env.SUPABASE_PROFILE_ID) profileId = process.env.SUPABASE_PROFILE_ID;
+      }
+    }
+    if (!profileId) {
+      console.warn('[analyze] profileId is empty — trades will NOT be inserted. ' +
+        'Set SUPABASE_PROFILE_ID env var in Vercel or ensure profiles.line_user_id matches LINE_USER_ID.');
     }
   }
 
@@ -612,7 +630,7 @@ export async function GET(req: NextRequest) {
         if (_su && _sk) {
           try {
             const { createClient: mkChk } = await import('@supabase/supabase-js');
-            const chk = mkChk(_su, _sk);
+            const chk = mkChk(_su, _sk, { auth: { autoRefreshToken: false, persistSession: false } });
             const { count: c } = await chk.from('trades')
               .select('id', { count: 'exact', head: true })
               .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('result', null);
@@ -639,7 +657,7 @@ export async function GET(req: NextRequest) {
         if (sbUrl && sbKey) {
           try {
             const { createClient: mkAdmin } = await import('@supabase/supabase-js');
-            const admin = mkAdmin(sbUrl, sbKey);
+            const admin = mkAdmin(sbUrl, sbKey, { auth: { autoRefreshToken: false, persistSession: false } });
 
             // Final duplicate guard (Redis lock may be lost after Vercel cold start)
             const { count } = await admin.from('trades')

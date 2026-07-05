@@ -850,7 +850,7 @@ export default function TradesPage() {
           <div className="flex flex-col items-center justify-center h-48 gap-2 text-center">
             <p className="text-5xl">📋</p>
             <p className="text-[#A0A0C0] font-semibold">還沒有交易紀錄</p>
-            <p className="text-[#606080] text-sm">收到 LINE 推薦時自動新增，並自動偵測止盈止損</p>
+            <p className="text-[#606080] text-sm">伺服器每 5 分鐘自動分析，達到強訊號時自動建立並即時推播</p>
           </div>
         ) : (
           filtered.map(trade => {
