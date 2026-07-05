@@ -50,7 +50,9 @@ export async function sendWebPushToUser(
   let subs: Array<{ id: string; endpoint: string; p256dh: string; auth: string }> = [];
   try {
     const { createClient } = await import('@supabase/supabase-js');
-    const admin = createClient(sbUrl, sbKey);
+    const admin = createClient(sbUrl, sbKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
     const { data, error } = await admin
       .from('push_subscriptions')
       .select('id, endpoint, p256dh, auth')
@@ -104,7 +106,9 @@ export async function sendWebPushToUser(
   if (toDelete.length > 0) {
     try {
       const { createClient } = await import('@supabase/supabase-js');
-      const admin = createClient(sbUrl, sbKey);
+      const admin = createClient(sbUrl, sbKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
       await admin.from('push_subscriptions').delete().in('id', toDelete);
     } catch (e) {
       console.error('[webpush] cleanup threw:', String(e));
