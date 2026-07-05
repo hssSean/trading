@@ -5,6 +5,7 @@ import { computeIndicators } from '@/analysis/indicators';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
+import { sendWebPushToUser } from '@/lib/webpush';
 
 export const maxDuration = 60;
 
@@ -119,7 +120,7 @@ function checkAuth(req: NextRequest): boolean {
 
 // ── Server-side monitor: fill detection + TP/SL via K-line scan ──
 // Uses 1h candlestick high/low so events between cron runs are never missed.
-async function monitorActiveTrades(lineToken: string, lineUserId: string) {
+async function monitorActiveTrades(lineToken: string, lineUserId: string, profileId: string) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key) return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
@@ -248,15 +249,22 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       // Notify only after DB confirms status='active' — prevents repeat on next cron if write failed
       if (fillWriteOk) {
         filled++;
+        const dir = isLong ? '▲ 做多' : '▼ 做空';
+        const sym = (trade.symbol as string).replace('USDT', '/USDT');
+        const fillMsg =
+          `【✅ 掛單成交】${sym}\n` +
+          `${dir} 進場已確認，已自動加入交易日誌\n` +
+          `成交價：$${fmtPrice(fillCandle!.close)}\n` +
+          `TP1：$${fmtPrice(trade.tp1 as number)} ｜ SL：$${fmtPrice(trade.stop_loss as number)}`;
         if (lineToken && lineUserId) {
-          const dir = isLong ? '▲ 做多' : '▼ 做空';
-          const sym = (trade.symbol as string).replace('USDT', '/USDT');
-          const msg =
-            `【✅ 掛單成交】${sym}\n` +
-            `${dir} 進場已確認，已自動加入交易日誌\n` +
-            `成交價：$${fmtPrice(fillCandle!.close)}\n` +
-            `TP1：$${fmtPrice(trade.tp1 as number)} ｜ SL：$${fmtPrice(trade.stop_loss as number)}`;
-          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: fillMsg }]);
+        }
+        if (profileId) {
+          await sendWebPushToUser(profileId, {
+            title: `✅ 掛單成交 ${sym}`,
+            body: `${dir} 成交價 $${fmtPrice(fillCandle!.close)} ｜ TP1 $${fmtPrice(trade.tp1 as number)} ｜ SL $${fmtPrice(trade.stop_loss as number)}`,
+            tag: `fill-${trade.id}`,
+          });
         }
       }
     } else if (isCancelled) {
@@ -269,14 +277,23 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
         await unlockSymbol(trade.symbol as string);
         cancelled++;
         // Notify only after row is confirmed gone — prevents repeat if delete had failed
-        if (lineToken && lineUserId) {
+        {
           const dir = isLong ? '▲ 做多' : '▼ 做空';
           const sym = (trade.symbol as string).replace('USDT', '/USDT');
           const reason = isExpired
             ? `掛單逾期 ${WAITING_EXPIRY_HOURS} 小時未成交，已自動取消`
             : `價格未回測至進場位 $${fmtPrice(entry)}，直接到達 TP1 $${fmtPrice(trade.tp1 as number)}，掛單已自動取消`;
-          const msg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
-          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+          const cancelMsg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
+          if (lineToken && lineUserId) {
+            await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: cancelMsg }]);
+          }
+          if (profileId) {
+            await sendWebPushToUser(profileId, {
+              title: `⚠️ 掛單取消 ${sym}`,
+              body: `${dir} ${isExpired ? `逾期 ${WAITING_EXPIRY_HOURS}h 未成交` : 'TP1 直接到達，跳過進場'}`,
+              tag: `cancel-${trade.id}`,
+            });
+          }
         }
       }
     } else {
@@ -362,14 +379,23 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       // Notify only after status='tp1_hit' is persisted — next cron sees isTp1Hit=true,
       // skips the justHitTp1 branch, preventing repeat notification.
       // If write failed, no LINE is sent; next cron retries the write.
-      if (tp1WriteOk && lineToken && lineUserId) {
+      if (tp1WriteOk) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = (trade.symbol as string).replace('USDT', '/USDT');
-        const msg =
+        const tp1Msg =
           `【🎯 TP1 達標】${sym}\n` +
           `${dir} TP1 $${fmtPrice(trade.tp1 as number)} 已達標，繼續持有等待 TP2 $${fmtPrice(trade.tp2 as number)}\n` +
           `💡 建議立刻將止損移至成本 $${fmtPrice(trade.entry as number)}`;
-        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+        if (lineToken && lineUserId) {
+          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: tp1Msg }]);
+        }
+        if (profileId) {
+          await sendWebPushToUser(profileId, {
+            title: `🎯 TP1 達標 ${sym}`,
+            body: `${dir} $${fmtPrice(trade.tp1 as number)} ｜ 止損移至 $${fmtPrice(trade.entry as number)}`,
+            tag: `tp1-${trade.id}`,
+          });
+        }
       }
       continue;
     }
@@ -421,19 +447,32 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
 
     await unlockSymbol(trade.symbol as string);
 
-    if (lineToken && lineUserId) {
+    {
       const dir = isLong ? '▲ 做多' : '▼ 做空';
       const sym = (trade.symbol as string).replace('USDT', '/USDT');
-      let msg: string;
+      const pnlStr = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+      let closeMsg: string;
+      let pushTitle: string;
       if (closeResult === 'MANUAL_CLOSE') {
-        msg = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${fmtPrice(closePrice)}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+        closeMsg   = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
+        pushTitle  = `⏱ 到期平倉 ${sym}`;
       } else {
         const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
                     : closeResult === 'WIN_TP1' ? (localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
                     : '❌ 止損出場';
-        msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${fmtPrice(closePrice)}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+        closeMsg  = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
+        pushTitle = `${label} ${sym}`;
       }
-      await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+      if (lineToken && lineUserId) {
+        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: closeMsg }]);
+      }
+      if (profileId) {
+        await sendWebPushToUser(profileId, {
+          title: pushTitle,
+          body: `${dir} 出場 $${fmtPrice(closePrice)} ｜ ${pnlStr}`,
+          tag: `close-${trade.id}`,
+        });
+      }
     }
     closed++;
   }
@@ -456,6 +495,8 @@ export async function GET(req: NextRequest) {
   // so it stays fresh. LINE_CHANNEL_TOKEN env var expires every 30 days and
   // requires manual renewal in Vercel — reading from the profile avoids that.
   let lineToken = process.env.LINE_CHANNEL_TOKEN ?? '';
+  // Resolved Supabase profile UUID — used for Web Push subscription lookup
+  let profileId = '';
   {
     const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
     const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -464,9 +505,10 @@ export async function GET(req: NextRequest) {
         const { createClient: mkLineAdmin } = await import('@supabase/supabase-js');
         const lineAdmin = mkLineAdmin(sbUrl, sbKey);
         const { data: lp } = await lineAdmin
-          .from('profiles').select('line_token')
+          .from('profiles').select('id, line_token')
           .eq('line_user_id', lineUserId).maybeSingle();
         if (lp?.line_token) lineToken = lp.line_token;
+        if (lp?.id) profileId = lp.id;
       } catch { /* keep env fallback */ }
     }
   }
@@ -588,10 +630,28 @@ export async function GET(req: NextRequest) {
       }
 
       if (entrySignal && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
+        // LINE send — failure (e.g. quota exhausted) does NOT block Web Push or trade insert
         const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(entrySignal));
         lineSent  = ok;
         lineError = error;
-        if (ok) {
+
+        // Web Push fires regardless of LINE result (LINE and Web Push are independent channels)
+        if (profileId) {
+          const edir = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
+          const esym = entrySignal.symbol.replace('USDT', '/USDT');
+          const tp1  = entrySignal.takeProfits[0];
+          const sp   = entrySignal.signalPrice ?? 0;
+          const isLmt = sp > 0 && Math.abs(entrySignal.entry - sp) / sp > 0.003;
+          await sendWebPushToUser(profileId, {
+            title: `${edir} ${esym} 交易信號`,
+            body: `${isLmt ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(tp1)} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分`,
+            tag: `signal-${entrySignal.id}`,
+          });
+        }
+
+        // Proceed with lock + trade insert when LINE sent OR Web Push configured.
+        // This prevents re-triggering the same signal on the next cron even when LINE quota is exhausted.
+        if (ok || !!profileId) {
           notified.push(symbol);
           await setLock(symbol, {
             sentAt: now, candleBucket: nowBucket,
@@ -685,20 +745,29 @@ export async function GET(req: NextRequest) {
                     }
                   }
 
-                  // Market-order entry confirmation LINE.
+                  // Market-order entry confirmation (LINE + Web Push).
                   // Limit orders are notified by monitorActiveTrades when the fill candle is detected.
                   // Duplicate prevention: tlock:symbol is already set to locked=true (signal gate),
                   // and count===0 guard above ensures no re-insert, so this fires exactly once.
-                  if (insertOk && !isLimitOrder && lineToken && lineUserId) {
+                  if (insertOk && !isLimitOrder) {
                     const dir = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
                     const sym = entrySignal.symbol.replace('USDT', '/USDT');
                     const tp2 = entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0];
-                    const msg =
+                    const entryMsg =
                       `【✅ 市場入場】${sym}\n` +
                       `${dir} 已進場\n` +
                       `進場價：$${fmtPrice(entrySignal.entry)}\n` +
                       `TP1：$${fmtPrice(entrySignal.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(entrySignal.stopLoss)}`;
-                    await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+                    if (lineToken && lineUserId) {
+                      await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: entryMsg }]);
+                    }
+                    if (profileId) {
+                      await sendWebPushToUser(profileId, {
+                        title: `✅ 市場入場 ${sym}`,
+                        body: `${dir} $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)}`,
+                        tag: `entry-${entrySignal.id}`,
+                      });
+                    }
                   }
                 }
               }
@@ -733,7 +802,7 @@ export async function GET(req: NextRequest) {
   }
 
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
-  const monitor = await monitorActiveTrades(lineToken, lineUserId)
+  const monitor = await monitorActiveTrades(lineToken, lineUserId, profileId)
     .catch(() => ({ monitored: 0, closed: 0, filled: 0, cancelled: 0 }));
 
   return NextResponse.json({

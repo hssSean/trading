@@ -3,6 +3,7 @@
   "short_name": "CryptoTrader",
   "description": "加密貨幣交易信號分析",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0A0A0F",

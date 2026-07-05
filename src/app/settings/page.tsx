@@ -1,10 +1,39 @@
 ﻿'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
 import { setIsResetting, clearSessionDeletedIds } from '@/components/StoreHydration';
 import { SignalStrength, Timeframe } from '@/types';
+
+const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
+
+function urlBase64ToUint8Array(base64String: string): ArrayBuffer {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const arr = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) arr[i] = rawData.charCodeAt(i);
+  return arr.buffer;
+}
+
+function isIos(): boolean {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+
+function isStandalone(): boolean {
+  return (
+    ('standalone' in navigator && (navigator as { standalone?: boolean }).standalone === true) ||
+    window.matchMedia('(display-mode: standalone)').matches
+  );
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const arr = new Uint8Array(buffer);
+  let str = '';
+  for (let i = 0; i < arr.length; i++) str += String.fromCharCode(arr[i]);
+  return btoa(str);
+}
 
 const INTERVALS = [5, 15, 30, 60];
 const TFS: Timeframe[] = ['5m', '15m', '1h', '4h', '1d'];
@@ -75,6 +104,109 @@ export default function SettingsPage() {
   const [resetMsg,    setResetMsg]    = useState('');
   const [fullResetting, setFullResetting] = useState(false);
   const [fullResetMsg,  setFullResetMsg]  = useState('');
+
+  // ── Web Push state ─────────────────────────────────────────────
+  type PushStatus = 'unknown' | 'unsupported' | 'ios-hint' | 'denied' | 'enabled' | 'disabled' | 'loading';
+  const [pushStatus, setPushStatus]     = useState<PushStatus>('unknown');
+  const [pushSub,    setPushSub]        = useState<PushSubscription | null>(null);
+
+  const checkPushStatus = useCallback(async () => {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setPushStatus('unsupported');
+      return;
+    }
+    if (isIos() && !isStandalone()) {
+      setPushStatus('ios-hint');
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      setPushStatus('denied');
+      return;
+    }
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        setPushSub(sub);
+        setPushStatus('enabled');
+      } else {
+        setPushStatus('disabled');
+      }
+    } catch {
+      setPushStatus('unsupported');
+    }
+  }, []);
+
+  useEffect(() => { checkPushStatus(); }, [checkPushStatus]);
+
+  const enablePush = async () => {
+    if (!VAPID_PUBLIC_KEY) { alert('NEXT_PUBLIC_VAPID_PUBLIC_KEY 未設定'); return; }
+    setPushStatus('loading');
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') { setPushStatus('denied'); return; }
+
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const jwt = session?.access_token ?? '';
+      if (!jwt) { setPushStatus('disabled'); return; }
+
+      const res = await fetch('/api/push-subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({
+          endpoint: sub.endpoint,
+          keys: {
+            p256dh: arrayBufferToBase64(sub.getKey('p256dh')!),
+            auth:   arrayBufferToBase64(sub.getKey('auth')!),
+          },
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        // Clean up the browser subscription so state stays consistent
+        await sub.unsubscribe().catch(() => {});
+        alert(`訂閱儲存失敗：${err.error ?? res.status}`);
+        setPushStatus('disabled');
+        return;
+      }
+      setPushSub(sub);
+      setPushStatus('enabled');
+    } catch (e) {
+      console.error('[push] enable failed:', e);
+      setPushStatus('disabled');
+    }
+  };
+
+  const disablePush = async () => {
+    setPushStatus('loading');
+    try {
+      if (pushSub) {
+        const { data: { session } } = await supabase.auth.getSession();
+        const jwt = session?.access_token ?? '';
+        if (jwt) {
+          await fetch('/api/push-subscribe', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+            body: JSON.stringify({ endpoint: pushSub.endpoint }),
+          });
+        }
+        await pushSub.unsubscribe();
+        setPushSub(null);
+      }
+      setPushStatus('disabled');
+    } catch (e) {
+      console.error('[push] disable failed:', e);
+      await checkPushStatus();
+    }
+  };
 
   useEffect(() => {
     if (typeof window !== 'undefined') setAppUrl(window.location.origin);
@@ -261,6 +393,84 @@ export default function SettingsPage() {
           </div>
         </Section>
 
+        {/* Web Push */}
+        <Section title="🔔 手機推播（Web Push）">
+          {pushStatus === 'unknown' && (
+            <p className="text-[#606080] text-xs">偵測中…</p>
+          )}
+
+          {pushStatus === 'unsupported' && (
+            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">
+              <p className="text-yellow-400 text-sm font-semibold">此瀏覽器不支援推播</p>
+              <p className="text-[#606080] text-xs mt-1">請使用 iOS 16.4+ Safari（已加入主畫面）或 Android Chrome</p>
+            </div>
+          )}
+
+          {pushStatus === 'ios-hint' && (
+            <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-3 space-y-2">
+              <p className="text-blue-400 text-sm font-bold">iOS 需先加入主畫面</p>
+              <p className="text-[#A0A0C0] text-xs leading-5">
+                iOS 16.4+ 才支援 Web Push，且必須以 Standalone App 模式開啟：
+              </p>
+              <ol className="text-[#A0A0C0] text-xs leading-6 list-decimal list-inside space-y-1">
+                <li>點 Safari 底部的 <span className="text-blue-400 font-semibold">分享</span> 按鈕</li>
+                <li>選擇「<span className="text-blue-400 font-semibold">加入主畫面</span>」</li>
+                <li>從主畫面的 App 圖示重新開啟</li>
+                <li>回到此頁面啟用推播</li>
+              </ol>
+            </div>
+          )}
+
+          {pushStatus === 'denied' && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3">
+              <p className="text-red-400 text-sm font-semibold">推播權限已被封鎖</p>
+              <p className="text-[#606080] text-xs mt-1">請到瀏覽器設定 → 網站設定 → 通知 → 允許此網站</p>
+            </div>
+          )}
+
+          {(pushStatus === 'disabled' || pushStatus === 'loading') && (
+            <div className="space-y-3">
+              <div className="bg-[#1A1A26] rounded-xl px-4 py-3">
+                <p className="text-[#EAEAF4] text-sm font-semibold">狀態：<span className="text-[#606080]">未啟用</span></p>
+                <p className="text-[#606080] text-xs mt-1">啟用後，信號、成交、止盈/止損通知將直接推送到此裝置</p>
+              </div>
+              <button
+                onClick={enablePush}
+                disabled={pushStatus === 'loading'}
+                className="w-full py-3 rounded-xl bg-blue-500/15 border border-blue-500/40 text-blue-400 text-sm font-bold disabled:opacity-40"
+              >
+                {pushStatus === 'loading' ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                    啟用中…
+                  </span>
+                ) : '🔔 啟用手機推播'}
+              </button>
+            </div>
+          )}
+
+          {pushStatus === 'enabled' && (
+            <div className="space-y-3">
+              <div className="bg-green-500/10 border border-green-500/30 rounded-xl px-4 py-3">
+                <p className="text-green-400 text-sm font-bold">✓ 推播已啟用</p>
+                <p className="text-[#606080] text-xs mt-1 break-all">
+                  {pushSub?.endpoint.slice(0, 60)}…
+                </p>
+              </div>
+              <button
+                onClick={disablePush}
+                className="w-full py-3 rounded-xl bg-[#1A1A26] border border-[#2A2A3E] text-[#606080] text-sm font-semibold"
+              >
+                🔕 關閉推播
+              </button>
+            </div>
+          )}
+
+          <p className="text-[#404060] text-xs mt-3 leading-5">
+            推播從伺服器每小時自動掃描後觸發，LINE 與 Web Push 同時發送（二選一或並存皆可）
+          </p>
+        </Section>
+
         {/* Monitor URL + Diag */}
         <Section title="⏰ 自動監控設定">
           <div className="mb-3">
@@ -347,9 +557,11 @@ export default function SettingsPage() {
               MIN_SCORE=5<br />
               <span className="text-blue-400">NEXT_PUBLIC_SUPABASE_URL=你的url</span><br />
               <span className="text-blue-400">NEXT_PUBLIC_SUPABASE_ANON_KEY=你的key</span><br />
-              <span className="text-blue-400">SUPABASE_SERVICE_ROLE_KEY=你的key</span>
+              <span className="text-blue-400">SUPABASE_SERVICE_ROLE_KEY=你的key</span><br />
+              <span className="text-green-400">NEXT_PUBLIC_VAPID_PUBLIC_KEY=（見部署說明）</span><br />
+              <span className="text-green-400">VAPID_PRIVATE_KEY=（見部署說明）</span>
             </p>
-            <p className="text-[#606080] text-[10px] mt-2">藍色為 Supabase 必填，用於登入驗證、交易紀錄同步及 TP/SL 自動偵測</p>
+            <p className="text-[#606080] text-[10px] mt-2">藍色為 Supabase 必填；綠色為 Web Push 必填</p>
           </div>
         </Section>
 
