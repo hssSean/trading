@@ -466,7 +466,15 @@ export async function saveToSupabase(userId: string) {
       exit_price:   t.exitPrice ?? null,
       pnl_percent:  t.pnlPercent ?? null,
     }));
-  if (tradeRows.length > 0) await supabase.from('trades').upsert(tradeRows, { onConflict: 'id' });
+  if (tradeRows.length > 0) {
+    const { error: upsertErr } = await supabase.from('trades').upsert(tradeRows, { onConflict: 'id' });
+    if (upsertErr && upsertErr.code !== '23505') {
+      // 23505 = partial unique index blocked a duplicate open trade; the client's
+      // local trade ID doesn't match the server's — loadFromSupabase will reconcile.
+      // Any other error is unexpected and worth logging.
+      console.error('[saveToSupabase] upsert error:', upsertErr.code, upsertErr.message);
+    }
+  }
 }
 
 // ── Pending signal pickup (runs on any page, not just home) ───────

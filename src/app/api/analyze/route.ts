@@ -691,15 +691,22 @@ export async function GET(req: NextRequest) {
               const ir = await admin.from('trades').insert(insertData);
               if (!ir.error) {
                 insertOk = true;
+              } else if (ir.error.code === '23505') {
+                // Partial unique index (trades_one_open_per_symbol) blocked this insert —
+                // a concurrent analyze already inserted an open trade for this symbol.
+                // Treat as "already exists": don't set lock here; the winning instance will.
+                console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505) — another cron won the race`);
               } else if (ir.error.code === '42703') {
                 // status / signal_price columns not yet migrated — retry without them
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 const { status: _s, signal_price: _sp, ...baseData } = insertData;
                 const ir2 = await admin.from('trades').insert(baseData);
-                if (ir2.error) {
-                  console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
-                } else {
+                if (!ir2.error) {
                   insertOk = true;
+                } else if (ir2.error.code === '23505') {
+                  console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505/fallback) — another cron won the race`);
+                } else {
+                  console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
                 }
               } else {
                 console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir.error.code}] ${ir.error.message}`);
