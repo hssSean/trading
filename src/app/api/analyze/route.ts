@@ -98,6 +98,12 @@ function current4hBucket(): number {
   return Math.floor(Date.now() / (4 * 60 * 60 * 1000)) * (4 * 60 * 60 * 1000);
 }
 
+function fmtPrice(p: number): string {
+  if (p >= 1000) return p.toFixed(2);
+  if (p >= 1)    return p.toFixed(4);
+  return p.toFixed(6);
+}
+
 function checkAuth(req: NextRequest): boolean {
   const envSecret  = process.env.WEBHOOK_SECRET;
   const cronSecret = process.env.CRON_SECRET;
@@ -547,7 +553,14 @@ export async function GET(req: NextRequest) {
           // Uses line_user_id to find the Supabase account owner.
           const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
           const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-          if (sbUrl && sbKey && lineUserId) {
+          if (!sbUrl || !sbKey || !lineUserId) {
+            console.error(
+              `[analyze] trade insert skipped for ${topStrong.symbol} —`,
+              !sbUrl ? 'NEXT_PUBLIC_SUPABASE_URL missing' :
+              !sbKey ? 'SUPABASE_SERVICE_ROLE_KEY missing' :
+              'LINE_USER_ID missing',
+            );
+          } else {
             try {
               const { createClient: mkAdmin } = await import('@supabase/supabase-js');
               const admin = mkAdmin(sbUrl, sbKey);
@@ -591,16 +604,46 @@ export async function GET(req: NextRequest) {
                     status:       isLimitOrder ? 'waiting' : 'active',
                     signal_price: sp,
                   };
+
                   const ir = await admin.from('trades').insert(insertData);
-                  if (ir.error?.code === '42703') {
-                    // status / signal_price columns not yet in DB schema — retry without them
-                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                    const { status: _s, signal_price: _sp, ...baseData } = insertData;
-                    await admin.from('trades').insert(baseData);
+                  let insertOk = !ir.error;
+
+                  if (ir.error) {
+                    if (ir.error.code === '42703') {
+                      // status / signal_price columns not yet in DB schema — retry without them
+                      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                      const { status: _s, signal_price: _sp, ...baseData } = insertData;
+                      const ir2 = await admin.from('trades').insert(baseData);
+                      if (ir2.error) {
+                        console.error(`[analyze] trade insert failed for ${topStrong.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
+                      } else {
+                        insertOk = true;
+                      }
+                    } else {
+                      console.error(`[analyze] trade insert failed for ${topStrong.symbol}: [${ir.error.code}] ${ir.error.message}`);
+                    }
+                  }
+
+                  // Market-order entry confirmation LINE.
+                  // Limit orders are notified by monitorActiveTrades when the fill candle is detected.
+                  // Duplicate prevention: tlock:symbol is already set to locked=true (signal gate),
+                  // and count===0 guard above ensures no re-insert, so this fires exactly once.
+                  if (insertOk && !isLimitOrder && lineToken && lineUserId) {
+                    const dir = topStrong.direction === 'LONG' ? '做多▲' : '做空▼';
+                    const sym = topStrong.symbol.replace('USDT', '/USDT');
+                    const tp2 = topStrong.takeProfits[1] ?? topStrong.takeProfits[0];
+                    const msg =
+                      `【✅ 市場入場】${sym}\n` +
+                      `${dir} 已進場\n` +
+                      `進場價：$${fmtPrice(topStrong.entry)}\n` +
+                      `TP1：$${fmtPrice(topStrong.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(topStrong.stopLoss)}`;
+                    await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
                   }
                 }
               }
-            } catch { /* non-critical — Redis fallback still covers client pickup */ }
+            } catch (e) {
+              console.error(`[analyze] trade insert threw for ${topStrong.symbol}: ${String(e)}`);
+            }
           }
         }
       }
