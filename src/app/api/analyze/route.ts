@@ -164,6 +164,18 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
     return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
   }
 
+  // Warn when the same symbol has multiple open trades — indicates prior inconsistency
+  // (e.g. client-created + server-created, or signal fired twice during key-missing window).
+  // Each trade is still processed independently; the real fix is per-event idempotency below.
+  const symbolCounts = new Map<string, number>();
+  [...waiting, ...active].forEach(t => {
+    const s = t.symbol as string;
+    symbolCounts.set(s, (symbolCounts.get(s) ?? 0) + 1);
+  });
+  symbolCounts.forEach((cnt, sym) => {
+    if (cnt > 1) console.error(`[monitor] ${sym} has ${cnt} open trades — duplicate may cause spurious notifications`);
+  });
+
   const now = Date.now();
   let filled = 0, cancelled = 0, closed = 0;
 
@@ -216,35 +228,56 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       const fillRes  = await admin.from('trades')
         .update({ status: 'active', filled_at: filledAt, last_monitored_at: now })
         .eq('id', trade.id);
-      if (fillRes.error?.code === '42703') {
-        // columns not yet migrated — fall back without the new fields
-        await admin.from('trades').update({ status: 'active', opened_at: filledAt }).eq('id', trade.id);
-      }
-      filled++;
 
-      if (lineToken && lineUserId) {
-        const dir = isLong ? '▲ 做多' : '▼ 做空';
-        const sym = (trade.symbol as string).replace('USDT', '/USDT');
-        const msg =
-          `【✅ 掛單成交】${sym}\n` +
-          `${dir} 進場已確認，已自動加入交易日誌\n` +
-          `成交價：$${fillCandle!.close}\n` +
-          `TP1：$${trade.tp1} ｜ SL：$${trade.stop_loss}`;
-        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+      let fillWriteOk = !fillRes.error;
+      if (fillRes.error) {
+        if (fillRes.error.code === '42703') {
+          const fb = await admin.from('trades').update({ status: 'active', opened_at: filledAt }).eq('id', trade.id);
+          if (fb.error) {
+            console.error(`[monitor] fill write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
+            await touchMonitoredAt(trade.id as string);
+          } else {
+            fillWriteOk = true;
+          }
+        } else {
+          console.error(`[monitor] fill write failed ${trade.id}: [${fillRes.error.code}] ${fillRes.error.message}`);
+          await touchMonitoredAt(trade.id as string);
+        }
+      }
+
+      // Notify only after DB confirms status='active' — prevents repeat on next cron if write failed
+      if (fillWriteOk) {
+        filled++;
+        if (lineToken && lineUserId) {
+          const dir = isLong ? '▲ 做多' : '▼ 做空';
+          const sym = (trade.symbol as string).replace('USDT', '/USDT');
+          const msg =
+            `【✅ 掛單成交】${sym}\n` +
+            `${dir} 進場已確認，已自動加入交易日誌\n` +
+            `成交價：$${fmtPrice(fillCandle!.close)}\n` +
+            `TP1：$${fmtPrice(trade.tp1 as number)} ｜ SL：$${fmtPrice(trade.stop_loss as number)}`;
+          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+        }
       }
     } else if (isCancelled) {
-      await admin.from('trades').delete().eq('id', trade.id);
-      await unlockSymbol(trade.symbol as string);
-      cancelled++;
-
-      if (lineToken && lineUserId) {
-        const dir = isLong ? '▲ 做多' : '▼ 做空';
-        const sym = (trade.symbol as string).replace('USDT', '/USDT');
-        const reason = isExpired
-          ? `掛單逾期 ${WAITING_EXPIRY_HOURS} 小時未成交，已自動取消`
-          : `價格未回測至進場位 $${entry}，直接到達 TP1 $${trade.tp1}，掛單已自動取消`;
-        const msg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
-        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+      const delRes = await admin.from('trades').delete().eq('id', trade.id);
+      if (delRes.error) {
+        // Delete failed — don't notify; next cron will retry the delete
+        console.error(`[monitor] cancel delete failed ${trade.id}: [${delRes.error.code}] ${delRes.error.message}`);
+        await touchMonitoredAt(trade.id as string);
+      } else {
+        await unlockSymbol(trade.symbol as string);
+        cancelled++;
+        // Notify only after row is confirmed gone — prevents repeat if delete had failed
+        if (lineToken && lineUserId) {
+          const dir = isLong ? '▲ 做多' : '▼ 做空';
+          const sym = (trade.symbol as string).replace('USDT', '/USDT');
+          const reason = isExpired
+            ? `掛單逾期 ${WAITING_EXPIRY_HOURS} 小時未成交，已自動取消`
+            : `價格未回測至進場位 $${fmtPrice(entry)}，直接到達 TP1 $${fmtPrice(trade.tp1 as number)}，掛單已自動取消`;
+          const msg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
+          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
+        }
       }
     } else {
       // No state change — record we've checked up to now so next run fetches only new candles
@@ -311,16 +344,31 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       const tp1Res = await admin.from('trades')
         .update({ status: 'tp1_hit', last_monitored_at: now })
         .eq('id', trade.id);
-      if (tp1Res.error?.code === '42703') {
-        await admin.from('trades').update({ status: 'tp1_hit' }).eq('id', trade.id);
+
+      let tp1WriteOk = !tp1Res.error;
+      if (tp1Res.error) {
+        if (tp1Res.error.code === '42703') {
+          const fb = await admin.from('trades').update({ status: 'tp1_hit' }).eq('id', trade.id);
+          if (fb.error) {
+            console.error(`[monitor] tp1_hit write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
+          } else {
+            tp1WriteOk = true;
+          }
+        } else {
+          console.error(`[monitor] tp1_hit write failed ${trade.id}: [${tp1Res.error.code}] ${tp1Res.error.message}`);
+        }
       }
-      if (lineToken && lineUserId) {
+
+      // Notify only after status='tp1_hit' is persisted — next cron sees isTp1Hit=true,
+      // skips the justHitTp1 branch, preventing repeat notification.
+      // If write failed, no LINE is sent; next cron retries the write.
+      if (tp1WriteOk && lineToken && lineUserId) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = (trade.symbol as string).replace('USDT', '/USDT');
         const msg =
           `【🎯 TP1 達標】${sym}\n` +
-          `${dir} TP1 $${trade.tp1} 已達標，繼續持有等待 TP2 $${trade.tp2}\n` +
-          `💡 建議立刻將止損移至成本 $${trade.entry}`;
+          `${dir} TP1 $${fmtPrice(trade.tp1 as number)} 已達標，繼續持有等待 TP2 $${fmtPrice(trade.tp2 as number)}\n` +
+          `💡 建議立刻將止損移至成本 $${fmtPrice(trade.entry as number)}`;
         await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
       }
       continue;
@@ -378,12 +426,12 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       const sym = (trade.symbol as string).replace('USDT', '/USDT');
       let msg: string;
       if (closeResult === 'MANUAL_CLOSE') {
-        msg = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+        msg = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${fmtPrice(closePrice)}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       } else {
         const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
                     : closeResult === 'WIN_TP1' ? (localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
                     : '❌ 止損出場';
-        msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${closePrice}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+        msg = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${fmtPrice(closePrice)}\n損益：${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       }
       await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: msg }]);
     }
