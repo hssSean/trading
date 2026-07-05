@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
-import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume } from '@/api/binance';
+import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume, fetchFundingRate } from '@/api/binance';
 import { computeIndicators } from '@/analysis/indicators';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
-import { Candle, Timeframe, TradingSignal } from '@/types';
+import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 import { sendWebPushToUser } from '@/lib/webpush';
 
@@ -556,6 +556,25 @@ export async function GET(req: NextRequest) {
 
       // Candle cache so HTF candles are fetched only once even if reused across TFs
       const candleCache = new Map<string, Candle[]>();
+
+      // ── Phase 2: Regime determination from 4H ADX (once per symbol) ──
+      // ADX>25 → trending (Strategy A), ADX<20 → ranging, 20-25 → transitional (no new signals).
+      // 4H candles are pre-fetched here so they're also available for the HTF-bias calculation
+      // below without an extra Binance round-trip.
+      let symbolRegime: Regime = 'ranging';
+      let symbolAdx = NaN;
+      try {
+        if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandles(symbol, '4h', 250));
+        const fourHC   = candleCache.get('4h')!;
+        const fourHInd = computeIndicators(fourHC);
+        symbolAdx = fourHInd.adx ?? NaN;
+        if (!isNaN(symbolAdx)) {
+          if (symbolAdx > 25)      symbolRegime = 'trending';
+          else if (symbolAdx < 20) symbolRegime = 'ranging';
+          else                     symbolRegime = 'transitional';
+        }
+      } catch { /* keep 'ranging' — safe fallback, does not block signals */ }
+
       for (const tf of timeframes) {
         try {
           if (!candleCache.has(tf)) candleCache.set(tf, await fetchCandles(symbol, tf, 200));
@@ -578,7 +597,7 @@ export async function GET(req: NextRequest) {
             } catch { /* no bias if HTF unavailable */ }
           }
 
-          const sigs = generateSignals(symbol, tf, candles, htfBias);
+          const sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime);
           allSignals.push(...sigs);
           sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
         } catch { /* skip failed timeframe */ }
@@ -793,6 +812,8 @@ export async function GET(req: NextRequest) {
         confluenceMet,
         agreeTFs,
         tfsAnalyzed: timeframes.filter(tf => candleCache.has(tf)),
+        regime: symbolRegime,
+        adx4h: isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(2)),
         ...(lineError  ? { lineError }       : {}),
         ...(skipReason ? { note: skipReason } : {}),
       });

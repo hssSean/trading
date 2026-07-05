@@ -1,4 +1,4 @@
-import { Candle, TradingSignal, SignalStrength, Timeframe, OrderBlock, FairValueGap, SRLevel } from '../types';
+import { Candle, TradingSignal, SignalStrength, Timeframe, OrderBlock, FairValueGap, SRLevel, Regime } from '../types';
 import { computeIndicators, rsi as rsiCalc } from './indicators';
 import { findOrderBlocks, findFairValueGaps, analyzeMarketStructure, findEqualLevels } from './smc';
 import { findSRLevels, nearestSupport, nearestResistance } from './snr';
@@ -150,13 +150,22 @@ function isIntradayTF(tf: Timeframe): boolean {
 }
 
 // htfBias: if provided, bonus +3 for aligned direction, penalty -2 for opposite
+// regime: determined from 4H ADX — 'trending' enables Strategy A extras,
+//         'ranging' skips new entry candidates (Strategy B handled separately),
+//         'transitional' (ADX 20-25) blocks all new signals from this function.
 export function generateSignals(
   symbol: string,
   timeframe: Timeframe,
   candles: Candle[],
   htfBias?: 'LONG' | 'SHORT' | null,
+  regime?: Regime,
 ): TradingSignal[] {
   if (candles.length < 55) return [];
+
+  // ── Phase 2 gate: ADX transitional zone (20-25) → no new signals ──
+  // This is correct behaviour; caller receives empty array and should surface
+  // regime='transitional' in the API response for transparency.
+  if (regime === 'transitional') return [];
 
   const intraday  = isIntradayTF(timeframe);
   const isLongTF  = timeframe === '4h' || timeframe === '1d';
@@ -347,6 +356,35 @@ export function generateSignals(
   if (htfBias === 'LONG')  { longScore  += 3; longReasons.push('大時框偏多 +3'); shortScore -= 2; }
   if (htfBias === 'SHORT') { shortScore += 3; shortReasons.push('大時框偏空 +3'); longScore  -= 2; }
 
+  // ── Strategy A extras (trending regime only) ───────────────────
+  // These entries are additional candidates; they do NOT remove existing OB/SR logic.
+  if (regime === 'trending') {
+    const ema20Zone = atrVal * 0.5;
+
+    // EMA20 ±0.5ATR pullback — classic trend pullback entry
+    if (allowLong && price >= ind.ema20 - ema20Zone && price <= ind.ema20 + ema20Zone) {
+      longScore += 3;
+      longReasons.push(`策略A: 回調 EMA20±0.5ATR（$${ind.ema20.toFixed(4)}）`);
+    }
+    if (allowShort && price >= ind.ema20 - ema20Zone && price <= ind.ema20 + ema20Zone) {
+      shortScore += 3;
+      shortReasons.push(`策略A: 反彈 EMA20±0.5ATR（$${ind.ema20.toFixed(4)}）`);
+    }
+
+    // Donchian 20 breakout — only valid on the breakout candle (price vs prior channel)
+    const don = ind.donchian;
+    if (don && !isNaN(don.upper) && !isNaN(don.lower)) {
+      if (allowLong && price > don.upper) {
+        longScore += 4;
+        longReasons.push(`策略A: Donchian20 向上突破（$${don.upper.toFixed(4)}）`);
+      }
+      if (allowShort && price < don.lower) {
+        shortScore += 4;
+        shortReasons.push(`策略A: Donchian20 向下突破（$${don.lower.toFixed(4)}）`);
+      }
+    }
+  }
+
   // ── BREAKER BLOCKS ─────────────────────────────────────────────
   const allOBs    = findOrderBlocks(candles);
   const breakerBull = allOBs.find(
@@ -435,6 +473,16 @@ export function generateSignals(
     longSR    = pendingSupport;
   }
 
+  // Strategy A: EMA20 as pullback entry candidate (only if it's deeper than current price
+  // but within the search window, and is the best available level)
+  if (regime === 'trending' && ind.ema20 < price * (1 - entryThreshLong) && ind.ema20 > price * (1 - searchWindow)) {
+    // EMA20 is a valid pending pullback level — prefer it over bare SR if closer
+    if (!pendingBullOB && (!pendingSupport || ind.ema20 > pendingSupport.price)) {
+      longEntry = ind.ema20;
+      longReasons.push(`策略A: 等待回調 EMA20 $${ind.ema20.toFixed(4)}`);
+    }
+  }
+
   // For intraday: if price is AT or just above an OB/FVG → allow near-market entry
   const atBullOB  = obs.find(o => o.type === 'bullish' && !o.mitigated && price >= o.low && price <= o.high * 1.002);
   const atBullFVG = fvgs.find(f => f.type === 'bullish' && !f.filled && price >= f.bottom && price <= f.top * 1.002);
@@ -466,6 +514,14 @@ export function generateSignals(
   } else if (pendingResistance) {
     shortEntry = pendingResistance.price;
     shortSR    = pendingResistance;
+  }
+
+  // Strategy A: EMA20 as bounce-short entry candidate in trending down market
+  if (regime === 'trending' && ind.ema20 > price * (1 + entryThreshShort) && ind.ema20 < price * (1 + searchWindow)) {
+    if (!pendingBearOB && (!pendingResistance || ind.ema20 < pendingResistance.price)) {
+      shortEntry = ind.ema20;
+      shortReasons.push(`策略A: 等待反彈 EMA20 $${ind.ema20.toFixed(4)}`);
+    }
   }
 
   const atBearOB  = obs.find(o => o.type === 'bearish' && !o.mitigated && price <= o.high && price >= o.low * 0.998);
@@ -526,6 +582,7 @@ export function generateSignals(
       reasons: longReasons, orderBlock: longOB, fvg: longFVG,
       srLevel: longSR ?? support ?? undefined, indicators: ind, isRead: false,
       signalPrice: price,
+      regime: regime ?? 'ranging',
     });
   }
 
@@ -555,6 +612,7 @@ export function generateSignals(
       reasons: shortReasons, orderBlock: shortOB, fvg: shortFVG,
       srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
       signalPrice: price,
+      regime: regime ?? 'ranging',
     });
   }
 
