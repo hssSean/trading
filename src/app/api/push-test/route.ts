@@ -17,11 +17,23 @@ export async function POST(req: NextRequest) {
   const { data: { user }, error: authErr } = await userClient.auth.getUser();
   if (authErr || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  await sendWebPushToUser(user.id, {
+  const results = await sendWebPushToUser(user.id, {
     title: '🔔 測試推播',
     body: '推播通知已成功啟用！信號、成交通知將透過此管道送達。',
     tag: 'push-test',
   });
 
-  return NextResponse.json({ ok: true });
+  const anyOk = results.some(r => r.ok);
+  return NextResponse.json({
+    ok: anyOk,
+    subsCount: results.length,
+    // Full per-subscription result for diagnosing Apple APNs errors
+    results: results.map(r => ({
+      endpoint: r.endpoint,
+      ok: r.ok,
+      statusCode: r.statusCode,
+      errorBody: r.errorBody,
+      errorMessage: r.errorMessage,
+    })),
+  });
 }

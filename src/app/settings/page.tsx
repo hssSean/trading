@@ -111,6 +111,7 @@ export default function SettingsPage() {
   const [pushSub,    setPushSub]        = useState<PushSubscription | null>(null);
   type TestPushStatus = 'idle' | 'loading' | 'ok' | 'fail';
   const [pushTestStatus, setPushTestStatus] = useState<TestPushStatus>('idle');
+  const [pushTestError,  setPushTestError]  = useState('');
 
   const checkPushStatus = useCallback(async () => {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -195,6 +196,7 @@ export default function SettingsPage() {
 
   const sendTestPush = async () => {
     setPushTestStatus('loading');
+    setPushTestError('');
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const jwt = session?.access_token ?? '';
@@ -203,11 +205,25 @@ export default function SettingsPage() {
         method: 'POST',
         headers: { Authorization: `Bearer ${jwt}` },
       });
-      setPushTestStatus(res.ok ? 'ok' : 'fail');
+      const data = await res.json() as {
+        ok: boolean; subsCount?: number;
+        results?: { ok: boolean; statusCode?: number; errorBody?: string }[];
+      };
+      if (data.ok) {
+        setPushTestStatus('ok');
+      } else {
+        const first = data.results?.find(r => !r.ok);
+        const hint = first
+          ? `HTTP ${first.statusCode ?? '?'}: ${first.errorBody ?? '無詳情'}`
+          : (data.subsCount === 0 ? '找不到訂閱，請重新啟用推播' : '發送失敗');
+        setPushTestError(hint);
+        setPushTestStatus('fail');
+      }
     } catch {
       setPushTestStatus('fail');
+      setPushTestError('網路錯誤');
     }
-    setTimeout(() => setPushTestStatus('idle'), 4000);
+    setTimeout(() => { setPushTestStatus('idle'); setPushTestError(''); }, 8000);
   };
 
   const disablePush = async () => {
@@ -492,6 +508,9 @@ export default function SettingsPage() {
                   : pushTestStatus === 'fail' ? '❌ 發送失敗'
                   : '🔔 發送測試推播'}
               </button>
+              {pushTestError && (
+                <p className="text-red-400 text-xs bg-red-500/10 rounded-lg px-3 py-2 break-all">{pushTestError}</p>
+              )}
               <button
                 onClick={disablePush}
                 className="w-full py-2.5 rounded-xl bg-[#1A1A26] border border-[#2A2A3E] text-[#606080] text-sm font-semibold"

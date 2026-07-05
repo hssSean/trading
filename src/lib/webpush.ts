@@ -2,7 +2,10 @@ import webpush from 'web-push';
 
 const VAPID_PUBLIC  = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY ?? '';
-const VAPID_CONTACT = process.env.VAPID_CONTACT ?? 'mailto:admin@example.com';
+// Apple APNs (web.push.apple.com) validates the VAPID sub claim strictly.
+// Must be a real mailto: or https:// — example.com is an RFC 2606 reserved domain
+// that Apple rejects with 403 / BadJwtToken.
+const VAPID_CONTACT = process.env.VAPID_SUBJECT ?? 'mailto:a0966211623@gmail.com';
 
 let vapidReady = false;
 function initVapid() {
@@ -19,19 +22,28 @@ export interface WebPushPayload {
   url?: string;
 }
 
+export interface SendResult {
+  endpoint: string;  // truncated to 80 chars for logging
+  ok: boolean;
+  statusCode?: number;
+  errorBody?: string;
+  errorMessage?: string;
+}
+
 /**
  * Send a Web Push notification to all subscriptions belonging to `userId`.
+ * Returns per-subscription send results for diagnostics.
  * Silently removes expired/invalid subscriptions (410/404) and logs other errors.
  * Never throws — callers need not wrap in try/catch.
  */
 export async function sendWebPushToUser(
   userId: string,
   payload: WebPushPayload,
-): Promise<void> {
-  if (!VAPID_PUBLIC || !VAPID_PRIVATE) return;
+): Promise<SendResult[]> {
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) return [];
   const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
   const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-  if (!sbUrl || !sbKey || !userId) return;
+  if (!sbUrl || !sbKey || !userId) return [];
 
   initVapid();
 
@@ -44,36 +56,47 @@ export async function sendWebPushToUser(
       .select('id, endpoint, p256dh, auth')
       .eq('user_id', userId);
     if (error) {
-      // Table may not exist yet — fail silently
       if (error.code !== '42P01') console.error('[webpush] fetch subs error:', error.message);
-      return;
+      return [];
     }
     subs = (data ?? []) as typeof subs;
   } catch (e) {
     console.error('[webpush] fetch subs threw:', String(e));
-    return;
+    return [];
   }
 
-  if (subs.length === 0) return;
+  if (subs.length === 0) return [];
 
   const payloadStr = JSON.stringify(payload);
   const toDelete: string[] = [];
+  const results: SendResult[] = [];
 
   await Promise.all(
     subs.map(async (sub) => {
+      const shortEndpoint = sub.endpoint.slice(0, 80);
       try {
         await webpush.sendNotification(
           { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
           payloadStr,
         );
+        results.push({ endpoint: shortEndpoint, ok: true });
       } catch (err: unknown) {
-        const e = err as { statusCode?: number; message?: string };
-        if (e.statusCode === 410 || e.statusCode === 404) {
+        const e = err as { statusCode?: number; body?: string; message?: string };
+        const statusCode   = e.statusCode;
+        const errorBody    = e.body ?? '';
+        const errorMessage = e.message ?? String(err);
+
+        if (statusCode === 410 || statusCode === 404) {
           toDelete.push(sub.id);
-          console.log(`[webpush] expired sub removed: ${sub.endpoint.slice(0, 60)}`);
+          console.log(`[webpush] expired sub (${statusCode}), removing: ${shortEndpoint}`);
         } else {
-          console.error(`[webpush] send failed (${e.statusCode ?? 'unknown'}): ${e.message ?? err}`);
+          // Surface the full Apple/FCM error response body so we can diagnose
+          console.error(
+            `[webpush] send failed status=${statusCode ?? 'unknown'} ` +
+            `body=${errorBody} msg=${errorMessage} endpoint=${shortEndpoint}`,
+          );
         }
+        results.push({ endpoint: shortEndpoint, ok: false, statusCode, errorBody, errorMessage });
       }
     }),
   );
@@ -87,4 +110,6 @@ export async function sendWebPushToUser(
       console.error('[webpush] cleanup threw:', String(e));
     }
   }
+
+  return results;
 }
