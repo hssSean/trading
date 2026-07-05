@@ -40,10 +40,16 @@ export async function sendWebPushToUser(
   userId: string,
   payload: WebPushPayload,
 ): Promise<SendResult[]> {
-  if (!VAPID_PUBLIC || !VAPID_PRIVATE) return [];
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
+    console.error('[webpush] VAPID keys not configured — set NEXT_PUBLIC_VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in Vercel env vars');
+    return [];
+  }
   const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
   const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-  if (!sbUrl || !sbKey || !userId) return [];
+  if (!sbUrl || !sbKey || !userId) {
+    console.error(`[webpush] DB not configured or userId empty — sbUrl=${!!sbUrl} sbKey=${!!sbKey} userId=${!!userId}`);
+    return [];
+  }
 
   initVapid();
 
@@ -62,6 +68,7 @@ export async function sendWebPushToUser(
       return [];
     }
     subs = (data ?? []) as typeof subs;
+    console.log(`[webpush] found ${subs.length} subscription(s) for userId=${userId.slice(0, 8)}`);
   } catch (e) {
     console.error('[webpush] fetch subs threw:', String(e));
     return [];

@@ -207,15 +207,30 @@ export default function SettingsPage() {
       });
       const data = await res.json() as {
         ok: boolean; subsCount?: number;
-        results?: { ok: boolean; statusCode?: number; errorBody?: string }[];
+        vapidConfigured?: boolean; diagCount?: number; diagError?: string | null;
+        results?: { ok: boolean; statusCode?: number; errorBody?: string; errorMessage?: string }[];
       };
       if (data.ok) {
         setPushTestStatus('ok');
       } else {
         const first = data.results?.find(r => !r.ok);
-        const hint = first
-          ? `HTTP ${first.statusCode ?? '?'}: ${first.errorBody ?? '無詳情'}`
-          : (data.subsCount === 0 ? '找不到訂閱，請重新啟用推播' : '發送失敗');
+        let hint: string;
+        if (first) {
+          hint = `HTTP ${first.statusCode ?? '?'}: ${first.errorBody || first.errorMessage || '無詳情'}`;
+        } else if ((data.subsCount ?? 0) === 0) {
+          const dc = data.diagCount ?? -1;
+          if (dc > 0 && data.vapidConfigured === false) {
+            hint = `伺服器找到 ${dc} 筆訂閱，但 VAPID 金鑰未設定（請至 Vercel 環境變數加入 NEXT_PUBLIC_VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY）`;
+          } else if (dc > 0) {
+            hint = `伺服器找到 ${dc} 筆訂閱但發送仍失敗，請查 Vercel Function Logs`;
+          } else if (dc === 0) {
+            hint = '找不到訂閱，請重新啟用推播';
+          } else {
+            hint = 'SUPABASE_SERVICE_ROLE_KEY 未設定，無法查詢訂閱';
+          }
+        } else {
+          hint = '發送失敗';
+        }
         setPushTestError(hint);
         setPushTestStatus('fail');
       }
