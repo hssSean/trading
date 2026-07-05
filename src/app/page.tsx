@@ -6,6 +6,7 @@ import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, se
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { computeIndicators } from '@/analysis/indicators';
 import { Candle, Timeframe, TradingSignal } from '@/types';
+import { loadFromSupabase } from '@/components/StoreHydration';
 
 const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
   '5m': '15m', '15m': '1h', '1h': '4h', '4h': '1d',
@@ -118,7 +119,8 @@ export default function HomePage() {
   const [autoLoading, setAutoLoading]     = useState(false);
   const [autoMsg, setAutoMsg]             = useState('');
   const [searchResults, setSearchResults] = useState<string[]>([]);
-  const autoLoaded = useRef(false);
+  const autoLoaded      = useRef(false);
+  const seenPendingIds  = useRef<Set<string>>(new Set());
 
   const analyzeAll = useCallback(async () => {
     setRefreshing(true);
@@ -197,26 +199,33 @@ export default function HomePage() {
     return () => clearInterval(id);
   }, [loadTopCoins]);
 
-  // ── Pick up pending signals that server sent LINE for — poll every 30s
+  // ── Pick up pending signals that server queued in Redis ──────────
+  // When the server inserts a trade it also queues the signal in Redis.
+  // We detect new signals here then reload from DB (using loadFromSupabase)
+  // so the local state uses the server's trade ID — avoiding the duplicate
+  // that used to occur when addTrade created a client-side ID that
+  // saveToSupabase would then upsert as a separate DB row.
   useEffect(() => {
     const pickupPending = async () => {
       if (document.visibilityState !== 'visible') return;
       const secret = useStore.getState().webhookSecret;
+      const userId = useStore.getState().userId;
       try {
         const res = await fetch('/api/analyze', { method: 'POST', headers: { 'x-webhook-secret': secret } });
         const data: { signals?: TradingSignal[] } = await res.json();
-        for (const sig of data.signals ?? []) {
+        const freshSigs = (data.signals ?? []).filter(sig => !seenPendingIds.current.has(sig.id));
+        if (freshSigs.length === 0) return;
+
+        for (const sig of freshSigs) {
+          seenPendingIds.current.add(sig.id);
           const s = useStore.getState();
-          // Skip if already in trades (by signalId) — signals persist in Redis via TTL
-          if (s.trades.some(t => t.signalId === sig.id)) continue;
           if (!s.coins.find(c => c.symbol === sig.symbol)) {
             s.addCoin(sig.symbol);
             setTimeout(() => runCoinAnalysis(sig.symbol), 500);
           }
-          if (!useStore.getState().hasActiveTrade(sig.symbol)) {
-            useStore.getState().addTrade(sig);
-          }
         }
+        // Reload from DB — server already inserted the trade with a stable ID.
+        if (userId) await loadFromSupabase(userId);
       } catch { /* ignore network errors */ }
     };
     pickupPending();

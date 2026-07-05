@@ -79,7 +79,7 @@ export async function loadFromSupabase(userId: string) {
     const existingSignalIds = new Set(store.trades.map(t => t.signalId).filter(Boolean));
     // reverse lookup: signalId → local trade (for reconciling server trades with different IDs)
     const existingBySignal  = new Map(store.trades.filter(t => !!t.signalId).map(t => [t.signalId!, t]));
-    const activeSymbols     = new Set(store.trades.filter(t => !t.result && t.status !== 'waiting').map(t => t.symbol));
+    const activeSymbols     = new Set(store.trades.filter(t => !t.result).map(t => t.symbol));
     const incoming: TradeRecord[] = [];
 
     for (const r of tr as Record<string, unknown>[]) {
@@ -102,7 +102,7 @@ export async function loadFromSupabase(userId: string) {
           if (r.result && !localBySig.result) {
             useStore.getState().closeTrade(localBySig.id, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
           }
-        } else if (r.result != null || r.status === 'waiting' || !activeSymbols.has(r.symbol as string)) {
+        } else if (r.result != null || !activeSymbols.has(r.symbol as string)) {
           const record = rowToRecord(r);
           incoming.push(record);
           if (srvSignalId) existingSignalIds.add(srvSignalId);
@@ -470,11 +470,16 @@ export async function saveToSupabase(userId: string) {
 }
 
 // ── Pending signal pickup (runs on any page, not just home) ───────
-// Ensures market-entry signals sent by server get picked up even when
-// the user opens the app directly to the trades page (bypassing page.tsx).
+// When the server inserts a trade it also queues the signal in Redis.
+// We detect those signals here and reload from DB — using the server's
+// own trade ID — instead of creating a parallel client-side trade that
+// saveToSupabase would upsert as a duplicate row with a different ID.
+const seenSignalIds = new Set<string>();
+
 async function pickupServerSignals(): Promise<void> {
   const secret = useStore.getState().webhookSecret;
-  if (!secret) return;
+  const userId = useStore.getState().userId;
+  if (!secret || !userId) return;
   try {
     const res = await fetch('/api/analyze', {
       method: 'POST',
@@ -482,12 +487,20 @@ async function pickupServerSignals(): Promise<void> {
     });
     if (!res.ok) return;
     const data = await res.json() as { signals?: TradingSignal[] };
-    for (const sig of data.signals ?? []) {
+    const freshSigs = (data.signals ?? []).filter(sig => !seenSignalIds.has(sig.id));
+    if (freshSigs.length === 0) return;
+
+    // Add any new symbols to watchlist so they appear in the signal tab
+    freshSigs.forEach(sig => {
+      seenSignalIds.add(sig.id);
       const s = useStore.getState();
-      if (s.trades.some(t => t.signalId === sig.id)) continue;
       if (!s.coins.find(c => c.symbol === sig.symbol)) s.addCoin(sig.symbol);
-      if (!s.hasActiveTrade(sig.symbol)) s.addTrade(sig);
-    }
+    });
+
+    // Reload from DB — the server already inserted the trade with a stable ID.
+    // This avoids creating a second local trade (new client ID) that
+    // saveToSupabase would persist as a duplicate row.
+    await loadFromSupabase(userId);
   } catch { /* ignore network errors */ }
 }
 
