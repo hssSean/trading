@@ -54,6 +54,21 @@ export interface SRLevel {
   touchCount: number;
 }
 
+export type Regime = 'trending' | 'ranging' | 'transitional';
+
+export interface BollingerBands {
+  upper: number;
+  middle: number;
+  lower: number;
+  bandwidth: number;
+}
+
+export interface DonchianChannel {
+  upper: number;
+  lower: number;
+  middle: number;
+}
+
 export interface TechnicalIndicators {
   rsi: number;
   macd: number;
@@ -63,6 +78,13 @@ export interface TechnicalIndicators {
   ema50: number;
   ema200: number;
   trend: 'bullish' | 'bearish' | 'neutral';
+  // Phase 1 additions — optional for backward compat
+  adx?: number;
+  adxPlus?: number;  // +DI
+  adxMinus?: number; // -DI
+  bb?: BollingerBands;
+  donchian?: DonchianChannel;
+  atrPercentile?: number; // 0-100, position in 90-day ATR distribution
 }
 
 export interface TradingSignal {
@@ -83,7 +105,10 @@ export interface TradingSignal {
   srLevel?: SRLevel;
   indicators: TechnicalIndicators;
   isRead: boolean;
-  signalPrice?: number; // market price at the moment the signal was generated
+  signalPrice?: number;
+  // Phase 1/2 additions — optional for backward compat
+  regime?: Regime;
+  fundingRate?: number;
 }
 
 export interface WatchedCoin {

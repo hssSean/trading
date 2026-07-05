@@ -1,4 +1,4 @@
-import { Candle, TechnicalIndicators } from '../types';
+import { Candle, TechnicalIndicators, BollingerBands, DonchianChannel } from '../types';
 
 export function ema(values: number[], period: number): number[] {
   const k = 2 / (period + 1);
@@ -71,6 +71,94 @@ export function macd(
   return { macdLine, signalLine, histogram };
 }
 
+// ── ADX (Average Directional Index) ──────────────────────────
+// Returns { adx, plusDI, minusDI } for the last candle.
+// Uses Wilder's smoothing (same period for TR, +DM, -DM).
+export function adx(candles: Candle[], period = 14): { adx: number; plusDI: number; minusDI: number } {
+  const nan = { adx: NaN, plusDI: NaN, minusDI: NaN };
+  if (candles.length < period * 2 + 1) return nan;
+
+  const trs: number[]  = [];
+  const plusDMs: number[]  = [];
+  const minusDMs: number[] = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const cur  = candles[i];
+    const prev = candles[i - 1];
+    const upMove   = cur.high - prev.high;
+    const downMove = prev.low - cur.low;
+    plusDMs.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDMs.push(downMove > upMove && downMove > 0 ? downMove : 0);
+    trs.push(Math.max(cur.high - cur.low, Math.abs(cur.high - prev.close), Math.abs(cur.low - prev.close)));
+  }
+
+  // Wilder smooth: first value = sum of first `period` items
+  let smoothTR    = trs.slice(0, period).reduce((a, b) => a + b, 0);
+  let smoothPlus  = plusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+  let smoothMinus = minusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+
+  const dxValues: number[] = [];
+
+  for (let i = period; i < trs.length; i++) {
+    smoothTR    = smoothTR    - smoothTR    / period + trs[i];
+    smoothPlus  = smoothPlus  - smoothPlus  / period + plusDMs[i];
+    smoothMinus = smoothMinus - smoothMinus / period + minusDMs[i];
+
+    const pdi = smoothTR === 0 ? 0 : (smoothPlus  / smoothTR) * 100;
+    const mdi = smoothTR === 0 ? 0 : (smoothMinus / smoothTR) * 100;
+    const dx  = pdi + mdi === 0 ? 0 : (Math.abs(pdi - mdi) / (pdi + mdi)) * 100;
+    dxValues.push(dx);
+  }
+
+  if (dxValues.length < period) return nan;
+
+  // ADX = Wilder smooth of DX values
+  let adxVal = dxValues.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dxValues.length; i++) {
+    adxVal = (adxVal * (period - 1) + dxValues[i]) / period;
+  }
+
+  // Recompute final +DI / -DI from last smoothed values
+  const pdi = smoothTR === 0 ? 0 : (smoothPlus  / smoothTR) * 100;
+  const mdi = smoothTR === 0 ? 0 : (smoothMinus / smoothTR) * 100;
+
+  return { adx: adxVal, plusDI: pdi, minusDI: mdi };
+}
+
+// ── Bollinger Bands ───────────────────────────────────────────
+export function bollingerBands(candles: Candle[], period = 20, stdDevMult = 2): BollingerBands {
+  const closes = candles.map(c => c.close);
+  if (closes.length < period) return { upper: NaN, middle: NaN, lower: NaN, bandwidth: NaN };
+
+  const slice  = closes.slice(-period);
+  const middle = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((sum, v) => sum + (v - middle) ** 2, 0) / period;
+  const stdDev   = Math.sqrt(variance);
+  const upper    = middle + stdDevMult * stdDev;
+  const lower    = middle - stdDevMult * stdDev;
+  const bandwidth = middle === 0 ? 0 : (upper - lower) / middle;
+
+  return { upper, middle, lower, bandwidth };
+}
+
+// ── Donchian Channel ─────────────────────────────────────────
+export function donchianChannel(candles: Candle[], period = 20): DonchianChannel {
+  if (candles.length < period) return { upper: NaN, lower: NaN, middle: NaN };
+  // Use all candles except the last (last candle is the current forming one)
+  const slice = candles.slice(-period - 1, -1);
+  const upper = Math.max(...slice.map(c => c.high));
+  const lower = Math.min(...slice.map(c => c.low));
+  return { upper, lower, middle: (upper + lower) / 2 };
+}
+
+// ── ATR Percentile ────────────────────────────────────────────
+// Returns 0-100 position of the current ATR in the given ATR history.
+export function calcAtrPercentile(currentAtr: number, atrHistory: number[]): number {
+  if (atrHistory.length === 0) return 50;
+  const below = atrHistory.filter(v => v <= currentAtr).length;
+  return Math.round((below / atrHistory.length) * 100);
+}
+
 export function computeIndicators(candles: Candle[]): TechnicalIndicators {
   const closes = candles.map((c) => c.close);
   const n = closes.length - 1;
@@ -97,6 +185,10 @@ export function computeIndicators(candles: Candle[]): TechnicalIndicators {
   if (bullishCount >= 3) trend = 'bullish';
   else if (bullishCount <= 1) trend = 'bearish';
 
+  const adxResult = adx(candles, 14);
+  const bb        = bollingerBands(candles, 20, 2);
+  const donchian  = donchianChannel(candles, 20);
+
   return {
     rsi: rsiValues[n] ?? 50,
     macd: macdLine[n] ?? 0,
@@ -106,5 +198,10 @@ export function computeIndicators(candles: Candle[]): TechnicalIndicators {
     ema50: currentEma50,
     ema200: currentEma200,
     trend,
+    adx:      adxResult.adx,
+    adxPlus:  adxResult.plusDI,
+    adxMinus: adxResult.minusDI,
+    bb,
+    donchian,
   };
 }

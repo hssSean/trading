@@ -91,6 +91,28 @@ export async function searchSymbols(query: string): Promise<string[]> {
 // Stablecoin / leveraged token patterns to exclude
 const EXCLUDE = /^(USDC|BUSD|TUSD|USDP|FDUSD|DAI|EUR|GBP|AUD|BVOL|IBVOL|BEAR|BULL|UP|DOWN|3L|3S)/;
 
+// ── Funding Rate ─────────────────────────────────────────────
+// Uses /fapi/v1/premiumIndex — public, no API key required.
+// Returns the latest funding rate as a decimal (e.g. 0.001 = 0.1%).
+// In-process cache: funding rates update every 8h so 10min TTL is fine.
+const _frCache = new Map<string, { rate: number; at: number }>();
+const FR_TTL_MS = 10 * 60 * 1000;
+
+export async function fetchFundingRate(symbol: string): Promise<number> {
+  const cached = _frCache.get(symbol);
+  if (cached && Date.now() - cached.at < FR_TTL_MS) return cached.rate;
+
+  try {
+    const res = await client.get('/premiumIndex', { params: { symbol } });
+    const rate = parseFloat(res.data.lastFundingRate ?? '0');
+    _frCache.set(symbol, { rate, at: Date.now() });
+    return rate;
+  } catch {
+    // If API fails return 0 (neutral — no distortion to scoring)
+    return 0;
+  }
+}
+
 export async function fetchTopCoinsByVolume(limit = 10): Promise<string[]> {
   // Use exchangeInfo to get only PERPETUAL symbols, then sort by volume
   const [infoRes, tickerRes] = await Promise.all([
