@@ -594,70 +594,115 @@ export async function GET(req: NextRequest) {
       const onCooldown = !!last && !locked && (now - last.sentAt) < COOLDOWN_MS;
 
       let skipReason: string | undefined;
-      if (locked)          skipReason = `LINE skipped — active trade lock (${last?.direction})`;
-      else if (sameCandle) skipReason = `LINE skipped — same 4h candle (${topStrong?.direction})`;
+      if (locked)
+        skipReason = `跳過 — 持倉中 (${last?.direction})`;
+      else if (sameCandle)
+        skipReason = `跳過 — 同 4h 蠟燭 (${topStrong?.direction})`;
       else if (onCooldown && last)
-        skipReason = `LINE skipped — cooldown (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min left)`;
+        skipReason = `跳過 — 冷卻中 (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min)`;
       else if (topStrong && !confluenceMet)
-        skipReason = `LINE skipped — 多框架未確認 (${agreeTFs}/2 TF 同向)`;
+        skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向)`;
       else if (topStrong && !entrySignal)
-        // Direction confirmed but entry TF (e.g. 1h) has no qualifying signal — don't send.
-        skipReason = `LINE skipped — no signal from entry TF (${entryTf})`;
-      else if (entrySignal) {
-        // Supabase hard-stop: prevents duplicate trades when Redis lock is lost (Vercel container recycle).
-        // Default-block on exception — safer than default-allow which risks duplicate trades.
+        skipReason = `跳過 — 進場時區 (${entryTf}) 無合格信號`;
+      else if (entrySignal && profileId) {
+        // Hard-stop duplicate check — uses already-resolved profileId, no second profile lookup.
+        // Default-block on exception: safer than allow, prevents duplicate trade on Supabase error.
         const _su = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
         const _sk = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-        if (_su && _sk && lineUserId) {
+        if (_su && _sk) {
           try {
             const { createClient: mkChk } = await import('@supabase/supabase-js');
             const chk = mkChk(_su, _sk);
-            const { data: prof } = await chk.from('profiles').select('id')
-              .eq('line_user_id', lineUserId).maybeSingle();
-            if (prof?.id) {
-              const { count: c } = await chk.from('trades')
-                .select('id', { count: 'exact', head: true })
-                .eq('user_id', prof.id).eq('symbol', entrySignal.symbol).is('result', null);
-              if (c !== null && c > 0)
-                skipReason = `LINE skipped — 同幣種已有持倉 (${symbol})`;
-            }
+            const { count: c } = await chk.from('trades')
+              .select('id', { count: 'exact', head: true })
+              .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('result', null);
+            if (c !== null && c > 0)
+              skipReason = `跳過 — 同幣種已有持倉 (${symbol})`;
           } catch (e) {
-            // Default-block: treat Supabase error as "assume duplicate exists" to prevent double trade.
-            skipReason = `LINE skipped — duplicate check failed (${String(e).slice(0, 80)})`;
+            skipReason = `跳過 — 重複檢查失敗 (${String(e).slice(0, 80)})`;
             console.error(`[analyze] hard-stop check threw for ${symbol}:`, String(e));
           }
         }
       }
 
-      if (entrySignal && lineReady && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
-        // LINE send — failure (e.g. quota exhausted) does NOT block Web Push or trade insert
-        const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(entrySignal));
-        lineSent  = ok;
-        lineError = error;
+      // ── Signal gate: DB record and notifications are fully decoupled from each other ──
+      // profileId (Supabase user UUID) is the only identity requirement; LINE success is not.
+      if (entrySignal && !!profileId && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+        const sp           = entrySignal.signalPrice ?? 0;
+        const isLimitOrder = sp > 0 && Math.abs(entrySignal.entry - sp) / sp > 0.003;
+        let insertOk = false;
 
-        // Web Push fires regardless of LINE result (LINE and Web Push are independent channels)
-        if (profileId) {
-          const edir = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
-          const esym = entrySignal.symbol.replace('USDT', '/USDT');
-          const tp1  = entrySignal.takeProfits[0];
-          const sp   = entrySignal.signalPrice ?? 0;
-          const isLmt = sp > 0 && Math.abs(entrySignal.entry - sp) / sp > 0.003;
-          await sendWebPushToUser(profileId, {
-            title: `${edir} ${esym} 交易信號`,
-            body: `${isLmt ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(tp1)} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分`,
-            tag: `signal-${entrySignal.id}`,
-          });
+        // ── Step 1: DB insert — gated only on DB creds + profileId ──────────────
+        // LINE success is NOT required. Failure here is logged; lock is not set so next cron retries.
+        if (sbUrl && sbKey) {
+          try {
+            const { createClient: mkAdmin } = await import('@supabase/supabase-js');
+            const admin = mkAdmin(sbUrl, sbKey);
+
+            // Final duplicate guard (Redis lock may be lost after Vercel cold start)
+            const { count } = await admin.from('trades')
+              .select('id', { count: 'exact', head: true })
+              .eq('user_id', profileId)
+              .eq('symbol', entrySignal.symbol)
+              .is('result', null);
+
+            if (count === 0) {
+              const tradeId    = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+              const insertData = {
+                id:           tradeId,
+                user_id:      profileId,          // already-resolved UUID — no second profile lookup
+                signal_id:    entrySignal.id,
+                symbol:       entrySignal.symbol,
+                direction:    entrySignal.direction,
+                timeframe:    entrySignal.timeframe,
+                strength:     entrySignal.strength,
+                score:        entrySignal.score,
+                entry:        entrySignal.entry,
+                stop_loss:    entrySignal.stopLoss,
+                tp1:          entrySignal.takeProfits[0],
+                tp2:          entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0],
+                reasons:      entrySignal.reasons,
+                entry_notes:  '',
+                opened_at:    Date.now(),
+                status:       isLimitOrder ? 'waiting' : 'active',
+                signal_price: sp,
+              };
+
+              const ir = await admin.from('trades').insert(insertData);
+              if (!ir.error) {
+                insertOk = true;
+              } else if (ir.error.code === '42703') {
+                // status / signal_price columns not yet migrated — retry without them
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                const { status: _s, signal_price: _sp, ...baseData } = insertData;
+                const ir2 = await admin.from('trades').insert(baseData);
+                if (ir2.error) {
+                  console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
+                } else {
+                  insertOk = true;
+                }
+              } else {
+                console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir.error.code}] ${ir.error.message}`);
+              }
+            }
+          } catch (e) {
+            console.error(`[analyze] trade insert threw for ${entrySignal.symbol}: ${String(e)}`);
+          }
+        } else {
+          console.error(`[analyze] trade insert skipped for ${entrySignal.symbol} — DB not configured`);
         }
 
-        // Proceed with lock + trade insert when LINE sent OR Web Push configured.
-        // This prevents re-triggering the same signal on the next cron even when LINE quota is exhausted.
-        if (ok || !!profileId) {
+        // ── Step 2: Lock + pending signals (only after trade is confirmed in DB) ──
+        // Lock prevents re-triggering the same signal on the next cron cycle.
+        // If insert failed above, lock is NOT set so the next cron can retry.
+        if (insertOk) {
           notified.push(symbol);
           await setLock(symbol, {
             sentAt: now, candleBucket: nowBucket,
             direction: entrySignal.direction, locked: true,
           });
-          // Persist pending signal in Redis so client can reliably pick it up
           const rp = getRedis();
           if (rp) {
             try {
@@ -669,110 +714,43 @@ export async function GET(req: NextRequest) {
             if (pendingSignals.length > 50) pendingSignals.splice(0, pendingSignals.length - 50);
           }
 
-          // ── Write trade directly to Supabase ─────────────────────
-          // Uses entrySignal (entry TF) for all fields — not topStrong (any TF).
-          // This ensures a single trade per symbol from a single entry TF.
-          const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
-          const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-          if (!sbUrl || !sbKey || !lineUserId) {
-            console.error(
-              `[analyze] trade insert skipped for ${entrySignal.symbol} —`,
-              !sbUrl ? 'NEXT_PUBLIC_SUPABASE_URL missing' :
-              !sbKey ? 'SUPABASE_SERVICE_ROLE_KEY missing' :
-              'LINE_USER_ID missing',
-            );
-          } else {
-            try {
-              const { createClient: mkAdmin } = await import('@supabase/supabase-js');
-              const admin = mkAdmin(sbUrl, sbKey);
+          // ── Step 3: Signal notifications — LINE and Web Push are independent ───
+          // Either or both may fail without affecting the trade record or each other.
+          if (lineToken && lineUserId) {
+            const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(entrySignal));
+            lineSent  = ok;
+            lineError = error;
+          }
+          if (profileId) {
+            const edir = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
+            const esym = entrySignal.symbol.replace('USDT', '/USDT');
+            await sendWebPushToUser(profileId, {
+              title: `${edir} ${esym} 交易信號`,
+              body: `${isLimitOrder ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分`,
+              tag: `signal-${entrySignal.id}`,
+            });
+          }
 
-              const { data: profile } = await admin
-                .from('profiles')
-                .select('id')
-                .eq('line_user_id', lineUserId)
-                .maybeSingle();
-
-              if (profile?.id) {
-                // Only insert if no open/pending trade for this symbol
-                const { count } = await admin
-                  .from('trades')
-                  .select('id', { count: 'exact', head: true })
-                  .eq('user_id', profile.id)
-                  .eq('symbol', entrySignal.symbol)
-                  .is('result', null);
-
-                if (count === 0) {
-                  // Determine if this is a limit order (entry differs from current price by >0.3%)
-                  const sp = entrySignal.signalPrice ?? 0;
-                  const isLimitOrder = sp > 0 && Math.abs(entrySignal.entry - sp) / sp > 0.003;
-                  const tradeId = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                  const insertData = {
-                    id:           tradeId,
-                    user_id:      profile.id,
-                    signal_id:    entrySignal.id,
-                    symbol:       entrySignal.symbol,
-                    direction:    entrySignal.direction,
-                    timeframe:    entrySignal.timeframe,
-                    strength:     entrySignal.strength,
-                    score:        entrySignal.score,
-                    entry:        entrySignal.entry,
-                    stop_loss:    entrySignal.stopLoss,
-                    tp1:          entrySignal.takeProfits[0],
-                    tp2:          entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0],
-                    reasons:      entrySignal.reasons,
-                    entry_notes:  '',
-                    opened_at:    Date.now(),
-                    status:       isLimitOrder ? 'waiting' : 'active',
-                    signal_price: sp,
-                  };
-
-                  const ir = await admin.from('trades').insert(insertData);
-                  let insertOk = !ir.error;
-
-                  if (ir.error) {
-                    if (ir.error.code === '42703') {
-                      // status / signal_price columns not yet in DB schema — retry without them
-                      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                      const { status: _s, signal_price: _sp, ...baseData } = insertData;
-                      const ir2 = await admin.from('trades').insert(baseData);
-                      if (ir2.error) {
-                        console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
-                      } else {
-                        insertOk = true;
-                      }
-                    } else {
-                      console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir.error.code}] ${ir.error.message}`);
-                    }
-                  }
-
-                  // Market-order entry confirmation (LINE + Web Push).
-                  // Limit orders are notified by monitorActiveTrades when the fill candle is detected.
-                  // Duplicate prevention: tlock:symbol is already set to locked=true (signal gate),
-                  // and count===0 guard above ensures no re-insert, so this fires exactly once.
-                  if (insertOk && !isLimitOrder) {
-                    const dir = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
-                    const sym = entrySignal.symbol.replace('USDT', '/USDT');
-                    const tp2 = entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0];
-                    const entryMsg =
-                      `【✅ 市場入場】${sym}\n` +
-                      `${dir} 已進場\n` +
-                      `進場價：$${fmtPrice(entrySignal.entry)}\n` +
-                      `TP1：$${fmtPrice(entrySignal.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(entrySignal.stopLoss)}`;
-                    if (lineToken && lineUserId) {
-                      await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: entryMsg }]);
-                    }
-                    if (profileId) {
-                      await sendWebPushToUser(profileId, {
-                        title: `✅ 市場入場 ${sym}`,
-                        body: `${dir} $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)}`,
-                        tag: `entry-${entrySignal.id}`,
-                      });
-                    }
-                  }
-                }
-              }
-            } catch (e) {
-              console.error(`[analyze] trade insert threw for ${entrySignal.symbol}: ${String(e)}`);
+          // ── Step 4: Market-entry confirmation (market orders only) ───────────
+          // Limit orders are confirmed by monitorActiveTrades when the fill candle appears.
+          if (!isLimitOrder) {
+            const dir     = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
+            const sym     = entrySignal.symbol.replace('USDT', '/USDT');
+            const tp2     = entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0];
+            const entryMsg =
+              `【✅ 市場入場】${sym}\n` +
+              `${dir} 已進場\n` +
+              `進場價：$${fmtPrice(entrySignal.entry)}\n` +
+              `TP1：$${fmtPrice(entrySignal.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(entrySignal.stopLoss)}`;
+            if (lineToken && lineUserId) {
+              await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: entryMsg }]);
+            }
+            if (profileId) {
+              await sendWebPushToUser(profileId, {
+                title: `✅ 市場入場 ${sym}`,
+                body: `${dir} $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)}`,
+                tag: `entry-${entrySignal.id}`,
+              });
             }
           }
         }
