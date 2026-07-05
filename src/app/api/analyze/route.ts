@@ -172,8 +172,11 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
 
   // ── Phase 1: fill detection for waiting (limit) orders ───────
   for (const trade of waiting) {
-    // Resume scan from last check; fall back to order placement time
-    const startMs = (trade.last_monitored_at ?? trade.opened_at ?? (now - WAITING_EXPIRY_HOURS * 3_600_000)) as number;
+    // Retreat one candle-width (1h) so the candle that was already open at order-placement time
+    // is always included — the Binance startTime filter uses openTime, which can be earlier than
+    // the exact placement timestamp.
+    const rawStart1 = (trade.last_monitored_at ?? trade.opened_at ?? (now - WAITING_EXPIRY_HOURS * 3_600_000)) as number;
+    const startMs   = rawStart1 - 3_600_000;
 
     let candles: Candle[] = [];
     try {
@@ -247,7 +250,9 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
 
   // ── Phase 2: TP/SL monitoring + timeframe-aware auto-close ───
   for (const trade of active) {
-    const startMs = (trade.last_monitored_at ?? trade.filled_at ?? trade.opened_at ?? (now - 168 * 3_600_000)) as number;
+    // Retreat one 1h candle-width so the candle open at fill/creation time is always covered.
+    const rawStart2 = (trade.last_monitored_at ?? trade.filled_at ?? trade.opened_at ?? (now - 168 * 3_600_000)) as number;
+    const startMs   = rawStart2 - 3_600_000;
 
     let candles: Candle[] = [];
     try {
@@ -337,12 +342,30 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string) {
       ? ((closePrice - entry) / entry) * 100
       : ((entry - closePrice) / entry) * 100;
 
-    await admin.from('trades').update({
+    const closeRes = await admin.from('trades').update({
       result:      closeResult,
       exit_price:  closePrice,
       closed_at:   now,
       pnl_percent: parseFloat(pnl.toFixed(2)),
     }).eq('id', trade.id);
+
+    if (closeRes.error) {
+      if (closeRes.error.code === '42703') {
+        // exit_price / pnl_percent column missing — write result + closed_at only
+        const fallback = await admin.from('trades')
+          .update({ result: closeResult, closed_at: now })
+          .eq('id', trade.id);
+        if (fallback.error) {
+          console.error(`[monitor] close fallback failed ${trade.id}: ${fallback.error.message}`);
+          await touchMonitoredAt(trade.id as string);
+          continue;
+        }
+      } else {
+        console.error(`[monitor] close failed ${trade.id}: ${closeRes.error.message}`);
+        await touchMonitoredAt(trade.id as string);
+        continue;
+      }
+    }
 
     await unlockSymbol(trade.symbol as string);
 
