@@ -404,6 +404,26 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
 
 export async function saveToSupabase(userId: string) {
   if (isResetting) return;
+
+  // Cross-device reset guard: check server reset_at BEFORE pushing any trades.
+  // If another device triggered a full reset since our last sync, we must wipe local
+  // state rather than push stale trades back. This runs on every save (every ≤4s),
+  // so any open client self-clears within one debounce cycle after a reset.
+  try {
+    const { data: profCheck } = await supabase
+      .from('profiles')
+      .select('reset_at')
+      .eq('id', userId)
+      .single();
+    const serverResetAt = (profCheck as { reset_at?: number | null } | null)?.reset_at ?? 0;
+    const localResetAt  = useStore.getState().lastResetAt;
+    if (serverResetAt > localResetAt) {
+      useStore.setState({ trades: [], lastResetAt: serverResetAt });
+      useStore.getState().clearSignals();
+      return; // don't push stale data — next save will upload the (empty) clean state
+    }
+  } catch { /* network error — proceed optimistically; loadFromSupabase will catch it */ }
+
   const s = useStore.getState();
 
   // Upsert profile

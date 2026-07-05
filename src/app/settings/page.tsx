@@ -109,6 +109,8 @@ export default function SettingsPage() {
   type PushStatus = 'unknown' | 'unsupported' | 'ios-hint' | 'denied' | 'enabled' | 'disabled' | 'loading';
   const [pushStatus, setPushStatus]     = useState<PushStatus>('unknown');
   const [pushSub,    setPushSub]        = useState<PushSubscription | null>(null);
+  type TestPushStatus = 'idle' | 'loading' | 'ok' | 'fail';
+  const [pushTestStatus, setPushTestStatus] = useState<TestPushStatus>('idle');
 
   const checkPushStatus = useCallback(async () => {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -189,6 +191,23 @@ export default function SettingsPage() {
       console.error('[push] enable failed:', e);
       setPushStatus('disabled');
     }
+  };
+
+  const sendTestPush = async () => {
+    setPushTestStatus('loading');
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const jwt = session?.access_token ?? '';
+      if (!jwt) { setPushTestStatus('fail'); return; }
+      const res = await fetch('/api/push-test', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+      setPushTestStatus(res.ok ? 'ok' : 'fail');
+    } catch {
+      setPushTestStatus('fail');
+    }
+    setTimeout(() => setPushTestStatus('idle'), 4000);
   };
 
   const disablePush = async () => {
@@ -464,8 +483,18 @@ export default function SettingsPage() {
                 </p>
               </div>
               <button
+                onClick={sendTestPush}
+                disabled={pushTestStatus === 'loading'}
+                className="w-full py-2.5 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm font-semibold disabled:opacity-40"
+              >
+                {pushTestStatus === 'loading' ? '發送中…'
+                  : pushTestStatus === 'ok'   ? '✅ 測試推播已送出！'
+                  : pushTestStatus === 'fail' ? '❌ 發送失敗'
+                  : '🔔 發送測試推播'}
+              </button>
+              <button
                 onClick={disablePush}
-                className="w-full py-3 rounded-xl bg-[#1A1A26] border border-[#2A2A3E] text-[#606080] text-sm font-semibold"
+                className="w-full py-2.5 rounded-xl bg-[#1A1A26] border border-[#2A2A3E] text-[#606080] text-sm font-semibold"
               >
                 🔕 關閉推播
               </button>
