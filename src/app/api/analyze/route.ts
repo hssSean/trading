@@ -481,6 +481,39 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
   return { monitored: active.length + waiting.length, closed, filled, cancelled };
 }
 
+// ── Confidence score (0-100, Phase 4) ────────────────────────
+// Parallel to existing `score`; does NOT affect the STRONG_THRESHOLD gate yet.
+// Formula: base 50 + ADX strength + confluence + volume + funding rate crowding.
+// Crowded direction (>+0.1% for LONG, <-0.05% for SHORT) deducts 20 pts.
+function computeConfidence(
+  signal: TradingSignal,
+  adx4h: number,
+  fundingRate: number,
+  agreeTFs: number,
+): number {
+  let c = 50;
+
+  // ADX strength (only meaningful in trending regime)
+  if (!isNaN(adx4h)) {
+    if      (adx4h > 40) c += 15;
+    else if (adx4h > 30) c += 10;
+    else if (adx4h > 25) c +=  5;
+  }
+
+  // Confluence: Strategy B is its own dual-factor confirmation
+  if      (signal.strategy === 'B') c += 10;
+  else if (agreeTFs >= 2)           c += 15;
+
+  // Volume (derived from reasons string to avoid passing extra params)
+  if (signal.reasons.some(r => r.includes('量能') || r.includes('放量'))) c += 5;
+
+  // Funding rate crowding — same direction as crowded market → -20
+  if (signal.direction === 'LONG'  && fundingRate >  0.001)  c -= 20;
+  if (signal.direction === 'SHORT' && fundingRate < -0.0005) c -= 20;
+
+  return Math.max(0, Math.min(100, Math.round(c)));
+}
+
 // ── Strategy B: consecutive-loss pause check ─────────────────
 // Returns true if this symbol's Strategy B should be paused (2 consecutive
 // LOSS results within the last 24h). Safe-fails to false on any DB error
@@ -675,6 +708,9 @@ export async function GET(req: NextRequest) {
         }
       }
 
+      // ── Phase 4: Fetch funding rate (cached 10min) ───────────
+      const symbolFundingRate = await fetchFundingRate(symbol).catch(() => 0);
+
       // Direction unification: highest TF's direction is master, drop conflicting signals
       const unified    = unifySignalDirection(allSignals);
       const strong     = unified.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
@@ -694,6 +730,13 @@ export async function GET(req: NextRequest) {
       // Strategy B is single-TF by design (BB+RSI confirmation is its own confluence)
       const isStratBSignal = allSignals.some(s => s.strategy === 'B');
       const confluenceMet  = agreeTFs >= 2 || isStratBSignal;
+
+      // ── Phase 4: Annotate unified signals with fundingRate + confidence ──
+      // confidence is informational; STRONG_THRESHOLD gate is still score-based.
+      unified.forEach(s => {
+        s.fundingRate = symbolFundingRate;
+        s.confidence  = computeConfidence(s, symbolAdx, symbolFundingRate, agreeTFs);
+      });
 
       // Read lock from Redis (persistent across cold starts)
       const last      = await getLock(symbol);
@@ -780,6 +823,9 @@ export async function GET(req: NextRequest) {
                 status:       isLimitOrder ? 'waiting' : 'active',
                 signal_price: sp,
                 strategy:     entrySignal.strategy ?? 'A',
+                regime:       entrySignal.regime ?? null,
+                confidence:   entrySignal.confidence ?? null,
+                funding_rate: entrySignal.fundingRate ?? null,
               };
 
               const ir = await admin.from('trades').insert(insertData);
@@ -791,10 +837,10 @@ export async function GET(req: NextRequest) {
                 // Treat as "already exists": don't set lock here; the winning instance will.
                 console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505) — another cron won the race`);
               } else if (ir.error.code === '42703') {
-                // New columns (status, signal_price, strategy) may not yet be migrated —
-                // retry with only the pre-migration base columns.
+                // New columns (status, signal_price, strategy, regime, confidence, funding_rate)
+                // may not yet be migrated — retry with only the pre-migration base columns.
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                const { status: _s, signal_price: _sp, strategy: _str, ...baseData } = insertData;
+                const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, ...baseData } = insertData;
                 const ir2 = await admin.from('trades').insert(baseData);
                 if (!ir2.error) {
                   insertOk = true;
@@ -881,7 +927,7 @@ export async function GET(req: NextRequest) {
         signalCount: strong.length,
         topScore,
         topSignal: strong[0]
-          ? { direction: strong[0].direction, strength: strong[0].strength, score: strong[0].score, entry: strong[0].entry }
+          ? { direction: strong[0].direction, strength: strong[0].strength, score: strong[0].score, entry: strong[0].entry, confidence: strong[0].confidence, fundingRate: strong[0].fundingRate }
           : null,
         lineSent,
         locked,
@@ -890,6 +936,7 @@ export async function GET(req: NextRequest) {
         tfsAnalyzed: timeframes.filter(tf => candleCache.has(tf)),
         regime: symbolRegime,
         adx4h: isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(2)),
+        fundingRate: symbolFundingRate,
         ...(lineError  ? { lineError }       : {}),
         ...(skipReason   ? { note: skipReason }
           : stratBPaused ? { note: '策略B連虧2筆暫停24h' }
