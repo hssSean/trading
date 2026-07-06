@@ -68,52 +68,82 @@ export async function loadFromSupabase(userId: string) {
     wl.forEach(r => { if (!existing.has(r.symbol)) store.addCoin(r.symbol); });
   }
 
-  // Load all trades including 'waiting' limit orders
+  // Load all trades including 'waiting' limit orders.
+  // tr === null  → network/DB error — skip ALL trade processing (never purge on failure).
+  // tr.length === 0 → success, no DB trades → orphan purge removes all local open trades.
   const { data: tr } = await supabase
     .from('trades')
     .select('*')
     .eq('user_id', userId)
     .order('opened_at', { ascending: false });
-  if (tr && tr.length > 0) {
-    const existingMap       = new Map(store.trades.map(t => [t.id, t]));
-    const existingSignalIds = new Set(store.trades.map(t => t.signalId).filter(Boolean));
-    // reverse lookup: signalId → local trade (for reconciling server trades with different IDs)
-    const existingBySignal  = new Map(store.trades.filter(t => !!t.signalId).map(t => [t.signalId!, t]));
-    const activeSymbols     = new Set(store.trades.filter(t => !t.result).map(t => t.symbol));
-    const incoming: TradeRecord[] = [];
 
-    for (const r of tr as Record<string, unknown>[]) {
-      if (sessionDeletedIds.has(r.id as string)) continue;
+  if (tr !== null) {
+    const dbRows = tr as Record<string, unknown>[];
+    // dbIds is the authoritative set of trade IDs that exist in DB right now.
+    // Built even when dbRows is empty so the orphan purge works correctly.
+    const dbIds  = new Set(dbRows.map(r => r.id as string));
 
-      if (existingMap.has(r.id as string)) {
-        // Same ID — only propagate result; status transitions handled by reconcileFromServer()
-        // because the 'status' column is not accessible to the authenticated role (42703 error),
-        // so r.status always defaults to 'active' — we must NOT overwrite local 'waiting' with it.
-        const local = existingMap.get(r.id as string)!;
-        if (r.result && !local.result) {
-          useStore.getState().closeTrade(r.id as string, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
-        }
-      } else {
-        const srvSignalId = (r.signal_id as string) ?? '';
-        const localBySig  = srvSignalId ? existingBySignal.get(srvSignalId) : undefined;
-        if (localBySig) {
-          // Different ID but same signalId — close if server has result;
-          // status transitions handled by reconcileFromServer() (status column not readable by client).
-          if (r.result && !localBySig.result) {
-            useStore.getState().closeTrade(localBySig.id, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
+    if (dbRows.length > 0) {
+      const existingMap       = new Map(store.trades.map(t => [t.id, t]));
+      const existingSignalIds = new Set(store.trades.map(t => t.signalId).filter(Boolean));
+      // reverse lookup: signalId → local trade (for reconciling server trades with different IDs)
+      const existingBySignal  = new Map(store.trades.filter(t => !!t.signalId).map(t => [t.signalId!, t]));
+      const activeSymbols     = new Set(store.trades.filter(t => !t.result).map(t => t.symbol));
+      const incoming: TradeRecord[] = [];
+
+      for (const r of dbRows) {
+        if (sessionDeletedIds.has(r.id as string)) continue;
+
+        if (existingMap.has(r.id as string)) {
+          // Same ID — only propagate result; status transitions handled by reconcileFromServer()
+          // because the 'status' column is not accessible to the authenticated role (42703 error),
+          // so r.status always defaults to 'active' — we must NOT overwrite local 'waiting' with it.
+          const local = existingMap.get(r.id as string)!;
+          if (r.result && !local.result) {
+            useStore.getState().closeTrade(r.id as string, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
           }
-        } else if (r.result != null || !activeSymbols.has(r.symbol as string)) {
-          const record = rowToRecord(r);
-          incoming.push(record);
-          if (srvSignalId) existingSignalIds.add(srvSignalId);
-          if (!r.result) activeSymbols.add(r.symbol as string);
+        } else {
+          const srvSignalId = (r.signal_id as string) ?? '';
+          const localBySig  = srvSignalId ? existingBySignal.get(srvSignalId) : undefined;
+          if (localBySig) {
+            if (r.result && !localBySig.result) {
+              // Server closed the trade — propagate result to the local (possibly client-ID) copy.
+              useStore.getState().closeTrade(localBySig.id, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
+            } else if (!r.result && !existingMap.has(r.id as string)) {
+              // Open trade: signalId matches a local trade but IDs differ (client-ID vs server-ID
+              // mismatch from the pre-fix era). Add the server-ID row to incoming so local state
+              // adopts the correct DB-backed ID in this same load cycle. The orphan purge below
+              // will then remove the stale client-ID copy.
+              incoming.push(rowToRecord(r));
+              if (srvSignalId) existingSignalIds.add(srvSignalId);
+              activeSymbols.add(r.symbol as string);
+            }
+          } else if (r.result != null || !activeSymbols.has(r.symbol as string)) {
+            const record = rowToRecord(r);
+            incoming.push(record);
+            if (srvSignalId) existingSignalIds.add(srvSignalId);
+            if (!r.result) activeSymbols.add(r.symbol as string);
+          }
         }
+      }
+
+      if (incoming.length > 0) {
+        useStore.setState(s => ({ trades: [...incoming, ...s.trades].slice(0, 500) }));
       }
     }
 
-    if (incoming.length > 0) {
-      useStore.setState(s => ({ trades: [...incoming, ...s.trades].slice(0, 500) }));
-    }
+    // ── Orphan purge: remove open local trades not backed by any DB row ────────
+    // Runs whenever the DB query succeeded (tr !== null), even on empty response.
+    // Closed trades (t.result !== undefined) are always preserved — they are
+    // historical records and must never be dropped just because a query didn't
+    // return them (DB may have pruned old data, or the trade was closed offline).
+    // Only open trades (result IS NULL) are held to the DB-authoritative standard.
+    useStore.setState(s => ({
+      trades: s.trades.filter(t =>
+        t.result !== undefined ||  // keep: closed trade (historical — never purge)
+        dbIds.has(t.id)            // keep: open trade with a DB-confirmed ID
+      ),
+    }));
   }
 
   // Load profile
