@@ -115,10 +115,11 @@ export default function TradesPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  const waiting = trades.filter(t => t.status === 'waiting');
-  const closed  = trades.filter(t => !!t.result);
+  // Memoize derived arrays: prevents filtered from recomputing on every store update (coins poll).
+  const waiting = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);
+  const closed  = useMemo(() => trades.filter(t => !!t.result), [trades]);
   // 持倉中 = active & not closed (exclude waiting)
-  const pending = trades.filter(t => !t.result && t.status !== 'waiting');
+  const pending = useMemo(() => trades.filter(t => !t.result && t.status !== 'waiting'), [trades]);
   const wins    = closed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
   const losses  = closed.filter(t => t.result === 'LOSS');
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
@@ -448,7 +449,7 @@ export default function TradesPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1E1E2E]">
+      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1E1E2E] shrink-0">
         <div className="flex items-center justify-between mb-3">
           <div>
             <h1 className="text-[#EAEAF4] text-xl font-extrabold tracking-tight">交易紀錄</h1>
