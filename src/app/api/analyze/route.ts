@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume, fetchFundingRate } from '@/api/binance';
-import { computeIndicators } from '@/analysis/indicators';
+import { computeIndicators, calcAtrHistory, calcAtrPercentile } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
@@ -226,19 +226,22 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
     if (isFilled) {
       const filledAt = fillCandle!.closeTime ?? now;
+      // Atomic fill: .eq('status','waiting') ensures only the cron that transitions
+      // waiting→active actually sends the notification; concurrent cron gets 0 rows back.
       const fillRes  = await admin.from('trades')
         .update({ status: 'active', filled_at: filledAt, last_monitored_at: now })
-        .eq('id', trade.id);
+        .eq('id', trade.id).eq('status', 'waiting').select('id');
 
-      let fillWriteOk = !fillRes.error;
+      let fillWriteOk = !fillRes.error && (fillRes.data?.length ?? 0) > 0;
       if (fillRes.error) {
         if (fillRes.error.code === '42703') {
-          const fb = await admin.from('trades').update({ status: 'active', opened_at: filledAt }).eq('id', trade.id);
+          const fb = await admin.from('trades').update({ status: 'active', opened_at: filledAt })
+            .eq('id', trade.id).eq('status', 'waiting').select('id');
           if (fb.error) {
             console.error(`[monitor] fill write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
             await touchMonitoredAt(trade.id as string);
           } else {
-            fillWriteOk = true;
+            fillWriteOk = (fb.data?.length ?? 0) > 0;
           }
         } else {
           console.error(`[monitor] fill write failed ${trade.id}: [${fillRes.error.code}] ${fillRes.error.message}`);
@@ -268,11 +271,16 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         }
       }
     } else if (isCancelled) {
-      const delRes = await admin.from('trades').delete().eq('id', trade.id);
-      if (delRes.error) {
+      // Atomic cancel: .select('id') returns deleted rows; empty array means a concurrent
+      // cron already deleted this row — skip notification in that case.
+      const { data: delData, error: delErr } = await admin.from('trades').delete().eq('id', trade.id).select('id');
+      if (delErr) {
         // Delete failed — don't notify; next cron will retry the delete
-        console.error(`[monitor] cancel delete failed ${trade.id}: [${delRes.error.code}] ${delRes.error.message}`);
+        console.error(`[monitor] cancel delete failed ${trade.id}: [${delErr.code}] ${delErr.message}`);
         await touchMonitoredAt(trade.id as string);
+      } else if (!delData || delData.length === 0) {
+        // Row already deleted by a concurrent cron — skip notification
+        console.log(`[monitor] cancel skipped ${trade.id} — row already gone`);
       } else {
         await unlockSymbol(trade.symbol as string);
         cancelled++;
@@ -358,18 +366,21 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
     // TP1 newly reached in this scan, no close yet → mark and notify
     if (justHitTp1 && !closeResult) {
+      // Atomic tp1: only update if status is still 'active' or null (legacy).
+      // Concurrent cron that loses the race gets 0 rows back and skips the notification.
       const tp1Res = await admin.from('trades')
         .update({ status: 'tp1_hit', last_monitored_at: now })
-        .eq('id', trade.id);
+        .eq('id', trade.id).or('status.eq.active,status.is.null').select('id');
 
-      let tp1WriteOk = !tp1Res.error;
+      let tp1WriteOk = !tp1Res.error && (tp1Res.data?.length ?? 0) > 0;
       if (tp1Res.error) {
         if (tp1Res.error.code === '42703') {
-          const fb = await admin.from('trades').update({ status: 'tp1_hit' }).eq('id', trade.id);
+          const fb = await admin.from('trades').update({ status: 'tp1_hit' })
+            .eq('id', trade.id).or('status.eq.active,status.is.null').select('id');
           if (fb.error) {
             console.error(`[monitor] tp1_hit write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
           } else {
-            tp1WriteOk = true;
+            tp1WriteOk = (fb.data?.length ?? 0) > 0;
           }
         } else {
           console.error(`[monitor] tp1_hit write failed ${trade.id}: [${tp1Res.error.code}] ${tp1Res.error.message}`);
@@ -420,20 +431,26 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       ? ((closePrice - entry) / entry) * 100
       : ((entry - closePrice) / entry) * 100;
 
+    // Atomic close: IS NULL guard ensures only the cron that transitions result null→value
+    // actually proceeds to notify. Concurrent cron gets 0 rows back and skips.
     const closeRes = await admin.from('trades').update({
       result:      closeResult,
       exit_price:  closePrice,
       closed_at:   now,
       pnl_percent: parseFloat(pnl.toFixed(2)),
-    }).eq('id', trade.id);
+    }).eq('id', trade.id).is('result', null).select('id');
+
+    let closeWriteOk = !closeRes.error && (closeRes.data?.length ?? 0) > 0;
 
     if (closeRes.error) {
       if (closeRes.error.code === '42703') {
         // exit_price / pnl_percent column missing — write result + closed_at only
         const fallback = await admin.from('trades')
           .update({ result: closeResult, closed_at: now })
-          .eq('id', trade.id);
-        if (fallback.error) {
+          .eq('id', trade.id).is('result', null).select('id');
+        if (!fallback.error) {
+          closeWriteOk = (fallback.data?.length ?? 0) > 0;
+        } else {
           console.error(`[monitor] close fallback failed ${trade.id}: ${fallback.error.message}`);
           await touchMonitoredAt(trade.id as string);
           continue;
@@ -443,6 +460,11 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         await touchMonitoredAt(trade.id as string);
         continue;
       }
+    }
+
+    if (!closeWriteOk) {
+      console.log(`[monitor] close skipped ${trade.id} — result already set by concurrent cron`);
+      continue;
     }
 
     await unlockSymbol(trade.symbol as string);
@@ -562,6 +584,42 @@ async function checkStratBPaused(symbol: string): Promise<boolean> {
   }
 }
 
+const MAX_TOTAL_RISK_PCT = 5; // total open risk cap (% of account)
+
+// ── Phase 5: total open risk check ───────────────────────────
+// Sums suggested_risk_pct of all open trades for a user.
+// Falls back to (open-trade-count × 1%) if the column doesn't exist yet.
+// Returns 0 on any fatal error so the gate never falsely blocks signals.
+async function checkTotalOpenRisk(profileId: string): Promise<number> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key || !profileId) return 0;
+  try {
+    const { createClient: mk } = await import('@supabase/supabase-js');
+    const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+    const { data } = await adm.from('trades')
+      .select('suggested_risk_pct')
+      .eq('user_id', profileId)
+      .is('result', null);
+    if (!data) return 0;
+    return data.reduce((s: number, t: { suggested_risk_pct?: number | null }) =>
+      s + (t.suggested_risk_pct ?? 1), 0);
+  } catch {
+    // Column not migrated (42703) or other DB error — estimate via count × 1%
+    try {
+      const { createClient: mk2 } = await import('@supabase/supabase-js');
+      const adm2 = mk2(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+      const { count } = await adm2.from('trades')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', profileId)
+        .is('result', null);
+      return (count ?? 0) * 1;
+    } catch {
+      return 0;
+    }
+  }
+}
+
 // ── GET — run analysis + send LINE ────────────────────────────
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -646,7 +704,8 @@ export async function GET(req: NextRequest) {
       let symbolAdx    = NaN;
       let regimeDetermined = false;
       try {
-        if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandles(symbol, '4h', 250));
+        // 540 bars = 90 days of 4H candles — enough for ADX regime + 90-day ATR percentile
+        if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandles(symbol, '4h', 540));
         const fourHC   = candleCache.get('4h')!;
         const fourHInd = computeIndicators(fourHC);
         symbolAdx = fourHInd.adx ?? NaN;

@@ -151,6 +151,25 @@ export function donchianChannel(candles: Candle[], period = 20): DonchianChannel
   return { upper, lower, middle: (upper + lower) / 2 };
 }
 
+// ── ATR History Series ────────────────────────────────────────
+// Computes rolling 14-period Wilder ATR for each candle (for percentile ranking).
+export function calcAtrHistory(candles: Candle[], period = 14): number[] {
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
+    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  if (trs.length < period) return [];
+  const atrs: number[] = [];
+  let atr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  atrs.push(atr);
+  for (let i = period; i < trs.length; i++) {
+    atr = (atr * (period - 1) + trs[i]) / period;
+    atrs.push(atr);
+  }
+  return atrs;
+}
+
 // ── ATR Percentile ────────────────────────────────────────────
 // Returns 0-100 position of the current ATR in the given ATR history.
 export function calcAtrPercentile(currentAtr: number, atrHistory: number[]): number {

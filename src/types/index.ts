@@ -111,6 +111,9 @@ export interface TradingSignal {
   fundingRate?: number;
   strategy?: 'A' | 'B' | 'C';
   confidence?: number; // 0-100; informational only (not used as gate yet)
+  // Phase 5: position sizing guidance — informational, user applies manually
+  suggestedRiskPct?: number;  // 0.5 | 1.0 | 1.5 — from ATR percentile
+  suggestedLeverage?: number; // risk% / SL-distance%, capped 10x
 }
 
 export interface WatchedCoin {

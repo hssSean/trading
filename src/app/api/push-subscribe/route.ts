@@ -50,6 +50,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Server config error: service role key missing' }, { status: 500 });
   }
 
+  // Enforce one subscription per user: delete ALL existing subs before saving the new one.
+  // Without this, repeated enable/disable cycles accumulate rows and sendWebPushToUser
+  // sends to every row — multiplying each notification by the accumulated count.
+  const { error: cleanupErr } = await admin.from('push_subscriptions').delete().eq('user_id', user.id);
+  if (cleanupErr) {
+    console.warn(`[push-subscribe] pre-cleanup failed for user=${user.id.slice(0, 8)}: ${cleanupErr.message}`);
+    // Non-fatal: proceed; worst case the new subscription is saved alongside old ones.
+  }
+
   // Upsert using service role — bypasses RLS so no policy is needed for server writes.
   const { error: upsertErr } = await admin.from('push_subscriptions').upsert(
     {
