@@ -106,9 +106,10 @@ export interface TradingSignal {
   indicators: TechnicalIndicators;
   isRead: boolean;
   signalPrice?: number;
-  // Phase 1/2 additions — optional for backward compat
+  // Phase 1/2/3 additions — optional for backward compat
   regime?: Regime;
   fundingRate?: number;
+  strategy?: 'A' | 'B' | 'C';
 }
 
 export interface WatchedCoin {

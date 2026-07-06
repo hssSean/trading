@@ -583,6 +583,7 @@ export function generateSignals(
       srLevel: longSR ?? support ?? undefined, indicators: ind, isRead: false,
       signalPrice: price,
       regime: regime ?? 'ranging',
+      strategy: 'A',
     });
   }
 
@@ -613,7 +614,132 @@ export function generateSignals(
       srLevel: shortSR ?? resistance ?? undefined, indicators: ind, isRead: false,
       signalPrice: price,
       regime: regime ?? 'ranging',
+      strategy: 'A',
     });
+  }
+
+  return signals;
+}
+
+// ════════════════════════════════════════════════════════════════
+// Strategy B — Mean Reversion (ranging regime, 1H timeframe)
+//
+// Hard gates (both must be true):
+//   LONG : price touches BB(20,2) lower band AND RSI crosses above 30
+//   SHORT: price touches BB(20,2) upper band AND RSI crosses below 70
+//
+// TP = BB middle; SL = closer of (entry±1.0ATR) or (band±0.5ATR)
+// Own MIN_SCORE_B = 10; route still applies STRONG_THRESHOLD = 15.
+// ════════════════════════════════════════════════════════════════
+const MIN_SCORE_B = 10;
+const MIN_RR_B    = 1.5;
+
+export function generateMeanReversionSignals(
+  symbol: string,
+  timeframe: Timeframe,
+  candles: Candle[],
+): TradingSignal[] {
+  if (candles.length < 35) return [];
+
+  const ind     = computeIndicators(candles);
+  const prevInd = computeIndicators(candles.slice(0, -1));
+
+  const bb = ind.bb;
+  if (!bb || isNaN(bb.upper) || isNaN(bb.lower) || isNaN(bb.middle)) return [];
+
+  const cur      = candles[candles.length - 1];
+  const price    = cur.close;
+  const atrVal   = calcAtr(candles);
+  const volRatio = calcVolRatio(candles);
+  const patterns = detectCandlePatterns(candles);
+  const signals: TradingSignal[] = [];
+
+  // ── LONG: BB lower touch + RSI crosses above 30 ─────────────
+  const rsiCrossAbove30 = prevInd.rsi < 30 && ind.rsi >= 30;
+  const atBBLower       = price <= bb.lower * 1.002;
+
+  if (rsiCrossAbove30 && atBBLower) {
+    const entry = price;
+    const tp1   = bb.middle;
+
+    // SL: closer to entry wins → max() for LONG
+    const slAtr     = entry - atrVal;
+    const slChannel = bb.lower - atrVal * 0.5;
+    const sl        = Math.max(slAtr, slChannel);
+
+    const risk = Math.max(entry - sl, 1e-6);
+    const rr   = (tp1 - entry) / risk;
+
+    if (rr >= MIN_RR_B) {
+      let score = 10;
+      const reasons: string[] = [
+        '策略B: 均值回歸做多',
+        `RSI 回升穿越30（${prevInd.rsi.toFixed(1)} → ${ind.rsi.toFixed(1)}）`,
+        `觸及布林下軌 $${bb.lower.toFixed(4)}`,
+        `止盈目標：布林中軌 $${bb.middle.toFixed(4)}`,
+      ];
+
+      if (volRatio >= 1.3)                           { score += 3; reasons.push(`放量確認 ${volRatio.toFixed(1)}×`); }
+      if (patterns.hammer || patterns.bullishEngulfing) { score += 3; reasons.push(patterns.hammer ? '錘子線確認' : '看漲吞噬確認'); }
+      if (prevInd.rsi < 25)                          { score += 2; reasons.push(`RSI 深度超賣 ${prevInd.rsi.toFixed(1)}`); }
+      if (bb.bandwidth < 0.05)                       { score += 1; reasons.push('布林帶收窄，回歸動能強'); }
+
+      if (score >= MIN_SCORE_B) {
+        signals.push({
+          id: simpleId(), symbol, direction: 'LONG',
+          strength: scoreToStrength(score), score,
+          entry, takeProfits: [tp1, tp1], stopLoss: sl,
+          riskReward: parseFloat(rr.toFixed(2)),
+          timeframe, timestamp: Date.now(),
+          reasons, indicators: ind, isRead: false,
+          signalPrice: price, regime: 'ranging', strategy: 'B',
+        });
+      }
+    }
+  }
+
+  // ── SHORT: BB upper touch + RSI crosses below 70 ────────────
+  const rsiCrossBelow70 = prevInd.rsi > 70 && ind.rsi <= 70;
+  const atBBUpper       = price >= bb.upper * 0.998;
+
+  if (rsiCrossBelow70 && atBBUpper) {
+    const entry = price;
+    const tp1   = bb.middle;
+
+    // SL: closer to entry wins → min() for SHORT
+    const slAtr     = entry + atrVal;
+    const slChannel = bb.upper + atrVal * 0.5;
+    const sl        = Math.min(slAtr, slChannel);
+
+    const risk = Math.max(sl - entry, 1e-6);
+    const rr   = (entry - tp1) / risk;
+
+    if (rr >= MIN_RR_B) {
+      let score = 10;
+      const reasons: string[] = [
+        '策略B: 均值回歸做空',
+        `RSI 回落穿越70（${prevInd.rsi.toFixed(1)} → ${ind.rsi.toFixed(1)}）`,
+        `觸及布林上軌 $${bb.upper.toFixed(4)}`,
+        `止盈目標：布林中軌 $${bb.middle.toFixed(4)}`,
+      ];
+
+      if (volRatio >= 1.3)                              { score += 3; reasons.push(`放量確認 ${volRatio.toFixed(1)}×`); }
+      if (patterns.shootingStar || patterns.bearishEngulfing) { score += 3; reasons.push(patterns.shootingStar ? '流星線確認' : '看跌吞噬確認'); }
+      if (prevInd.rsi > 75)                             { score += 2; reasons.push(`RSI 深度超買 ${prevInd.rsi.toFixed(1)}`); }
+      if (bb.bandwidth < 0.05)                          { score += 1; reasons.push('布林帶收窄，回歸動能強'); }
+
+      if (score >= MIN_SCORE_B) {
+        signals.push({
+          id: simpleId(), symbol, direction: 'SHORT',
+          strength: scoreToStrength(score), score,
+          entry, takeProfits: [tp1, tp1], stopLoss: sl,
+          riskReward: parseFloat(rr.toFixed(2)),
+          timeframe, timestamp: Date.now(),
+          reasons, indicators: ind, isRead: false,
+          signalPrice: price, regime: 'ranging', strategy: 'B',
+        });
+      }
+    }
   }
 
   return signals;

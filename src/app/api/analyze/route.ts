@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume, fetchFundingRate } from '@/api/binance';
 import { computeIndicators } from '@/analysis/indicators';
-import { generateSignals, unifySignalDirection } from '@/analysis/signals';
+import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 import { sendWebPushToUser } from '@/lib/webpush';
@@ -481,6 +481,54 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
   return { monitored: active.length + waiting.length, closed, filled, cancelled };
 }
 
+// ── Strategy B: consecutive-loss pause check ─────────────────
+// Returns true if this symbol's Strategy B should be paused (2 consecutive
+// LOSS results within the last 24h). Safe-fails to false on any DB error
+// (including 42703 if the `strategy` column hasn't been migrated yet).
+async function checkStratBPaused(symbol: string): Promise<boolean> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key) return false;
+
+  // Redis fast-path: key is set when we first confirm the pause condition
+  const r = getRedis();
+  if (r) {
+    try {
+      const paused = await r.get<boolean>(`stratB_pause:${symbol}`);
+      if (paused) return true;
+    } catch { /* fall through to DB */ }
+  }
+
+  try {
+    const { createClient: mkChk } = await import('@supabase/supabase-js');
+    const adm = mkChk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+    const { data } = await adm.from('trades')
+      .select('result, closed_at')
+      .eq('symbol', symbol)
+      .eq('strategy', 'B')          // 42703 → catch block → return false
+      .not('result', 'is', null)
+      .order('closed_at', { ascending: false })
+      .limit(2);
+
+    if (!data || data.length < 2) return false;
+    const [recent, prev] = data as { result: string; closed_at: number }[];
+    if (recent.result !== 'LOSS' || prev.result !== 'LOSS') return false;
+
+    const elapsed = Date.now() - recent.closed_at;
+    if (elapsed > 24 * 3_600_000) return false;
+
+    // Cache remaining pause duration in Redis so next cron reads fast
+    if (r) {
+      const remainingSec = Math.ceil((24 * 3_600_000 - elapsed) / 1000);
+      try { await r.set(`stratB_pause:${symbol}`, true, { ex: remainingSec }); } catch { /* best-effort */ }
+    }
+    return true;
+  } catch {
+    // Includes 42703 (column not migrated yet) — don't pause
+    return false;
+  }
+}
+
 // ── GET — run analysis + send LINE ────────────────────────────
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -557,50 +605,74 @@ export async function GET(req: NextRequest) {
       // Candle cache so HTF candles are fetched only once even if reused across TFs
       const candleCache = new Map<string, Candle[]>();
 
-      // ── Phase 2: Regime determination from 4H ADX (once per symbol) ──
-      // ADX>25 → trending (Strategy A), ADX<20 → ranging, 20-25 → transitional (no new signals).
-      // 4H candles are pre-fetched here so they're also available for the HTF-bias calculation
-      // below without an extra Binance round-trip.
+      // ── Regime determination from 4H ADX (once per symbol) ─────
+      // ADX>25 → trending (Strategy A), ADX<20 → ranging (Strategy B),
+      // 20-25 → transitional (no new signals).
+      // When 4H fetch fails, regimeDetermined stays false → fallback to Strategy A.
       let symbolRegime: Regime = 'ranging';
-      let symbolAdx = NaN;
+      let symbolAdx    = NaN;
+      let regimeDetermined = false;
       try {
         if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandles(symbol, '4h', 250));
         const fourHC   = candleCache.get('4h')!;
         const fourHInd = computeIndicators(fourHC);
         symbolAdx = fourHInd.adx ?? NaN;
         if (!isNaN(symbolAdx)) {
+          regimeDetermined = true;
           if (symbolAdx > 25)      symbolRegime = 'trending';
           else if (symbolAdx < 20) symbolRegime = 'ranging';
           else                     symbolRegime = 'transitional';
         }
-      } catch { /* keep 'ranging' — safe fallback, does not block signals */ }
+      } catch { /* keep 'ranging' / regimeDetermined=false — Strategy A fallback */ }
 
-      for (const tf of timeframes) {
+      // ── Strategy B consecutive-loss pause check ──────────────
+      let stratBPaused = false;
+      if (symbolRegime === 'ranging' && regimeDetermined) {
+        stratBPaused = await checkStratBPaused(symbol);
+      }
+
+      // ── Regime-based signal generation dispatch ───────────────
+      // transitional → nothing | ranging+determined → Strategy B | else → Strategy A
+      if (symbolRegime === 'transitional') {
+        // ADX 20-25: no new signals; regime/adx4h will surface this in results
+      } else if (symbolRegime === 'ranging' && regimeDetermined && !stratBPaused) {
+        // Strategy B: mean reversion on entry TF only (BB + RSI crossover)
         try {
-          if (!candleCache.has(tf)) candleCache.set(tf, await fetchCandles(symbol, tf, 200));
-          const candles = candleCache.get(tf)!;
-
-          // HTF bias: fetch higher TF once (cached), compute EMA200 direction
-          let htfBias: 'LONG' | 'SHORT' | null = null;
-          const htfTf = HTF_MAP[tf as Timeframe];
-          if (htfTf) {
-            try {
-              if (!candleCache.has(htfTf)) candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 250));
-              const htfC   = candleCache.get(htfTf)!;
-              const htfInd = computeIndicators(htfC);
-              const htfPx  = htfC[htfC.length - 1].close;
-              const e200   = htfInd.ema200;
-              if (!isNaN(e200) && e200 > 0) {
-                const near = Math.abs(htfPx - e200) / e200 < 0.015;
-                if (!near) htfBias = htfPx > e200 ? 'LONG' : 'SHORT';
-              }
-            } catch { /* no bias if HTF unavailable */ }
-          }
-
-          const sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime);
+          if (!candleCache.has(entryTf)) candleCache.set(entryTf, await fetchCandles(symbol, entryTf, 200));
+          const candles = candleCache.get(entryTf)!;
+          const sigs    = generateMeanReversionSignals(symbol, entryTf, candles);
           allSignals.push(...sigs);
           sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
-        } catch { /* skip failed timeframe */ }
+        } catch { /* skip */ }
+      } else {
+        // Strategy A: multi-TF loop (trending, or paused-B, or regime-fetch-failed → safe fallback)
+        for (const tf of timeframes) {
+          try {
+            if (!candleCache.has(tf)) candleCache.set(tf, await fetchCandles(symbol, tf, 200));
+            const candles = candleCache.get(tf)!;
+
+            // HTF bias: fetch higher TF once (cached), compute EMA200 direction
+            let htfBias: 'LONG' | 'SHORT' | null = null;
+            const htfTf = HTF_MAP[tf as Timeframe];
+            if (htfTf) {
+              try {
+                if (!candleCache.has(htfTf)) candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 250));
+                const htfC   = candleCache.get(htfTf)!;
+                const htfInd = computeIndicators(htfC);
+                const htfPx  = htfC[htfC.length - 1].close;
+                const e200   = htfInd.ema200;
+                if (!isNaN(e200) && e200 > 0) {
+                  const near = Math.abs(htfPx - e200) / e200 < 0.015;
+                  if (!near) htfBias = htfPx > e200 ? 'LONG' : 'SHORT';
+                }
+              } catch { /* no bias if HTF unavailable */ }
+            }
+
+            const sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime);
+            allSignals.push(...sigs);
+            sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
+          } catch { /* skip failed timeframe */ }
+        }
       }
 
       // Direction unification: highest TF's direction is master, drop conflicting signals
@@ -619,7 +691,9 @@ export async function GET(req: NextRequest) {
       const masterDir  = topStrong?.direction ?? null;
       const agreeTFs   = masterDir === 'LONG' ? longTFSet.size
                        : masterDir === 'SHORT' ? shortTFSet.size : 0;
-      const confluenceMet = agreeTFs >= 2;
+      // Strategy B is single-TF by design (BB+RSI confirmation is its own confluence)
+      const isStratBSignal = allSignals.some(s => s.strategy === 'B');
+      const confluenceMet  = agreeTFs >= 2 || isStratBSignal;
 
       // Read lock from Redis (persistent across cold starts)
       const last      = await getLock(symbol);
@@ -705,6 +779,7 @@ export async function GET(req: NextRequest) {
                 opened_at:    Date.now(),
                 status:       isLimitOrder ? 'waiting' : 'active',
                 signal_price: sp,
+                strategy:     entrySignal.strategy ?? 'A',
               };
 
               const ir = await admin.from('trades').insert(insertData);
@@ -716,9 +791,10 @@ export async function GET(req: NextRequest) {
                 // Treat as "already exists": don't set lock here; the winning instance will.
                 console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505) — another cron won the race`);
               } else if (ir.error.code === '42703') {
-                // status / signal_price columns not yet migrated — retry without them
+                // New columns (status, signal_price, strategy) may not yet be migrated —
+                // retry with only the pre-migration base columns.
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                const { status: _s, signal_price: _sp, ...baseData } = insertData;
+                const { status: _s, signal_price: _sp, strategy: _str, ...baseData } = insertData;
                 const ir2 = await admin.from('trades').insert(baseData);
                 if (!ir2.error) {
                   insertOk = true;
@@ -815,7 +891,9 @@ export async function GET(req: NextRequest) {
         regime: symbolRegime,
         adx4h: isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(2)),
         ...(lineError  ? { lineError }       : {}),
-        ...(skipReason ? { note: skipReason } : {}),
+        ...(skipReason   ? { note: skipReason }
+          : stratBPaused ? { note: '策略B連虧2筆暫停24h' }
+          : {}),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
