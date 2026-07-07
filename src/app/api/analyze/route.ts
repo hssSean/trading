@@ -24,7 +24,7 @@ interface LockEntry {
 }
 const LOCK_TTL_SEC     = 24 * 3600;        // 24h lock for intraday trades
 const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2h cooldown between signals (was 6h)
-const STRONG_THRESHOLD = 15;                  // lowered from 19 (intraday scoring range)
+const STRONG_THRESHOLD = 70;                  // v2: 0–100 scale, threshold 65, notify ≥70
 const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older than 24h
 const WAITING_EXPIRY_HOURS = 8;              // cancel unfilled limit orders after 8h
 
@@ -620,6 +620,124 @@ async function checkTotalOpenRisk(profileId: string): Promise<number> {
   }
 }
 
+// ── §4.3 Same-direction open-risk cap ────────────────────────
+// Max 2 same-direction trades total; altcoins (non-BTC/ETH) share one bucket, max 1.
+async function checkSameDirectionRisk(profileId: string, direction: string, symbol: string): Promise<{ block: boolean; reason?: string }> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key || !profileId) return { block: false };
+  try {
+    const { createClient: mk } = await import('@supabase/supabase-js');
+    const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+
+    const { count: total } = await adm.from('trades')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', profileId).eq('direction', direction).is('result', null);
+    if ((total ?? 0) >= 2)
+      return { block: true, reason: `同向上限：${direction} 已有 ${total} 筆持倉（上限 2）` };
+
+    const isAltcoin = !symbol.startsWith('BTC') && !symbol.startsWith('ETH');
+    if (isAltcoin) {
+      const { count: altCount } = await adm.from('trades')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', profileId).eq('direction', direction).is('result', null)
+        .not('symbol', 'like', 'BTC%').not('symbol', 'like', 'ETH%');
+      if ((altCount ?? 0) >= 1)
+        return { block: true, reason: `山寨同向上限：同方向山寨幣已有持倉 ${direction}` };
+    }
+    return { block: false };
+  } catch { return { block: false }; }
+}
+
+// ── §4.4 Circuit breaker ──────────────────────────────────────
+// Triggered when today's closed trades hit ≥3 consecutive losses OR cumulative PnL ≤ -3%.
+async function checkCircuitBreaker(profileId: string): Promise<{ triggered: boolean; reason?: string }> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key || !profileId) return { triggered: false };
+
+  const r = getRedis();
+  if (r) {
+    try {
+      const cached = await r.get<string>(`circuit_breaker:${profileId}`);
+      if (cached) return { triggered: true, reason: cached };
+    } catch { /* fall through */ }
+  }
+
+  try {
+    const { createClient: mk } = await import('@supabase/supabase-js');
+    const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+
+    const todayUTC = new Date();
+    todayUTC.setUTCHours(0, 0, 0, 0);
+
+    const { data } = await adm.from('trades')
+      .select('result, pnl_percent, closed_at')
+      .eq('user_id', profileId).not('result', 'is', null)
+      .gte('closed_at', todayUTC.getTime())
+      .order('closed_at', { ascending: false });
+
+    if (!data || data.length === 0) return { triggered: false };
+
+    // Check 1: cumulative daily PnL ≤ -3%
+    const dailyPnl = (data as { result: string; pnl_percent?: number | null }[])
+      .reduce((s, t) => s + (t.pnl_percent ?? 0), 0);
+    if (dailyPnl <= -3) {
+      const reason = `熔斷：當日累計虧損 ${dailyPnl.toFixed(2)}%（≤ -3%）`;
+      await cacheBreaker(r, profileId, reason, todayUTC);
+      return { triggered: true, reason };
+    }
+
+    // Check 2: 3 consecutive losses in today's trades
+    let streak = 0;
+    for (const t of data as { result: string }[]) {
+      if (t.result === 'LOSS') streak++;
+      else break;
+    }
+    if (streak >= 3) {
+      const reason = `熔斷：連續 ${streak} 筆止損`;
+      await cacheBreaker(r, profileId, reason, todayUTC);
+      return { triggered: true, reason };
+    }
+    return { triggered: false };
+  } catch { return { triggered: false }; }
+}
+
+async function cacheBreaker(r: import('@upstash/redis').Redis | null, profileId: string, reason: string, todayUTC: Date) {
+  if (!r) return;
+  const secLeft = Math.ceil((todayUTC.getTime() + 86_400_000 - Date.now()) / 1000);
+  try { await r.set(`circuit_breaker:${profileId}`, reason, { ex: Math.max(secLeft, 60) }); } catch { /* best-effort */ }
+}
+
+// ── §2.3 BTC regime (fetched once per cron run) ───────────────
+interface BtcRegimeState {
+  regime: 'bullish' | 'bearish' | 'chaotic';
+  longPaused:  boolean; // BTC 1H dropped >1.5% → pause altcoin LONG signals 4h
+  shortPaused: boolean; // BTC 1H pumped >1.5% → pause altcoin SHORT signals 4h
+}
+async function fetchBtcRegime(): Promise<BtcRegimeState> {
+  const state: BtcRegimeState = { regime: 'chaotic', longPaused: false, shortPaused: false };
+  try {
+    const [btc4h, btc1h] = await Promise.all([
+      fetchCandles('BTCUSDT', '4h', 250),
+      fetchCandles('BTCUSDT', '1h', 10),
+    ]);
+    const btcInd = computeIndicators(btc4h);
+    const btcClose = btc4h[btc4h.length - 1].close;
+    const ema50  = btcInd.ema50  ?? NaN;
+    const ema200 = btcInd.ema200;
+    if (!isNaN(ema50) && !isNaN(ema200)) {
+      if (ema50 > ema200 && btcClose > ema50)      state.regime = 'bullish';
+      else if (ema50 < ema200 && btcClose < ema50) state.regime = 'bearish';
+    }
+    const last4 = btc1h.slice(-4);
+    const btcChange = (last4[last4.length - 1].close - last4[0].close) / last4[0].close;
+    if (btcChange < -0.015) state.longPaused  = true;
+    if (btcChange >  0.015) state.shortPaused = true;
+  } catch { /* use defaults */ }
+  return state;
+}
+
 // ── GET — run analysis + send LINE ────────────────────────────
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -683,6 +801,12 @@ export async function GET(req: NextRequest) {
 
   const results   = [];
   const notified: string[] = [];
+
+  // §2.3 BTC regime — fetch once, apply to all altcoin signals
+  const btcState = await fetchBtcRegime();
+
+  // §4.4 Circuit breaker — check once per cron run
+  const breaker = profileId ? await checkCircuitBreaker(profileId) : { triggered: false };
 
   for (const symbol of coins) {
     const allSignals: TradingSignal[] = [];
@@ -807,7 +931,11 @@ export async function GET(req: NextRequest) {
       const onCooldown = !!last && !locked && (now - last.sentAt) < COOLDOWN_MS;
 
       let skipReason: string | undefined;
-      if (locked)
+
+      // §4.4 Circuit breaker (global; set once before loop, checked per signal)
+      if (breaker.triggered)
+        skipReason = `熔斷 — ${breaker.reason}`;
+      else if (locked)
         skipReason = `跳過 — 持倉中 (${last?.direction})`;
       else if (sameCandle)
         skipReason = `跳過 — 同 4h 蠟燭 (${topStrong?.direction})`;
@@ -817,23 +945,48 @@ export async function GET(req: NextRequest) {
         skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向)`;
       else if (topStrong && !entrySignal)
         skipReason = `跳過 — 進場時區 (${entryTf}) 無合格信號`;
-      else if (entrySignal && profileId) {
-        // Hard-stop duplicate check — uses already-resolved profileId, no second profile lookup.
-        // Default-block on exception: safer than allow, prevents duplicate trade on Supabase error.
-        const _su = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
-        const _sk = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-        if (_su && _sk) {
-          try {
-            const { createClient: mkChk } = await import('@supabase/supabase-js');
-            const chk = mkChk(_su, _sk, { auth: { autoRefreshToken: false, persistSession: false } });
-            const { count: c } = await chk.from('trades')
-              .select('id', { count: 'exact', head: true })
-              .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('result', null);
-            if (c !== null && c > 0)
-              skipReason = `跳過 — 同幣種已有持倉 (${symbol})`;
-          } catch (e) {
-            skipReason = `跳過 — 重複檢查失敗 (${String(e).slice(0, 80)})`;
-            console.error(`[analyze] hard-stop check threw for ${symbol}:`, String(e));
+      else if (entrySignal) {
+        const isLargeCap = symbol === 'BTCUSDT' || symbol === 'ETHUSDT';
+
+        // §2.3 BTC regime filter (altcoins only)
+        if (!isLargeCap && entrySignal.strategy === 'A') {
+          if (btcState.regime === 'bullish' && entrySignal.direction === 'SHORT')
+            skipReason = `BTC 大盤偏多 — 跳過山寨做空趨勢單 (${symbol})`;
+          else if (btcState.regime === 'bearish' && entrySignal.direction === 'LONG')
+            skipReason = `BTC 大盤偏空 — 跳過山寨做多趨勢單 (${symbol})`;
+          else if (btcState.regime === 'chaotic')
+            skipReason = `BTC 大盤混沌 — 山寨趨勢單暫停 (${symbol})`;
+        }
+        if (!skipReason && !isLargeCap) {
+          if (entrySignal.direction === 'LONG'  && btcState.longPaused)
+            skipReason = `BTC 1H 急跌 >1.5% — ${symbol} 做多訊號暫停`;
+          else if (entrySignal.direction === 'SHORT' && btcState.shortPaused)
+            skipReason = `BTC 1H 急漲 >1.5% — ${symbol} 做空訊號暫停`;
+        }
+
+        // §4.3 Same-direction risk cap
+        if (!skipReason && profileId) {
+          const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol);
+          if (sdCheck.block) skipReason = `跳過 — ${sdCheck.reason}`;
+        }
+
+        // Hard-stop duplicate check
+        if (!skipReason && profileId) {
+          const _su = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+          const _sk = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+          if (_su && _sk) {
+            try {
+              const { createClient: mkChk } = await import('@supabase/supabase-js');
+              const chk = mkChk(_su, _sk, { auth: { autoRefreshToken: false, persistSession: false } });
+              const { count: c } = await chk.from('trades')
+                .select('id', { count: 'exact', head: true })
+                .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('result', null);
+              if (c !== null && c > 0)
+                skipReason = `跳過 — 同幣種已有持倉 (${symbol})`;
+            } catch (e) {
+              skipReason = `跳過 — 重複檢查失敗 (${String(e).slice(0, 80)})`;
+              console.error(`[analyze] hard-stop check threw for ${symbol}:`, String(e));
+            }
           }
         }
       }
@@ -994,6 +1147,7 @@ export async function GET(req: NextRequest) {
         agreeTFs,
         tfsAnalyzed: timeframes.filter(tf => candleCache.has(tf)),
         regime: symbolRegime,
+        btcRegime: btcState.regime,
         adx4h: isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(2)),
         fundingRate: symbolFundingRate,
         ...(lineError  ? { lineError }       : {}),
@@ -1017,6 +1171,8 @@ export async function GET(req: NextRequest) {
     ok: true, analyzedAt: new Date().toISOString(),
     minScore, lineReady, usingRedis, coins: coins.length, notified, results,
     monitor,
+    btcRegime: btcState.regime,
+    circuitBreaker: breaker.triggered ? breaker.reason : null,
   });
 }
 
