@@ -24,9 +24,15 @@ interface LockEntry {
 }
 const LOCK_TTL_SEC     = 24 * 3600;        // 24h lock for intraday trades
 const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2h cooldown between signals (was 6h)
-const STRONG_THRESHOLD = 70;                  // v2: 0–100 scale, threshold 65, notify ≥70
+const STRONG_THRESHOLD   = 70;               // Strategy A: 0-100 v2 scale
+const STRONG_THRESHOLD_B = 15;               // Strategy B: 0-19 scale (needs ≥3 confirmations)
 const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older than 24h
 const WAITING_EXPIRY_HOURS = 8;              // cancel unfilled limit orders after 8h
+
+// Per-strategy threshold: Strategy B uses a 0-19 scoring scale; Strategy A uses 0-100.
+function isStrongEnough(s: TradingSignal): boolean {
+  return s.strategy === 'B' ? s.score >= STRONG_THRESHOLD_B : s.score >= STRONG_THRESHOLD;
+}
 
 let _redis: Redis | null = null;
 function getRedis(): Redis | null {
@@ -645,25 +651,23 @@ async function checkTotalOpenRisk(profileId: string): Promise<number> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key || !profileId) return 0;
+  const { createClient: mk } = await import('@supabase/supabase-js');
+  const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
   try {
-    const { createClient: mk } = await import('@supabase/supabase-js');
-    const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
     const { data } = await adm.from('trades')
       .select('suggested_risk_pct')
       .eq('user_id', profileId)
-      .is('result', null);
+      .is('closed_at', null);  // closed_at=null means still open (incl. tp1_hit watching TP2)
     if (!data) return 0;
     return data.reduce((s: number, t: { suggested_risk_pct?: number | null }) =>
       s + (t.suggested_risk_pct ?? 1), 0);
   } catch {
-    // Column not migrated (42703) or other DB error — estimate via count × 1%
+    // Column not migrated (42703) or other DB error — estimate via open-trade count × 1%
     try {
-      const { createClient: mk2 } = await import('@supabase/supabase-js');
-      const adm2 = mk2(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
-      const { count } = await adm2.from('trades')
+      const { count } = await adm.from('trades')
         .select('id', { count: 'exact', head: true })
         .eq('user_id', profileId)
-        .is('result', null);
+        .is('closed_at', null);
       return (count ?? 0) * 1;
     } catch {
       return 0;
@@ -683,7 +687,7 @@ async function checkSameDirectionRisk(profileId: string, direction: string, symb
 
     const { count: total } = await adm.from('trades')
       .select('id', { count: 'exact', head: true })
-      .eq('user_id', profileId).eq('direction', direction).is('result', null);
+      .eq('user_id', profileId).eq('direction', direction).is('closed_at', null);
     if ((total ?? 0) >= 2)
       return { block: true, reason: `同向上限：${direction} 已有 ${total} 筆持倉（上限 2）` };
 
@@ -691,7 +695,7 @@ async function checkSameDirectionRisk(profileId: string, direction: string, symb
     if (isAltcoin) {
       const { count: altCount } = await adm.from('trades')
         .select('id', { count: 'exact', head: true })
-        .eq('user_id', profileId).eq('direction', direction).is('result', null)
+        .eq('user_id', profileId).eq('direction', direction).is('closed_at', null)
         .not('symbol', 'like', 'BTC%').not('symbol', 'like', 'ETH%');
       if ((altCount ?? 0) >= 1)
         return { block: true, reason: `山寨同向上限：同方向山寨幣已有持倉 ${direction}` };
@@ -859,6 +863,9 @@ export async function GET(req: NextRequest) {
   // §4.4 Circuit breaker — check once per cron run
   const breaker = profileId ? await checkCircuitBreaker(profileId) : { triggered: false };
 
+  // Phase 5: total open risk — check once per cron run; blocks all new signals when cap is hit
+  const totalOpenRisk = profileId ? await checkTotalOpenRisk(profileId) : 0;
+
   for (const symbol of coins) {
     const allSignals: TradingSignal[] = [];
     let topScore  = 0;
@@ -948,10 +955,10 @@ export async function GET(req: NextRequest) {
       // Direction unification: highest TF's direction is master, drop conflicting signals
       const unified    = unifySignalDirection(allSignals);
       const strong     = unified.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
-      const topStrong  = strong.find(s => s.score >= STRONG_THRESHOLD);
+      const topStrong  = strong.find(isStrongEnough);
       // Entry signal: only from the designated entry TF. Multi-TF confluence confirms direction;
       // this signal's entry/TP/SL are what get pushed to LINE and inserted into DB.
-      const entrySignal = strong.find(s => s.score >= STRONG_THRESHOLD && s.timeframe === entryTf);
+      const entrySignal = strong.find(s => isStrongEnough(s) && s.timeframe === entryTf);
 
       // Multi-TF confluence gate ─────────────────────────────────
       // Count distinct TFs producing signals in the master direction.
@@ -986,6 +993,8 @@ export async function GET(req: NextRequest) {
       // §4.4 Circuit breaker (global; set once before loop, checked per signal)
       if (breaker.triggered)
         skipReason = `熔斷 — ${breaker.reason}`;
+      else if (totalOpenRisk >= MAX_TOTAL_RISK_PCT)
+        skipReason = `跳過 — 總持倉風險 ${totalOpenRisk.toFixed(1)}% 已達上限 ${MAX_TOTAL_RISK_PCT}%`;
       else if (locked)
         skipReason = `跳過 — 持倉中 (${last?.direction})`;
       else if (sameCandle)
@@ -1031,7 +1040,7 @@ export async function GET(req: NextRequest) {
               const chk = mkChk(_su, _sk, { auth: { autoRefreshToken: false, persistSession: false } });
               const { count: c } = await chk.from('trades')
                 .select('id', { count: 'exact', head: true })
-                .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('result', null);
+                .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('closed_at', null);
               if (c !== null && c > 0)
                 skipReason = `跳過 — 同幣種已有持倉 (${symbol})`;
             } catch (e) {
@@ -1063,7 +1072,7 @@ export async function GET(req: NextRequest) {
               .select('id', { count: 'exact', head: true })
               .eq('user_id', profileId)
               .eq('symbol', entrySignal.symbol)
-              .is('result', null);
+              .is('closed_at', null);
 
             if (count === 0) {
               const tradeId    = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1224,6 +1233,7 @@ export async function GET(req: NextRequest) {
     monitor,
     btcRegime: btcState.regime,
     circuitBreaker: breaker.triggered ? breaker.reason : null,
+    totalOpenRisk: parseFloat(totalOpenRisk.toFixed(2)),
   });
 }
 
