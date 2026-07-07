@@ -149,17 +149,26 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
   const [
     { data: waitingRaw, error: waitErr },
     { data: activeRaw,  error: activeErr },
+    // tp1_hit trades that already have result='WIN_TP1' but closed_at is still null
+    // (closed_at null = "still watching for TP2"; set to now when trade is finally done)
+    { data: tp1WatchRaw },
   ] = await Promise.all([
     baseQ().eq('status', 'waiting'),
-    // active, tp1_hit, or legacy rows (null status from before migration)
     baseQ().or('status.eq.active,status.is.null,status.eq.tp1_hit'),
+    admin.from('trades').select('*')
+      .eq('status', 'tp1_hit').eq('result', 'WIN_TP1').is('closed_at', null),
   ]);
 
   if (waitErr)  console.error('[monitor] waiting query error:', waitErr.message);
   if (activeErr) console.error('[monitor] active query error:',  activeErr.message);
 
   const waiting = (waitingRaw ?? []) as any[];
-  const active  = (activeRaw  ?? []) as any[];
+  // Merge active + tp1-watching; deduplicate by id (a newly-set tp1_hit might appear in both)
+  const seenIds = new Set<string>();
+  const active: any[] = [];
+  for (const t of [...(activeRaw ?? []), ...(tp1WatchRaw ?? [])]) {
+    if (!seenIds.has(t.id as string)) { seenIds.add(t.id as string); active.push(t); }
+  }
 
   if (waiting.length === 0 && active.length === 0) {
     return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
@@ -364,18 +373,34 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       }
     }
 
-    // TP1 newly reached in this scan, no close yet → mark and notify
+    // TP1 newly reached in this scan, no close yet → record result immediately and notify
     if (justHitTp1 && !closeResult) {
-      // Atomic tp1: only update if status is still 'active' or null (legacy).
-      // Concurrent cron that loses the race gets 0 rows back and skips the notification.
+      const tp1Price = trade.tp1 as number;
+      const tp1Pnl   = isLong
+        ? ((tp1Price - (trade.entry as number)) / (trade.entry as number)) * 100
+        : (((trade.entry as number) - tp1Price) / (trade.entry as number)) * 100;
+
+      // Write result='WIN_TP1' + exit_price + pnl immediately so the trade appears
+      // in the journal right away. closed_at is intentionally NOT set here — null
+      // closed_at means "TP1 secured, still watching for TP2".
+      // The next monitoring cycle fetches status='tp1_hit' AND result='WIN_TP1' AND closed_at IS NULL.
       const tp1Res = await admin.from('trades')
-        .update({ status: 'tp1_hit', last_monitored_at: now })
+        .update({
+          status:       'tp1_hit',
+          last_monitored_at: now,
+          result:       'WIN_TP1',
+          exit_price:   tp1Price,
+          pnl_percent:  parseFloat(tp1Pnl.toFixed(2)),
+          // closed_at intentionally omitted — null signals "still watching for TP2"
+        })
         .eq('id', trade.id).or('status.eq.active,status.is.null').select('id');
 
       let tp1WriteOk = !tp1Res.error && (tp1Res.data?.length ?? 0) > 0;
       if (tp1Res.error) {
         if (tp1Res.error.code === '42703') {
-          const fb = await admin.from('trades').update({ status: 'tp1_hit' })
+          // Columns (exit_price, pnl_percent) may not exist yet — retry with base fields only
+          const fb = await admin.from('trades')
+            .update({ status: 'tp1_hit', result: 'WIN_TP1' })
             .eq('id', trade.id).or('status.eq.active,status.is.null').select('id');
           if (fb.error) {
             console.error(`[monitor] tp1_hit write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
@@ -431,23 +456,47 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       ? ((closePrice - entry) / entry) * 100
       : ((entry - closePrice) / entry) * 100;
 
-    // Atomic close: IS NULL guard ensures only the cron that transitions result null→value
-    // actually proceeds to notify. Concurrent cron gets 0 rows back and skips.
-    const closeRes = await admin.from('trades').update({
-      result:      closeResult,
-      exit_price:  closePrice,
-      closed_at:   now,
-      pnl_percent: parseFloat(pnl.toFixed(2)),
-    }).eq('id', trade.id).is('result', null).select('id');
+    // Atomic close guard differs by trade state:
+    // - Normal (result null): use .is('result', null) — standard first-write guard.
+    // - tp1_hit watching (result='WIN_TP1', closed_at null): use that pair as guard.
+    //   For TP2, upgrade result to WIN_TP2. For SL/auto, keep result (stays WIN_TP1),
+    //   just set closed_at + final exit_price/pnl to finalize the record.
+    const isFinalClosingTp1 = isTp1Hit; // tp1_hit trade reaching its final outcome
+    const closeUpdate = isFinalClosingTp1
+      ? {
+          // Only change result if upgrading to TP2; otherwise leave WIN_TP1 as-is
+          ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}),
+          exit_price:  closePrice,
+          closed_at:   now,
+          pnl_percent: parseFloat(pnl.toFixed(2)),
+        }
+      : {
+          result:      closeResult,
+          exit_price:  closePrice,
+          closed_at:   now,
+          pnl_percent: parseFloat(pnl.toFixed(2)),
+        };
+
+    const closeFilter = isFinalClosingTp1
+      ? admin.from('trades').update(closeUpdate)
+          .eq('id', trade.id).eq('status', 'tp1_hit').is('closed_at', null)
+      : admin.from('trades').update(closeUpdate)
+          .eq('id', trade.id).is('result', null);
+
+    const closeRes = await closeFilter.select('id');
 
     let closeWriteOk = !closeRes.error && (closeRes.data?.length ?? 0) > 0;
 
     if (closeRes.error) {
       if (closeRes.error.code === '42703') {
-        // exit_price / pnl_percent column missing — write result + closed_at only
-        const fallback = await admin.from('trades')
-          .update({ result: closeResult, closed_at: now })
-          .eq('id', trade.id).is('result', null).select('id');
+        // exit_price / pnl_percent column missing — write minimal fields
+        const fbUpdate = isFinalClosingTp1
+          ? { ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}), closed_at: now }
+          : { result: closeResult, closed_at: now };
+        const fbFilter = isFinalClosingTp1
+          ? admin.from('trades').update(fbUpdate).eq('id', trade.id).eq('status', 'tp1_hit').is('closed_at', null)
+          : admin.from('trades').update(fbUpdate).eq('id', trade.id).is('result', null);
+        const fallback = await fbFilter.select('id');
         if (!fallback.error) {
           closeWriteOk = (fallback.data?.length ?? 0) > 0;
         } else {

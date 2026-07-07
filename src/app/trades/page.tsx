@@ -66,7 +66,7 @@ export default function TradesPage() {
     const pollPrices = async () => {
       const seen = new Set<string>();
       const activeSymbols = useStore.getState().trades
-        .filter(t => !t.result && t.status !== 'waiting')
+        .filter(t => (!t.result && t.status !== 'waiting') || (t.status === 'tp1_hit' && !t.closedAt))
         .map(t => t.symbol)
         .filter(s => { if (seen.has(s)) return false; seen.add(s); return true; });
       if (activeSymbols.length === 0) return;
@@ -116,10 +116,12 @@ export default function TradesPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Memoize derived arrays: prevents filtered from recomputing on every store update (coins poll).
-  const waiting = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);
-  const closed  = useMemo(() => trades.filter(t => !!t.result), [trades]);
+  const waiting       = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);
+  const closed        = useMemo(() => trades.filter(t => !!t.result), [trades]);
   // 持倉中 = active & not closed (exclude waiting)
-  const pending = useMemo(() => trades.filter(t => !t.result && t.status !== 'waiting'), [trades]);
+  const pending       = useMemo(() => trades.filter(t => !t.result && t.status !== 'waiting'), [trades]);
+  // 追蹤TP2 = TP1 hit, result locked as WIN_TP1, not yet finally closed
+  const watchingTp2   = useMemo(() => trades.filter(t => t.status === 'tp1_hit' && t.result === 'WIN_TP1' && !t.closedAt), [trades]);
   const wins    = closed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
   const losses  = closed.filter(t => t.result === 'LOSS');
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
@@ -455,6 +457,7 @@ export default function TradesPage() {
             <h1 className="text-[#EAEAF4] text-xl font-extrabold tracking-tight">交易紀錄</h1>
             <p className="text-[#606080] text-xs mt-0.5">
               {closed.length} 已結束 · {pending.length} 持倉
+              {watchingTp2.length > 0 && <span className="text-green-400"> · {watchingTp2.length} 追蹤TP2</span>}
               {waiting.length > 0 && <span className="text-yellow-400"> · {waiting.length} 掛單中</span>}
             </p>
           </div>
@@ -855,9 +858,10 @@ export default function TradesPage() {
           </div>
         ) : (
           filtered.map(trade => {
-            const isWaiting = trade.status === 'waiting';
-            const isTp1Hit  = trade.status === 'tp1_hit';
-            const isPending = !trade.result && !isWaiting;
+            const isWaiting     = trade.status === 'waiting';
+            const isTp1Hit      = trade.status === 'tp1_hit';
+            const isWatchingTp2 = isTp1Hit && trade.result === 'WIN_TP1' && !trade.closedAt;
+            const isPending     = !trade.result && !isWaiting;
             const isWin     = trade.result === 'WIN_TP1' || trade.result === 'WIN_TP2';
             const coinData  = coins.find(c => c.symbol === trade.symbol);
             const livePx    = coinData?.currentPrice ?? 0;
@@ -883,6 +887,13 @@ export default function TradesPage() {
                 ? (livePx - trade.stopLoss) / livePx * 100
                 : (trade.stopLoss - livePx) / livePx * 100;
               nearSL = distSL < 1.5;
+            }
+            // Distance to TP2 for trades watching for TP2 upgrade
+            let distTP2 = 0;
+            if (isWatchingTp2 && livePx > 0) {
+              distTP2 = trade.direction === 'LONG'
+                ? (trade.tp2 - livePx) / livePx * 100
+                : (livePx - trade.tp2) / livePx * 100;
             }
 
             return (
@@ -937,6 +948,8 @@ export default function TradesPage() {
                           <span className="text-xs bg-[#F0B90B]/20 text-[#F0B90B] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
                         )}
                       </>
+                    ) : isWatchingTp2 ? (
+                      <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-semibold border border-green-500/40">✅ TP1·等TP2</span>
                     ) : (
                       <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
                         style={{ background: `${RESULT_COLOR[trade.result!]}20`, color: RESULT_COLOR[trade.result!] }}>
@@ -996,6 +1009,22 @@ export default function TradesPage() {
                       <p className={`text-xs font-bold ${nearSL ? 'text-red-400' : 'text-[#A0A0C0]'}`}>
                         {distSL >= 0 ? `緩衝 ${distSL.toFixed(2)}%` : `穿越 ${Math.abs(distSL).toFixed(2)}%`}
                       </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* TP2 distance bar for trades that hit TP1 and are watching for TP2 */}
+                {isWatchingTp2 && livePx > 0 && (
+                  <div className="grid grid-cols-2 gap-1.5 mb-2">
+                    <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-2 text-center">
+                      <p className="text-green-400 text-[9px] font-semibold">✅ TP1 已鎖定 · 追蹤TP2</p>
+                      <p className="text-green-400 text-xs font-bold">
+                        {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過TP2 ${Math.abs(distTP2).toFixed(2)}%`}
+                      </p>
+                    </div>
+                    <div className="bg-[#0A0A0F] rounded-xl p-2 text-center">
+                      <p className="text-[#606080] text-[9px]">現價</p>
+                      <p className="text-[#A0A0C0] text-xs font-bold">${fmtPrice(livePx)}</p>
                     </div>
                   </div>
                 )}
@@ -1112,7 +1141,7 @@ export default function TradesPage() {
                         {unlockMsg[trade.symbol] ? '✓ 已取消' : '取消掛單'}
                       </button>
                     )}
-                    {isPending && (
+                    {(isPending || isWatchingTp2) && (
                       <>
                         <button
                           onClick={() => handleManualUnlock(trade.symbol)}
