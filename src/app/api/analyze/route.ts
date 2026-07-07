@@ -344,31 +344,33 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     let localTp1Hit = isTp1Hit;
 
     // Scan candles in chronological order.
-    // Same-candle conflict (SL + TP in one candle): SL wins — conservative, protects capital.
+    // Check order within each candle: TP1 first, then TP2, then SL.
+    // This ensures a same-candle TP1+SL event is classified as WIN_TP1 (price reached
+    // TP1 at some point during the hour before coming back to SL), not LOSS.
     for (const c of candles) {
       if (isLong) {
+        if (!localTp1Hit && c.high >= (trade.tp1 as number)) {
+          localTp1Hit = true; justHitTp1 = true; // keep scanning — later candles may still hit SL/TP2
+        }
+        if (c.high >= (trade.tp2 as number)) {
+          closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
+        }
         if (c.low <= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
           closePrice  = trade.stop_loss as number;
           break;
         }
-        if (c.high >= (trade.tp2 as number)) {
-          closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
-        }
-        if (!localTp1Hit && c.high >= (trade.tp1 as number)) {
-          localTp1Hit = true; justHitTp1 = true; // keep scanning — later candles may still hit SL/TP2
-        }
       } else {
-        if (c.high >= (trade.stop_loss as number)) {
-          closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
-          closePrice  = trade.stop_loss as number;
-          break;
+        if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
+          localTp1Hit = true; justHitTp1 = true;
         }
         if (c.low <= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
         }
-        if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
-          localTp1Hit = true; justHitTp1 = true;
+        if (c.high >= (trade.stop_loss as number)) {
+          closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
+          closePrice  = trade.stop_loss as number;
+          break;
         }
       }
     }
