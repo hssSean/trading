@@ -6,7 +6,7 @@ import { WatchedCoin } from '@/types';
 const STRENGTH_RANK: Record<string, number> = { WEAK: 0, MODERATE: 1, STRONG: 2 };
 
 export function CoinCard({ coin }: { coin: WatchedCoin }) {
-  const isUp        = coin.priceChangePercent24h >= 0;
+  const isUp        = (coin.priceChangePercent24h ?? 0) >= 0;
   const minStrength = useStore((s) => s.settings.minSignalStrength);
   const filtered    = coin.signals.filter((s) => STRENGTH_RANK[s.strength] >= STRENGTH_RANK[minStrength]);
   const latest      = filtered[0];
@@ -54,7 +54,7 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
             <>
               <p className="text-[#EAEAF4] font-semibold text-base">${fmtPrice(coin.currentPrice)}</p>
               <p className={`text-sm font-medium mt-0.5 ${isUp ? 'text-green-400' : 'text-red-400'}`}>
-                {isUp ? '+' : ''}{coin.priceChangePercent24h.toFixed(2)}%
+                {isUp ? '+' : ''}{(coin.priceChangePercent24h ?? 0).toFixed(2)}%
               </p>
             </>
           )}

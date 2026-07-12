@@ -186,7 +186,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             </span>
             {coin && (
               <span className={`text-sm font-medium ${isUp ? 'text-green-400' : 'text-red-400'}`}>
-                {isUp ? '+' : ''}{coin.priceChangePercent24h.toFixed(2)}%
+                {isUp ? '+' : ''}{(coin.priceChangePercent24h ?? 0).toFixed(2)}%
               </span>
             )}
           </div>

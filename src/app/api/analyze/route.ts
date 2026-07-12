@@ -24,7 +24,7 @@ interface LockEntry {
 }
 const LOCK_TTL_SEC     = 24 * 3600;        // 24h lock for intraday trades
 const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2h cooldown between signals (was 6h)
-const STRONG_THRESHOLD   = 70;               // Strategy A: 0-100 v2 scale
+const STRONG_THRESHOLD   = 65;               // Strategy A: v2 spec ≥65 to notify
 const STRONG_THRESHOLD_B = 15;               // Strategy B: 0-19 scale (needs ≥3 confirmations)
 const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older than 24h
 const WAITING_EXPIRY_HOURS = 8;              // cancel unfilled limit orders after 8h
