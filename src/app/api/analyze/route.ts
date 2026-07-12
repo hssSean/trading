@@ -340,8 +340,43 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     }
     await delay(200);
 
-    const isLong   = trade.direction === 'LONG';
-    const isTp1Hit = trade.status === 'tp1_hit';
+    const isLong        = trade.direction === 'LONG';
+    const isTp1Hit      = trade.status === 'tp1_hit';
+    const tradeStrategy = (trade.strategy as string | null) ?? '';
+
+    // ── Phase 5: Trailing stop state ─────────────────────────────
+    // Load from DB (columns may not exist yet — undefined → safe defaults via ??)
+    const isTrailingActive  = (trade.trailing_stop_active as boolean | null) ?? false;
+    const savedTrailingStop = (trade.current_stop as number | null) ?? 0;
+    let trailingStop        = isTrailingActive && savedTrailingStop > 0 ? savedTrailingStop : 0;
+    let trailingStopUpdated = false;
+    let hitTrailingStop     = false;
+
+    // Simple 14-period ATR from 1H candles — used to set/ratchet trailing stop.
+    // Only computed for Strategy A trades; Strategy B uses fixed TP=BB middle (no trailing).
+    let atr1h = 0;
+    if (tradeStrategy === 'A' && candles.length >= 15) {
+      const n = Math.min(14, candles.length - 1);
+      let trSum = 0;
+      for (let i = candles.length - n; i < candles.length; i++) {
+        trSum += Math.max(
+          candles[i].high - candles[i].low,
+          Math.abs(candles[i].high - candles[i - 1].close),
+          Math.abs(candles[i].low  - candles[i - 1].close),
+        );
+      }
+      atr1h = trSum / n;
+    }
+
+    // Pre-loop: initialize trailing stop for existing tp1_hit trades that pre-date the columns.
+    // When isTp1Hit=true but isTrailingActive=false (columns newly migrated or first run),
+    // seed from TP1 price so the ratchet loop has a valid anchor rather than an arbitrary close.
+    if (isTp1Hit && tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
+      trailingStop = isLong
+        ? Math.max((trade.tp1 as number) - 2 * atr1h, (trade.stop_loss as number))
+        : Math.min((trade.tp1 as number) + 2 * atr1h, (trade.stop_loss as number));
+      trailingStopUpdated = true;
+    }
 
     let closeResult: string | null = null;
     let closePrice  = 0;
@@ -350,34 +385,80 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     let localTp1Hit = isTp1Hit;
 
     // Scan candles in chronological order.
-    // Check order within each candle: TP1 first, then TP2, then SL.
-    // This ensures a same-candle TP1+SL event is classified as WIN_TP1 (price reached
-    // TP1 at some point during the hour before coming back to SL), not LOSS.
+    // Check order within each candle: TP1 first, then TP2, then trailing stop, then SL.
+    // Same-candle TP1+SL → TP1 wins (price hit TP1 before reversing to SL).
+    // Same-candle TP1+trailing stop → trailing stop fires (TP2 not reached, trailing is lower bound).
     for (const c of candles) {
+      let justInitializedTrailing = false; // per-iteration flag: skip ratchet on init candle
+
       if (isLong) {
         if (!localTp1Hit && c.high >= (trade.tp1 as number)) {
-          localTp1Hit = true; justHitTp1 = true; // keep scanning — later candles may still hit SL/TP2
+          localTp1Hit = true; justHitTp1 = true;
+          // Initialize trailing stop 2×ATR below TP1 level (Strategy A only)
+          if (tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
+            // Clamp to SL so trailing stop never gives a worse exit than original SL
+            trailingStop = Math.max((trade.tp1 as number) - 2 * atr1h, (trade.stop_loss as number));
+            trailingStopUpdated = true;
+            justInitializedTrailing = true;
+          }
         }
         if (c.high >= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
+        }
+        // Trailing stop fires before original SL — gives better exit after TP1
+        if (localTp1Hit && trailingStop > 0 && c.low <= trailingStop) {
+          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
         }
         if (c.low <= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
           closePrice  = trade.stop_loss as number;
           break;
         }
+        // Ratchet trailing stop upward as price advances (not on the init candle)
+        if (localTp1Hit && !justInitializedTrailing && tradeStrategy === 'A' && atr1h > 0) {
+          const candidate = c.close - 2 * atr1h;
+          if (candidate > trailingStop) { trailingStop = candidate; trailingStopUpdated = true; }
+        }
       } else {
         if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
           localTp1Hit = true; justHitTp1 = true;
+          if (tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
+            // Clamp to SL so trailing stop never gives a worse exit than original SL
+            trailingStop = Math.min((trade.tp1 as number) + 2 * atr1h, (trade.stop_loss as number));
+            trailingStopUpdated = true;
+            justInitializedTrailing = true;
+          }
         }
         if (c.low <= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
+        }
+        if (localTp1Hit && trailingStop > 0 && c.high >= trailingStop) {
+          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
         }
         if (c.high >= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
           closePrice  = trade.stop_loss as number;
           break;
         }
+        // Ratchet trailing stop downward as price advances (SHORT)
+        if (localTp1Hit && !justInitializedTrailing && tradeStrategy === 'A' && atr1h > 0) {
+          const candidate = c.close + 2 * atr1h;
+          if (trailingStop === 0 || candidate < trailingStop) { trailingStop = candidate; trailingStopUpdated = true; }
+        }
+      }
+    }
+
+    // Persist trailing stop updates that occurred during the scan but didn't trigger a close.
+    // Skipped when justHitTp1=true because the TP1 update block below merges it in.
+    // 42703-safe: catching write failures is sufficient (columns missing → touchMonitoredAt).
+    if (!closeResult && !justHitTp1 && trailingStopUpdated && trailingStop > 0) {
+      try {
+        await admin.from('trades')
+          .update({ trailing_stop_active: true, current_stop: trailingStop, last_monitored_at: now })
+          .eq('id', trade.id);
+      } catch {
+        // 42703 if trailing_stop_active/current_stop columns not yet migrated — non-critical
+        await touchMonitoredAt(trade.id as string);
       }
     }
 
@@ -392,15 +473,21 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       // in the journal right away. closed_at is intentionally NOT set here — null
       // closed_at means "TP1 secured, still watching for TP2".
       // The next monitoring cycle fetches status='tp1_hit' AND result='WIN_TP1' AND closed_at IS NULL.
+      // Phase 5: merge trailing stop initialization into this update to avoid a separate round-trip.
+      const tp1UpdatePayload: Record<string, unknown> = {
+        status:            'tp1_hit',
+        last_monitored_at: now,
+        result:            'WIN_TP1',
+        exit_price:        tp1Price,
+        pnl_percent:       parseFloat(tp1Pnl.toFixed(2)),
+        // closed_at intentionally omitted — null signals "still watching for TP2"
+      };
+      if (trailingStopUpdated && trailingStop > 0) {
+        tp1UpdatePayload.trailing_stop_active = true;
+        tp1UpdatePayload.current_stop         = trailingStop;
+      }
       const tp1Res = await admin.from('trades')
-        .update({
-          status:       'tp1_hit',
-          last_monitored_at: now,
-          result:       'WIN_TP1',
-          exit_price:   tp1Price,
-          pnl_percent:  parseFloat(tp1Pnl.toFixed(2)),
-          // closed_at intentionally omitted — null signals "still watching for TP2"
-        })
+        .update(tp1UpdatePayload)
         .eq('id', trade.id).or('status.eq.active,status.is.null').select('id');
 
       let tp1WriteOk = !tp1Res.error && (tp1Res.data?.length ?? 0) > 0;
@@ -537,7 +624,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         pushTitle  = `⏱ 到期平倉 ${sym}`;
       } else {
         const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
-                    : closeResult === 'WIN_TP1' ? (localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
+                    : closeResult === 'WIN_TP1' ? (hitTrailingStop ? '🔒 移動止損出場（TP1 已達標）' : localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
                     : '❌ 止損出場';
         closeMsg  = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle = `${label} ${sym}`;
@@ -899,6 +986,22 @@ export async function GET(req: NextRequest) {
         }
       } catch { /* keep 'ranging' / regimeDetermined=false — Strategy A fallback */ }
 
+      // ── Phase 5: 90-day ATR percentile → suggested position sizing ──
+      // Uses the 540-bar 4H cache already populated above.
+      let symbolAtrPct = 50; // default: mid-volatility
+      try {
+        const fourHC = candleCache.get('4h');
+        if (fourHC && fourHC.length >= 30) {
+          const atrHistory = calcAtrHistory(fourHC);
+          if (atrHistory.length >= 2) {
+            const currentAtr4h = atrHistory[atrHistory.length - 1];
+            symbolAtrPct = calcAtrPercentile(currentAtr4h, atrHistory.slice(0, -1));
+          }
+        }
+      } catch { /* keep default 50 */ }
+      // >80th pct = high volatility → smaller risk; <30th = low vol → larger risk
+      const suggestedRiskPct = symbolAtrPct > 80 ? 0.5 : symbolAtrPct < 30 ? 1.5 : 1.0;
+
       // ── Strategy B consecutive-loss pause check ──────────────
       let stratBPaused = false;
       if (symbolRegime === 'ranging' && regimeDetermined) {
@@ -972,11 +1075,16 @@ export async function GET(req: NextRequest) {
       const isStratBSignal = allSignals.some(s => s.strategy === 'B');
       const confluenceMet  = agreeTFs >= 2 || isStratBSignal;
 
-      // ── Phase 4: Annotate unified signals with fundingRate + confidence ──
-      // confidence is informational; STRONG_THRESHOLD gate is still score-based.
+      // ── Phase 4+5: Annotate unified signals with fundingRate, confidence, position sizing ──
+      // confidence and suggestedRiskPct/Leverage are informational; gate stays score-based.
       unified.forEach(s => {
         s.fundingRate = symbolFundingRate;
         s.confidence  = computeConfidence(s, symbolAdx, symbolFundingRate, agreeTFs);
+        s.suggestedRiskPct = suggestedRiskPct;
+        const slDist = s.entry > 0 ? Math.abs(s.entry - s.stopLoss) / s.entry : 0;
+        s.suggestedLeverage = slDist > 0
+          ? Math.min(Math.round((suggestedRiskPct / 100 / slDist) * 10) / 10, 10)
+          : 1;
       });
 
       // Read lock from Redis (persistent across cold starts)
@@ -1094,10 +1202,12 @@ export async function GET(req: NextRequest) {
                 opened_at:    Date.now(),
                 status:       isLimitOrder ? 'waiting' : 'active',
                 signal_price: sp,
-                strategy:     entrySignal.strategy ?? 'A',
-                regime:       entrySignal.regime ?? null,
-                confidence:   entrySignal.confidence ?? null,
-                funding_rate: entrySignal.fundingRate ?? null,
+                strategy:            entrySignal.strategy ?? 'A',
+                regime:              entrySignal.regime ?? null,
+                confidence:          entrySignal.confidence ?? null,
+                funding_rate:        entrySignal.fundingRate ?? null,
+                suggested_risk_pct:  entrySignal.suggestedRiskPct ?? null,
+                suggested_leverage:  entrySignal.suggestedLeverage ?? null,
               };
 
               const ir = await admin.from('trades').insert(insertData);
@@ -1112,7 +1222,7 @@ export async function GET(req: NextRequest) {
                 // New columns (status, signal_price, strategy, regime, confidence, funding_rate)
                 // may not yet be migrated — retry with only the pre-migration base columns.
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, ...baseData } = insertData;
+                const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, suggested_risk_pct: _srp, suggested_leverage: _slev, ...baseData } = insertData;
                 const ir2 = await admin.from('trades').insert(baseData);
                 if (!ir2.error) {
                   insertOk = true;
@@ -1209,6 +1319,8 @@ export async function GET(req: NextRequest) {
         regime: symbolRegime,
         btcRegime: btcState.regime,
         adx4h: isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(2)),
+        atrPercentile: symbolAtrPct,
+        suggestedRiskPct,
         fundingRate: symbolFundingRate,
         ...(lineError  ? { lineError }       : {}),
         ...(skipReason   ? { note: skipReason }
