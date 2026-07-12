@@ -762,6 +762,62 @@ async function checkTotalOpenRisk(profileId: string): Promise<number> {
   }
 }
 
+// ── Phase 6: Event filter ─────────────────────────────────────
+// Blocks all new signals within ±30 min of a scheduled market event.
+// Event list sources (first non-empty wins):
+//   1. Redis key  'event_filter_events'  → JSON array of ISO-8601 strings
+//   2. Env var    EVENT_FILTER_EVENTS    → comma-separated ISO-8601 strings OR JSON array
+// To add an event via Upstash console:
+//   SET event_filter_events '["2025-01-15T14:30:00Z","2025-01-15T20:00:00Z"]'
+const EVENT_WINDOW_MS = 30 * 60 * 1000; // ±30 min window
+
+async function checkEventFilter(): Promise<{ active: boolean; reason?: string }> {
+  try {
+    let events: string[] = [];
+
+    // Priority 1: Redis (survives redeploy, allows runtime updates)
+    const r = getRedis();
+    if (r) {
+      try {
+        const raw = await r.get<unknown>('event_filter_events');
+        if (raw) {
+          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (Array.isArray(parsed)) events = parsed as string[];
+        }
+      } catch { /* fall through */ }
+    }
+
+    // Priority 2: Env var (deploy-time config)
+    if (events.length === 0) {
+      const envRaw = (process.env.EVENT_FILTER_EVENTS ?? '').trim();
+      if (envRaw) {
+        try {
+          const parsed = JSON.parse(envRaw);
+          if (Array.isArray(parsed)) events = parsed as string[];
+        } catch {
+          // Plain comma-separated list
+          events = envRaw.split(',').map(s => s.trim()).filter(Boolean);
+        }
+      }
+    }
+
+    if (events.length === 0) return { active: false };
+
+    const now = Date.now();
+    for (const ev of events) {
+      const evMs = new Date(ev).getTime();
+      if (!isNaN(evMs) && Math.abs(now - evMs) <= EVENT_WINDOW_MS) {
+        const diffMin = Math.round((evMs - now) / 60_000);
+        const label   = diffMin > 0 ? `${diffMin}分鐘後` : diffMin < 0 ? `${-diffMin}分鐘前` : '進行中';
+        return { active: true, reason: `事件過濾 — 重大事件 ${label}（${new Date(evMs).toUTCString()}）` };
+      }
+    }
+    return { active: false };
+  } catch {
+    return { active: false }; // never block signals on error
+  }
+}
+
 // ── §4.3 Same-direction open-risk cap ────────────────────────
 // Max 2 same-direction trades total; altcoins (non-BTC/ETH) share one bucket, max 1.
 async function checkSameDirectionRisk(profileId: string, direction: string, symbol: string): Promise<{ block: boolean; reason?: string }> {
@@ -953,6 +1009,9 @@ export async function GET(req: NextRequest) {
   // Phase 5: total open risk — check once per cron run; blocks all new signals when cap is hit
   const totalOpenRisk = profileId ? await checkTotalOpenRisk(profileId) : 0;
 
+  // Phase 6: event filter — blocks new signals ±30 min around scheduled events
+  const eventFilter = await checkEventFilter();
+
   for (const symbol of coins) {
     const allSignals: TradingSignal[] = [];
     let topScore  = 0;
@@ -1098,8 +1157,11 @@ export async function GET(req: NextRequest) {
 
       let skipReason: string | undefined;
 
+      // Phase 6: event filter (global; checked before per-symbol risk gates)
+      if (eventFilter.active)
+        skipReason = eventFilter.reason ?? '事件過濾中，暫停新訊號';
       // §4.4 Circuit breaker (global; set once before loop, checked per signal)
-      if (breaker.triggered)
+      else if (breaker.triggered)
         skipReason = `熔斷 — ${breaker.reason}`;
       else if (totalOpenRisk >= MAX_TOTAL_RISK_PCT)
         skipReason = `跳過 — 總持倉風險 ${totalOpenRisk.toFixed(1)}% 已達上限 ${MAX_TOTAL_RISK_PCT}%`;
@@ -1322,6 +1384,7 @@ export async function GET(req: NextRequest) {
         atrPercentile: symbolAtrPct,
         suggestedRiskPct,
         fundingRate: symbolFundingRate,
+        event_filter_active: eventFilter.active,
         ...(lineError  ? { lineError }       : {}),
         ...(skipReason   ? { note: skipReason }
           : stratBPaused ? { note: '策略B連虧2筆暫停24h' }
@@ -1346,6 +1409,7 @@ export async function GET(req: NextRequest) {
     btcRegime: btcState.regime,
     circuitBreaker: breaker.triggered ? breaker.reason : null,
     totalOpenRisk: parseFloat(totalOpenRisk.toFixed(2)),
+    eventFilter: { active: eventFilter.active, ...(eventFilter.reason ? { reason: eventFilter.reason } : {}) },
   });
 }
 
