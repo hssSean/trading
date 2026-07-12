@@ -28,3 +28,6 @@ npm-debug.log*
 .expo/
 .claude/
 .vercel
+
+# typescript incremental build cache
+*.tsbuildinfo

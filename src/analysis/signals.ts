@@ -159,6 +159,8 @@ export function generateSignals(
   candles: Candle[],
   htfBias?: 'LONG' | 'SHORT' | null,
   regime?: Regime,
+  // Filled with the raw (pre-gate) scores so callers can report near-misses.
+  debugOut?: { long?: number; short?: number },
 ): TradingSignal[] {
   if (candles.length < 55) return [];
 
@@ -238,12 +240,15 @@ export function generateSignals(
     if (ema50Slope === 'up')  { lTrend += 2; longReasons.push('EMA50 斜率向上'); }
 
     // Momentum group
+    // Oversold favours reversal entries; the 45-65 rising branch rewards
+    // trend-following pullbacks where RSI never reaches oversold.
     if (ind.rsi < 35)      { lMom += 5; longReasons.push(`RSI 超賣 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi < 45) { lMom += 3; longReasons.push(`RSI 超賣回升 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi > 70) { lPenalties -= 3; }
+    else if (ind.rsi <= 65 && ind.rsi > prevInd.rsi + 0.5) { lMom += 3; longReasons.push(`RSI 健康區回升 ${ind.rsi.toFixed(1)}`); }
     if (divergence.bullish) { lMom += 4; longReasons.push('RSI 看漲背離'); }
-    if (ind.macdHistogram > 0 && ind.macd > ind.macdSignal)         { lMom += 3; longReasons.push('MACD 黃金交叉'); }
-    if (ind.macdHistogram > 0 && ind.macdHistogram > prevInd.macdHistogram) { lMom += 2; longReasons.push('MACD 動能增強'); }
+    if (ind.macdHistogram > 0 && ind.macd > ind.macdSignal) { lMom += 3; longReasons.push('MACD 黃金交叉'); }
+    if (ind.macdHistogram > prevInd.macdHistogram)          { lMom += 2; longReasons.push('MACD 動能改善'); }
 
     // Structure group
     if (structure.trend === 'bullish')                { lStruct += 3; longReasons.push('結構做多（HH HL）'); }
@@ -291,13 +296,14 @@ export function generateSignals(
     else if (!ema20AboveEma50)  { sTrend += 2; shortReasons.push('EMA20 < EMA50（短期弱勢）'); }
     if (ema50Slope === 'down')  { sTrend += 2; shortReasons.push('EMA50 斜率向下'); }
 
-    // Momentum group
+    // Momentum group (mirror of LONG: overbought reversal + trend-following weakness)
     if (ind.rsi > 65)      { sMom += 5; shortReasons.push(`RSI 超買 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi > 55) { sMom += 3; shortReasons.push(`RSI 超買回落 ${ind.rsi.toFixed(1)}`); }
     else if (ind.rsi < 30) { sPenalties -= 3; }
+    else if (ind.rsi >= 35 && ind.rsi < prevInd.rsi - 0.5) { sMom += 3; shortReasons.push(`RSI 弱勢區下行 ${ind.rsi.toFixed(1)}`); }
     if (divergence.bearish) { sMom += 4; shortReasons.push('RSI 看跌背離'); }
-    if (ind.macdHistogram < 0 && ind.macd < ind.macdSignal)         { sMom += 3; shortReasons.push('MACD 死亡交叉'); }
-    if (ind.macdHistogram < 0 && ind.macdHistogram < prevInd.macdHistogram) { sMom += 2; shortReasons.push('MACD 跌勢加速'); }
+    if (ind.macdHistogram < 0 && ind.macd < ind.macdSignal) { sMom += 3; shortReasons.push('MACD 死亡交叉'); }
+    if (ind.macdHistogram < prevInd.macdHistogram)          { sMom += 2; shortReasons.push('MACD 動能轉弱'); }
 
     // Structure group
     if (structure.trend === 'bearish')                { sStruct += 3; shortReasons.push('結構做空（LH LL）'); }
@@ -504,6 +510,9 @@ export function generateSignals(
     shortScore -= NO_LEVEL_PENALTY;
     shortReasons.push('⚠ 無明確回測位，扣 3 分');
   }
+
+  // Report raw scores (all bonuses/penalties applied) for near-miss diagnostics
+  if (debugOut) { debugOut.long = longScore; debugOut.short = shortScore; }
 
   // ── Hard gate 3 (intraday): candle pattern + trend alignment ─
   // For intraday we need the current candle to CONFIRM the direction.

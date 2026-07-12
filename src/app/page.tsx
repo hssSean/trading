@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
 import { CoinCard } from '@/components/CoinCard';
+import { ScanStatusPanel } from '@/components/ScanStatusPanel';
 import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, searchSymbols } from '@/api/binance';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { computeIndicators } from '@/analysis/indicators';
@@ -367,6 +368,9 @@ export default function HomePage() {
             <button onClick={() => dismissAutoClose(alert.id)} className="text-[#606080] text-sm ml-2 shrink-0">✕</button>
           </div>
         ))}
+
+        {/* Server scan status — why each coin was / wasn't signalled */}
+        <ScanStatusPanel />
 
         {/* Market sentiment bar */}
         {(sentiment.longs + sentiment.shorts) > 0 && (

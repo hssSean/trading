@@ -25,7 +25,7 @@ interface LockEntry {
 const LOCK_TTL_SEC     = 24 * 3600;        // 24h lock for intraday trades
 const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2h cooldown between signals (was 6h)
 const STRONG_THRESHOLD   = 65;               // Strategy A: v2 spec ≥65 to notify
-const STRONG_THRESHOLD_B = 15;               // Strategy B: 0-19 scale (needs ≥3 confirmations)
+const STRONG_THRESHOLD_B = 13;               // Strategy B: base 10 (BB+RSI cross) + ≥1 confirmation
 const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older than 24h
 const WAITING_EXPIRY_HOURS = 8;              // cancel unfilled limit orders after 8h
 
@@ -997,7 +997,29 @@ export async function GET(req: NextRequest) {
   const lineReady  = !!(lineToken && lineUserId);
   const usingRedis = !!getRedis();
 
-  const results   = [];
+  interface ScanResult {
+    symbol: string;
+    signalCount: number;
+    topScore: number;
+    rawTopScore?: number;
+    topSignal: { direction: string; strength: string; score: number; entry: number; confidence?: number; fundingRate?: number } | null;
+    lineSent: boolean;
+    locked: boolean;
+    confluenceMet?: boolean;
+    agreeTFs?: number;
+    tfsAnalyzed?: string[];
+    regime?: string;
+    btcRegime?: string;
+    adx4h?: number | null;
+    atrPercentile?: number;
+    suggestedRiskPct?: number;
+    fundingRate?: number;
+    event_filter_active?: boolean;
+    lineError?: string;
+    note?: string;
+    error?: string;
+  }
+  const results: ScanResult[] = [];
   const notified: string[] = [];
 
   // §2.3 BTC regime — fetch once, apply to all altcoin signals
@@ -1015,8 +1037,10 @@ export async function GET(req: NextRequest) {
   for (const symbol of coins) {
     const allSignals: TradingSignal[] = [];
     let topScore  = 0;
+    let rawTopScore = 0; // best pre-gate score — shows near-misses in scan status
     let lineSent  = false;
     let lineError: string | undefined;
+    let entryTfBias: 'LONG' | 'SHORT' | null = null; // entry TF's 4H EMA200 direction
 
     try {
       await fetchTicker24h(symbol).catch(() => null);
@@ -1103,8 +1127,13 @@ export async function GET(req: NextRequest) {
                 }
               } catch { /* no bias if HTF unavailable */ }
             }
+            // Remember the entry TF's higher-timeframe bias — it acts as the
+            // second confluence confirmation (§3-A: 4H judges direction, 1H enters).
+            if (tf === entryTf) entryTfBias = htfBias;
 
-            const sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime);
+            const dbg: { long?: number; short?: number } = {};
+            const sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime, dbg);
+            rawTopScore = Math.max(rawTopScore, dbg.long ?? 0, dbg.short ?? 0);
             allSignals.push(...sigs);
             sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
           } catch { /* skip failed timeframe */ }
@@ -1120,19 +1149,34 @@ export async function GET(req: NextRequest) {
       const topStrong  = strong.find(isStrongEnough);
       // Entry signal: only from the designated entry TF. Multi-TF confluence confirms direction;
       // this signal's entry/TP/SL are what get pushed to LINE and inserted into DB.
-      const entrySignal = strong.find(s => isStrongEnough(s) && s.timeframe === entryTf);
+      let entrySignal = strong.find(s => isStrongEnough(s) && s.timeframe === entryTf);
 
       // Multi-TF confluence gate ─────────────────────────────────
-      // Count distinct TFs producing signals in the master direction.
-      // Requires ≥2 TFs to agree before LINE is sent.
+      // Confirmed by either: (a) ≥2 TFs independently producing same-direction
+      // signals, or (b) entry-TF signal aligned with its 4H EMA200 bias —
+      // §3-A's design is exactly "4H judges direction, 1H finds entry", so a
+      // full independent 4H signal is NOT required for confluence.
       const longTFSet  = new Set(allSignals.filter(s => s.direction === 'LONG').map(s => s.timeframe));
       const shortTFSet = new Set(allSignals.filter(s => s.direction === 'SHORT').map(s => s.timeframe));
       const masterDir  = topStrong?.direction ?? null;
       const agreeTFs   = masterDir === 'LONG' ? longTFSet.size
                        : masterDir === 'SHORT' ? shortTFSet.size : 0;
+      const biasConfirmed  = !!masterDir && entryTfBias === masterDir;
       // Strategy B is single-TF by design (BB+RSI confirmation is its own confluence)
       const isStratBSignal = allSignals.some(s => s.strategy === 'B');
-      const confluenceMet  = agreeTFs >= 2 || isStratBSignal;
+      const confluenceMet  = agreeTFs >= 2 || biasConfirmed || isStratBSignal;
+
+      // Entry-TF fallback: an exceptional intraday signal (≥ threshold+10) whose
+      // direction matches the 4H bias may substitute when the entry TF itself
+      // has no qualifying signal — strong trends often move too fast for 1H
+      // to score before the entry window closes.
+      if (!entrySignal && biasConfirmed) {
+        entrySignal = strong.find(s =>
+          isStrongEnough(s) &&
+          s.score >= STRONG_THRESHOLD + 10 &&
+          s.direction === entryTfBias &&
+          s.strategy !== 'B');
+      }
 
       // ── Phase 4+5: Annotate unified signals with fundingRate, confidence, position sizing ──
       // confidence and suggestedRiskPct/Leverage are informational; gate stays score-based.
@@ -1172,9 +1216,9 @@ export async function GET(req: NextRequest) {
       else if (onCooldown && last)
         skipReason = `跳過 — 冷卻中 (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min)`;
       else if (topStrong && !confluenceMet)
-        skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向)`;
+        skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向，4H bias: ${entryTfBias ?? '中性'})`;
       else if (topStrong && !entrySignal)
-        skipReason = `跳過 — 進場時區 (${entryTf}) 無合格信號`;
+        skipReason = `跳過 — 進場時區 (${entryTf}) 無合格信號（最高 ${topStrong.score}分@${topStrong.timeframe}，4H bias: ${entryTfBias ?? '中性'}）`;
       else if (entrySignal) {
         const isLargeCap = symbol === 'BTCUSDT' || symbol === 'ETHUSDT';
 
@@ -1184,8 +1228,14 @@ export async function GET(req: NextRequest) {
             skipReason = `BTC 大盤偏多 — 跳過山寨做空趨勢單 (${symbol})`;
           else if (btcState.regime === 'bearish' && entrySignal.direction === 'LONG')
             skipReason = `BTC 大盤偏空 — 跳過山寨做多趨勢單 (${symbol})`;
-          else if (btcState.regime === 'chaotic')
-            skipReason = `BTC 大盤混沌 — 山寨趨勢單暫停 (${symbol})`;
+          else if (btcState.regime === 'chaotic') {
+            // §4.2 lists "BTC 混沌區 -10" as a deduction — apply the penalty and
+            // re-check the gate instead of hard-blocking every altcoin trend trade.
+            entrySignal.score -= 10;
+            entrySignal.reasons.push('⚠ BTC 大盤混沌 −10分');
+            if (entrySignal.score < STRONG_THRESHOLD)
+              skipReason = `BTC 混沌 — 扣分後 ${entrySignal.score} 分未達 ${STRONG_THRESHOLD} (${symbol})`;
+          }
         }
         if (!skipReason && !isLargeCap) {
           if (entrySignal.direction === 'LONG'  && btcState.longPaused)
@@ -1370,6 +1420,7 @@ export async function GET(req: NextRequest) {
         symbol,
         signalCount: strong.length,
         topScore,
+        rawTopScore,
         topSignal: strong[0]
           ? { direction: strong[0].direction, strength: strong[0].strength, score: strong[0].score, entry: strong[0].entry, confidence: strong[0].confidence, fundingRate: strong[0].fundingRate }
           : null,
@@ -1401,6 +1452,33 @@ export async function GET(req: NextRequest) {
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
   const monitor = await monitorActiveTrades(lineToken, lineUserId, profileId)
     .catch(() => ({ monitored: 0, closed: 0, filled: 0, cancelled: 0 }));
+
+  // Persist scan summary so /api/scan-status (and the home-page panel) can show
+  // why each coin was or wasn't signalled — spec §6 requires reject logs to be kept.
+  {
+    const rScan = getRedis();
+    if (rScan) {
+      try {
+        await rScan.set('last_scan', {
+          at: Date.now(),
+          btcRegime: btcState.regime,
+          circuitBreaker: breaker.triggered ? breaker.reason ?? true : null,
+          eventFilter: eventFilter.active ? eventFilter.reason ?? true : null,
+          totalOpenRisk: parseFloat(totalOpenRisk.toFixed(2)),
+          notified,
+          coins: results.map(r => ({
+            symbol: r.symbol,
+            topScore: r.topScore,
+            rawTopScore: r.rawTopScore ?? 0,
+            adx4h: r.adx4h ?? null,
+            regime: r.regime ?? null,
+            agreeTFs: r.agreeTFs ?? 0,
+            note: r.note ?? r.error ?? null,
+          })),
+        }, { ex: 7200 });
+      } catch { /* non-fatal — panel just shows stale data */ }
+    }
+  }
 
   return NextResponse.json({
     ok: true, analyzedAt: new Date().toISOString(),
