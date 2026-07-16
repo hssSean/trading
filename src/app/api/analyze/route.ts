@@ -1349,6 +1349,7 @@ export async function GET(req: NextRequest) {
 
       // ── Signal gate: DB record and notifications are fully decoupled from each other ──
       // profileId (Supabase user UUID) is the only identity requirement; LINE success is not.
+      let gateNote: string | undefined; // surfaces insert failures in scan-status panel
       if (entrySignal && !!profileId && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
         const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
         const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -1399,6 +1400,12 @@ export async function GET(req: NextRequest) {
                 tier:                entrySignal.tier ?? 'A',
               };
 
+              // Missing-column detection: PostgREST returns PGRST204 ("Could not
+              // find the 'x' column in the schema cache") for unknown INSERT
+              // columns — 42703 only appears on raw SQL / column-grant paths.
+              const isMissingColumn = (code?: string, msg?: string) =>
+                code === '42703' || code === 'PGRST204' || /column/i.test(msg ?? '');
+
               const ir = await admin.from('trades').insert(insertData);
               if (!ir.error) {
                 insertOk = true;
@@ -1407,7 +1414,7 @@ export async function GET(req: NextRequest) {
                 // a concurrent analyze already inserted an open trade for this symbol.
                 // Treat as "already exists": don't set lock here; the winning instance will.
                 console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505) — another cron won the race`);
-              } else if (ir.error.code === '42703') {
+              } else if (isMissingColumn(ir.error.code, ir.error.message)) {
                 // Two-stage fallback so a single missing NEW column doesn't strip
                 // columns that DO exist (status/signal_price own the limit-order flow).
                 // Stage 1: drop only 'tier' (newest, v2.1); Stage 2: pre-migration base.
@@ -1419,7 +1426,7 @@ export async function GET(req: NextRequest) {
                   console.log(`[analyze] insert ok without 'tier' for ${entrySignal.symbol} — run: ALTER TABLE trades ADD COLUMN tier TEXT DEFAULT 'A'`);
                 } else if (irT.error.code === '23505') {
                   console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505/no-tier) — another cron won the race`);
-                } else if (irT.error.code === '42703') {
+                } else if (isMissingColumn(irT.error.code, irT.error.message)) {
                   // eslint-disable-next-line @typescript-eslint/no-unused-vars
                   const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, suggested_risk_pct: _srp, suggested_leverage: _slev, tier: _tier, ...baseData } = insertData;
                   const ir2 = await admin.from('trades').insert(baseData);
@@ -1443,6 +1450,8 @@ export async function GET(req: NextRequest) {
         } else {
           console.error(`[analyze] trade insert skipped for ${entrySignal.symbol} — DB not configured`);
         }
+
+        if (!insertOk) gateNote = '⚠ 訊號達標但 DB 寫入失敗（詳見漏斗統計）';
 
         // ── Step 2: Lock + pending signals (only after trade is confirmed in DB) ──
         // Lock prevents re-triggering the same signal on the next cron cycle.
@@ -1565,6 +1574,7 @@ export async function GET(req: NextRequest) {
         event_filter_active: eventFilter.active,
         ...(lineError  ? { lineError }       : {}),
         ...(skipReason   ? { note: skipReason }
+          : gateNote     ? { note: gateNote }
           : stratBPaused ? { note: '策略B連虧2筆暫停24h' }
           : {}),
       });
