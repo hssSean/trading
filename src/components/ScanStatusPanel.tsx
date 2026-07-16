@@ -28,6 +28,33 @@ const REGIME_LABEL: Record<string, { text: string; cls: string }> = {
   transitional: { text: '過渡', cls: 'text-[#606080]' },
 };
 
+// v2.1 §0: reject-funnel gate id → human label
+const REJECT_LABEL: Record<string, string> = {
+  event_filter:      '事件窗口',
+  circuit_breaker:   '當日熔斷',
+  total_risk_cap:    '總風險上限',
+  locked:            '持倉鎖定',
+  same_candle:       '同4H蠟燭',
+  cooldown:          '冷卻中',
+  confluence:        '多框架未確認',
+  no_entry_tf:       '進場時區無訊號',
+  btc_direction:     'BTC 逆向',
+  btc_pause:         'BTC 急漲跌暫停',
+  same_dir_cap:      '同向上限',
+  has_open_position: '已有持倉',
+  dup_check_error:   '重複檢查失敗',
+  score_gate:        '分數/組數未達',
+  no_profile:        '帳號未解析',
+  insert_failed:     'DB寫入失敗',
+};
+
+interface FunnelStats {
+  total: number;
+  sent: number;
+  rejected: number;
+  reasons: Array<{ key: string; count: number; pctOfRejected: number }>;
+}
+
 const BTC_REGIME_LABEL: Record<string, { text: string; cls: string }> = {
   bullish: { text: 'BTC 偏多', cls: 'text-green-400' },
   bearish: { text: 'BTC 偏空', cls: 'text-red-400' },
@@ -45,6 +72,7 @@ function timeAgo(ts: number): string {
 
 export function ScanStatusPanel() {
   const [scan, setScan]         = useState<Scan | null>(null);
+  const [funnel, setFunnel]     = useState<FunnelStats | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [errMsg, setErrMsg]     = useState('');
 
@@ -59,11 +87,25 @@ export function ScanStatusPanel() {
     } catch { /* network error — keep stale data */ }
   }, []);
 
+  const fetchFunnel = useCallback(async () => {
+    try {
+      const secret = useStore.getState().webhookSecret;
+      const res  = await fetch('/api/reject-funnel?days=3', { headers: secret ? { 'x-webhook-secret': secret } : {} });
+      const data = await res.json();
+      if (data.ok) setFunnel(data);
+    } catch { /* keep stale */ }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
     const id = setInterval(fetchStatus, 90 * 1000);
     return () => clearInterval(id);
   }, [fetchStatus]);
+
+  // Funnel stats are heavier — fetch only when the panel is expanded
+  useEffect(() => {
+    if (expanded) fetchFunnel();
+  }, [expanded, fetchFunnel]);
 
   if (!scan) {
     return errMsg ? (
@@ -127,6 +169,26 @@ export function ScanStatusPanel() {
               );
             })}
           </div>
+          {/* v2.1 §0: reject funnel — which gate kills the most candidates */}
+          {funnel && funnel.total > 0 && (
+            <div className="mt-2.5 pt-2 border-t border-[#1E1E2E]">
+              <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1">
+                近3天訊號漏斗 — 候選 {funnel.total} · 出單 <span className="text-green-400">{funnel.sent}</span>
+              </p>
+              {funnel.reasons.slice(0, 5).map(r => (
+                <div key={r.key} className="flex items-center gap-2 text-[10px] leading-4">
+                  <span className="text-[#606080] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
+                  <div className="flex-1 h-1 bg-[#1A1A26] rounded-full overflow-hidden">
+                    <div className="h-full bg-red-400/50 rounded-full" style={{ width: `${r.pctOfRejected}%` }} />
+                  </div>
+                  <span className="text-[#606080] w-14 shrink-0 text-right">{r.count} ({r.pctOfRejected}%)</span>
+                </div>
+              ))}
+              {funnel.reasons.length === 0 && (
+                <p className="text-[#404060] text-[10px]">尚無被拒紀錄</p>
+              )}
+            </div>
+          )}
           <p className="text-[#404060] text-[9px] mt-2">
             總持倉風險 {scan.totalOpenRisk}% · 每 5 分鐘自動掃描 · 點擊標題可收合
           </p>

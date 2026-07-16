@@ -51,6 +51,7 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     status:      ((r.status as string | null) as 'waiting' | 'active' | 'tp1_hit' | undefined) ?? 'active',
     signalPrice: (r.signal_price as number | null) ?? undefined,
     filledAt:    (r.filled_at as number | null) ?? undefined,
+    tier:        ((r.tier as string | null) as 'A' | 'B' | undefined) ?? undefined,
   };
 }
 

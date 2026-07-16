@@ -136,9 +136,11 @@ function detectRsiDivergence(
 //   MIN_RR: 1.2 (intraday) / 2.0 (swing)
 // ════════════════════════════════════════════════════════════════
 // §4.2 v2: Group-capped scoring. Base 40 + 5 groups (max 100).
-// Signal emitted only when score ≥ 65 AND ≥3 groups contribute.
-const MIN_SCORE          = 65; // v2 threshold (was 12/13)
-const MIN_SCORE_LONGTF   = 67; // 4h/1d need 2 extra points
+// v2.1 §1.5 two-tier gate: A = ≥65 & ≥3 groups (risk 1%);
+//                          B = 55-64 & ≥2 groups (risk 0.5%); <55 no signal.
+const MIN_SCORE          = 65; // tier A threshold
+const MIN_SCORE_TIER_B   = 55; // tier B threshold (light position)
+const MIN_SCORE_LONGTF   = 67; // 4h/1d tier A needs 2 extra points
 const MIN_RR_INTRADAY    = 1.2;
 const MIN_RR_SWING       = 2.0;
 const HIGH_VOLIT_PCT     = 0.03;
@@ -349,10 +351,20 @@ export function generateSignals(
     if (allowShort && price >= ind.ema20 - ema20Zone && price <= ind.ema20 + ema20Zone) {
       sTrend += 3; shortReasons.push(`策略A: 反彈 EMA20±0.5ATR（$${ind.ema20.toFixed(4)}）`);
     }
+    // v2.1 §1.4: breakout counts fully within 0.8×ATR of the band; 0.8-1.2×ATR
+    // is "a bit far — prefer retest" (reduced points); beyond 1.2 is chasing (0).
     const don = ind.donchian;
-    if (don && !isNaN(don.upper) && !isNaN(don.lower)) {
-      if (allowLong  && price > don.upper) { lTrend += 4; longReasons.push(`策略A: Donchian20 向上突破（$${don.upper.toFixed(4)}）`); }
-      if (allowShort && price < don.lower) { sTrend += 4; shortReasons.push(`策略A: Donchian20 向下突破（$${don.lower.toFixed(4)}）`); }
+    if (don && !isNaN(don.upper) && !isNaN(don.lower) && atrVal > 0) {
+      if (allowLong && price > don.upper) {
+        const distAtr = (price - don.upper) / atrVal;
+        if      (distAtr <= 0.8) { lTrend += 4; longReasons.push(`策略A: Donchian20 向上突破（$${don.upper.toFixed(4)}）`); }
+        else if (distAtr <= 1.2) { lTrend += 2; longReasons.push(`策略A: 突破略遠（${distAtr.toFixed(1)}×ATR）建議等回測 $${don.upper.toFixed(4)}`); }
+      }
+      if (allowShort && price < don.lower) {
+        const distAtr = (don.lower - price) / atrVal;
+        if      (distAtr <= 0.8) { sTrend += 4; shortReasons.push(`策略A: Donchian20 向下突破（$${don.lower.toFixed(4)}）`); }
+        else if (distAtr <= 1.2) { sTrend += 2; shortReasons.push(`策略A: 突破略遠（${distAtr.toFixed(1)}×ATR）建議等回測 $${don.lower.toFixed(4)}`); }
+      }
     }
   }
 
@@ -393,7 +405,7 @@ export function generateSignals(
   const longStruct = Math.min(lStruct, GROUP_CAPS.structure);
   const longVol    = Math.min(lVol,    GROUP_CAPS.volume);
   const longPAction= Math.min(lPA,     GROUP_CAPS.priceAction);
-  const longGroupsOk = [longTrend, longMom, longStruct, longVol, longPAction].filter(g => g > 0).length >= 3;
+  const longGroups = [longTrend, longMom, longStruct, longVol, longPAction].filter(g => g > 0).length;
   let   longScore  = 40 + longTrend + longMom + longStruct + longVol + longPAction + lPenalties;
 
   const shortTrend  = Math.min(sTrend,  GROUP_CAPS.trend);
@@ -401,7 +413,7 @@ export function generateSignals(
   const shortStruct = Math.min(sStruct, GROUP_CAPS.structure);
   const shortVol    = Math.min(sVol,    GROUP_CAPS.volume);
   const shortPAction= Math.min(sPA,     GROUP_CAPS.priceAction);
-  const shortGroupsOk = [shortTrend, shortMom, shortStruct, shortVol, shortPAction].filter(g => g > 0).length >= 3;
+  const shortGroups = [shortTrend, shortMom, shortStruct, shortVol, shortPAction].filter(g => g > 0).length;
   let   shortScore  = 40 + shortTrend + shortMom + shortStruct + shortVol + shortPAction + sPenalties;
 
   // ── BUILD SIGNALS ─────────────────────────────────────────────
@@ -530,7 +542,12 @@ export function generateSignals(
   );
 
   // ── LONG signal ──────────────────────────────────────────────
-  if (longScore >= effectiveMinScore && longGroupsOk && longScore > shortScore && longIntradayOk) {
+  // v2.1 §1.5 tier: A = 65+/≥3 groups (1% risk) | B = 55-64/≥2 groups (0.5% risk)
+  const longTier: 'A' | 'B' | null =
+    longScore >= effectiveMinScore && longGroups >= 3 ? 'A'
+    : longScore >= MIN_SCORE_TIER_B && longGroups >= 2 ? 'B'
+    : null;
+  if (longTier && longScore > shortScore && longIntradayOk) {
     const sl   = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
                : longSR  ? Math.min(longSR.price * 0.995, longEntry - slBuffer)
                : longEntry - slBuffer;
@@ -559,11 +576,17 @@ export function generateSignals(
       signalPrice: price,
       regime: regime ?? 'ranging',
       strategy: 'A',
+      tier: longTier,
     });
+    if (longTier === 'B') longReasons.push('🅱 B級輕倉訊號（55-64分）— 建議風險 0.5%');
   }
 
   // ── SHORT signal ─────────────────────────────────────────────
-  if (shortScore >= effectiveMinScore && shortGroupsOk && shortScore > longScore && shortIntradayOk) {
+  const shortTier: 'A' | 'B' | null =
+    shortScore >= effectiveMinScore && shortGroups >= 3 ? 'A'
+    : shortScore >= MIN_SCORE_TIER_B && shortGroups >= 2 ? 'B'
+    : null;
+  if (shortTier && shortScore > longScore && shortIntradayOk) {
     const sl   = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)
                : shortSR ? Math.max(shortSR.price * 1.005, shortEntry + slBuffer)
                : shortEntry + slBuffer;
@@ -590,7 +613,9 @@ export function generateSignals(
       signalPrice: price,
       regime: regime ?? 'ranging',
       strategy: 'A',
+      tier: shortTier,
     });
+    if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（55-64分）— 建議風險 0.5%');
   }
 
   return signals;
@@ -629,11 +654,12 @@ export function generateMeanReversionSignals(
   const patterns = detectCandlePatterns(candles);
   const signals: TradingSignal[] = [];
 
-  // ── LONG: BB lower touch + RSI crosses above 30 ─────────────
-  const rsiCrossAbove30 = prevInd.rsi < 30 && ind.rsi >= 30;
-  const atBBLower       = price <= bb.lower * 1.002;
+  // ── LONG: BB lower touch + RSI crosses above 35 ─────────────
+  // v2.1 §1.6: RSI threshold 30→35; band touch by candle LOW (not close)
+  const rsiCrossAbove35 = prevInd.rsi < 35 && ind.rsi >= 35;
+  const atBBLower       = cur.low <= bb.lower * 1.002;
 
-  if (rsiCrossAbove30 && atBBLower) {
+  if (rsiCrossAbove35 && atBBLower) {
     const entry = price;
     const tp1   = bb.middle;
 
@@ -649,8 +675,8 @@ export function generateMeanReversionSignals(
       let score = 10;
       const reasons: string[] = [
         '策略B: 均值回歸做多',
-        `RSI 回升穿越30（${prevInd.rsi.toFixed(1)} → ${ind.rsi.toFixed(1)}）`,
-        `觸及布林下軌 $${bb.lower.toFixed(4)}`,
+        `RSI 回升穿越35（${prevInd.rsi.toFixed(1)} → ${ind.rsi.toFixed(1)}）`,
+        `低點觸及布林下軌 $${bb.lower.toFixed(4)}`,
         `止盈目標：布林中軌 $${bb.middle.toFixed(4)}`,
       ];
 
@@ -673,11 +699,12 @@ export function generateMeanReversionSignals(
     }
   }
 
-  // ── SHORT: BB upper touch + RSI crosses below 70 ────────────
-  const rsiCrossBelow70 = prevInd.rsi > 70 && ind.rsi <= 70;
-  const atBBUpper       = price >= bb.upper * 0.998;
+  // ── SHORT: BB upper touch + RSI crosses below 65 ────────────
+  // v2.1 §1.6: RSI threshold 70→65; band touch by candle HIGH (not close)
+  const rsiCrossBelow65 = prevInd.rsi > 65 && ind.rsi <= 65;
+  const atBBUpper       = cur.high >= bb.upper * 0.998;
 
-  if (rsiCrossBelow70 && atBBUpper) {
+  if (rsiCrossBelow65 && atBBUpper) {
     const entry = price;
     const tp1   = bb.middle;
 
@@ -693,8 +720,8 @@ export function generateMeanReversionSignals(
       let score = 10;
       const reasons: string[] = [
         '策略B: 均值回歸做空',
-        `RSI 回落穿越70（${prevInd.rsi.toFixed(1)} → ${ind.rsi.toFixed(1)}）`,
-        `觸及布林上軌 $${bb.upper.toFixed(4)}`,
+        `RSI 回落穿越65（${prevInd.rsi.toFixed(1)} → ${ind.rsi.toFixed(1)}）`,
+        `高點觸及布林上軌 $${bb.upper.toFixed(4)}`,
         `止盈目標：布林中軌 $${bb.middle.toFixed(4)}`,
       ];
 

@@ -926,6 +926,9 @@ export default function TradesPage() {
                       {trade.symbol.replace('USDT', '/USDT')}
                     </span>
                     <span className="text-[#606080] text-xs">{trade.timeframe}</span>
+                    {trade.tier === 'B' && (
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 border border-blue-500/30">🅱 輕倉 0.5%</span>
+                    )}
                     {(isPending || isWaiting) && (
                       <span className="text-xs text-[#404060]">{fmtDuration(now - trade.openedAt)}</span>
                     )}

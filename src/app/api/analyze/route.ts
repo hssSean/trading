@@ -30,8 +30,12 @@ const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older t
 const WAITING_EXPIRY_HOURS = 8;              // cancel unfilled limit orders after 8h
 
 // Per-strategy threshold: Strategy B uses a 0-19 scoring scale; Strategy A uses 0-100.
+// v2.1 §1.5: tiered Strategy-A signals (A=65+/B=55+) are pre-gated inside
+// generateSignals — any signal carrying a tier already qualifies.
 function isStrongEnough(s: TradingSignal): boolean {
-  return s.strategy === 'B' ? s.score >= STRONG_THRESHOLD_B : s.score >= STRONG_THRESHOLD;
+  if (s.strategy === 'B') return s.score >= STRONG_THRESHOLD_B;
+  if (s.tier) return true;
+  return s.score >= STRONG_THRESHOLD;
 }
 
 let _redis: Redis | null = null;
@@ -910,15 +914,21 @@ async function cacheBreaker(r: import('@upstash/redis').Redis | null, profileId:
 // ── §2.3 BTC regime (fetched once per cron run) ───────────────
 interface BtcRegimeState {
   regime: 'bullish' | 'bearish' | 'chaotic';
-  longPaused:  boolean; // BTC 1H dropped >1.5% → pause altcoin LONG signals 4h
-  shortPaused: boolean; // BTC 1H pumped >1.5% → pause altcoin SHORT signals 4h
+  longPaused:  boolean; // BTC 1H abnormal drop → pause altcoin LONG signals 2h
+  shortPaused: boolean; // BTC 1H abnormal pump → pause altcoin SHORT signals 2h
+  movePct?: number;     // BTC 1H 4-candle cumulative move (diagnostics)
+  moveThresholdPct?: number; // trigger threshold = 2.5 × ATR(14,1H) as % (diagnostics)
 }
+// In-memory pause fallback when Redis is absent (lost on cold start — acceptable)
+const memBtcPause = { long: 0, short: 0 };
+const BTC_PAUSE_MS = 2 * 3600 * 1000; // v2.1 §1.1: pause 2h (was 4h)
+
 async function fetchBtcRegime(): Promise<BtcRegimeState> {
   const state: BtcRegimeState = { regime: 'chaotic', longPaused: false, shortPaused: false };
   try {
     const [btc4h, btc1h] = await Promise.all([
       fetchCandles('BTCUSDT', '4h', 250),
-      fetchCandles('BTCUSDT', '1h', 10),
+      fetchCandles('BTCUSDT', '1h', 20), // 20 bars → enough for ATR(14)
     ]);
     const btcInd = computeIndicators(btc4h);
     const btcClose = btc4h[btc4h.length - 1].close;
@@ -928,10 +938,46 @@ async function fetchBtcRegime(): Promise<BtcRegimeState> {
       if (ema50 > ema200 && btcClose > ema50)      state.regime = 'bullish';
       else if (ema50 < ema200 && btcClose < ema50) state.regime = 'bearish';
     }
+
+    // v2.1 §1.1: fixed ±1.5% trigger → 2.5×ATR(14,1H) relative threshold.
+    // Fixed 1.5% fired constantly in crypto vol; ATR-relative only flags ABNORMAL moves.
     const last4 = btc1h.slice(-4);
     const btcChange = (last4[last4.length - 1].close - last4[0].close) / last4[0].close;
-    if (btcChange < -0.015) state.longPaused  = true;
-    if (btcChange >  0.015) state.shortPaused = true;
+    let atr1h = 0;
+    for (let i = Math.max(1, btc1h.length - 14); i < btc1h.length; i++) {
+      const h = btc1h[i].high, l = btc1h[i].low, pc = btc1h[i - 1].close;
+      atr1h += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+    }
+    atr1h /= Math.min(14, btc1h.length - 1);
+    const lastPx    = btc1h[btc1h.length - 1].close;
+    const threshold = lastPx > 0 ? (2.5 * atr1h) / lastPx : 0.0375; // fallback ≈ legacy behaviour
+    state.movePct          = parseFloat((btcChange * 100).toFixed(2));
+    state.moveThresholdPct = parseFloat((threshold * 100).toFixed(2));
+
+    const r = getRedis();
+    const now = Date.now();
+    if (btcChange < -threshold) {
+      state.longPaused = true;
+      memBtcPause.long = now;
+      if (r) { try { await r.set('btc_pause:LONG', `${state.movePct}%`, { ex: BTC_PAUSE_MS / 1000 }); } catch { /* mem fallback holds */ } }
+    }
+    if (btcChange > threshold) {
+      state.shortPaused = true;
+      memBtcPause.short = now;
+      if (r) { try { await r.set('btc_pause:SHORT', `${state.movePct}%`, { ex: BTC_PAUSE_MS / 1000 }); } catch { /* mem fallback holds */ } }
+    }
+    // Pause persists 2h from the trigger even after the move rolls out of the window
+    if (!state.longPaused || !state.shortPaused) {
+      if (r) {
+        try {
+          const [pl, ps] = await Promise.all([r.get('btc_pause:LONG'), r.get('btc_pause:SHORT')]);
+          if (pl) state.longPaused  = true;
+          if (ps) state.shortPaused = true;
+        } catch { /* fall through to memory */ }
+      }
+      if (now - memBtcPause.long  < BTC_PAUSE_MS) state.longPaused  = true;
+      if (now - memBtcPause.short < BTC_PAUSE_MS) state.shortPaused = true;
+    }
   } catch { /* use defaults */ }
   return state;
 }
@@ -1021,9 +1067,23 @@ export async function GET(req: NextRequest) {
   }
   const results: ScanResult[] = [];
   const notified: string[] = [];
+  // v2.1 §0: reject funnel — one record per candidate signal, sent or not
+  const funnelEntries: Array<Record<string, unknown>> = [];
 
   // §2.3 BTC regime — fetch once, apply to all altcoin signals
   const btcState = await fetchBtcRegime();
+
+  // v2.1 §1.2: ADX hysteresis state — one hash for all symbols (1 read/scan).
+  // Cross above 23 → trending until below 18; below 18 → ranging until above 23.
+  // 18-23 without prior state (fresh symbol) = transitional (no signals).
+  let adxStates: Record<string, string> = {};
+  {
+    const rAdx = getRedis();
+    if (rAdx) {
+      try { adxStates = (await rAdx.hgetall<Record<string, string>>('adx_states')) ?? {}; } catch { /* empty */ }
+    }
+  }
+  const adxStateChanges: Record<string, string> = {};
 
   // §4.4 Circuit breaker — check once per cron run
   const breaker = profileId ? await checkCircuitBreaker(profileId) : { triggered: false };
@@ -1049,8 +1109,9 @@ export async function GET(req: NextRequest) {
       const candleCache = new Map<string, Candle[]>();
 
       // ── Regime determination from 4H ADX (once per symbol) ─────
-      // ADX>25 → trending (Strategy A), ADX<20 → ranging (Strategy B),
-      // 20-25 → transitional (no new signals).
+      // v2.1 §1.2 hysteresis: ADX ≥23 → trending (until ≤18); ≤18 → ranging
+      // (until ≥23); 18-23 holds the previous state — transitional only when
+      // a symbol has no prior state (initialization).
       // When 4H fetch fails, regimeDetermined stays false → fallback to Strategy A.
       let symbolRegime: Regime = 'ranging';
       let symbolAdx    = NaN;
@@ -1063,9 +1124,17 @@ export async function GET(req: NextRequest) {
         symbolAdx = fourHInd.adx ?? NaN;
         if (!isNaN(symbolAdx)) {
           regimeDetermined = true;
-          if (symbolAdx > 25)      symbolRegime = 'trending';
-          else if (symbolAdx < 20) symbolRegime = 'ranging';
-          else                     symbolRegime = 'transitional';
+          if (symbolAdx >= 23)      symbolRegime = 'trending';
+          else if (symbolAdx <= 18) symbolRegime = 'ranging';
+          else {
+            const prev = adxStates[symbol];
+            symbolRegime = prev === 'trending' || prev === 'ranging' ? (prev as Regime) : 'transitional';
+          }
+          // Record state transitions (batched into one hset after the loop)
+          if ((symbolRegime === 'trending' || symbolRegime === 'ranging') && adxStates[symbol] !== symbolRegime) {
+            adxStateChanges[symbol] = symbolRegime;
+            adxStates[symbol]       = symbolRegime;
+          }
         }
       } catch { /* keep 'ranging' / regimeDetermined=false — Strategy A fallback */ }
 
@@ -1183,11 +1252,14 @@ export async function GET(req: NextRequest) {
       unified.forEach(s => {
         s.fundingRate = symbolFundingRate;
         s.confidence  = computeConfidence(s, symbolAdx, symbolFundingRate, agreeTFs);
-        s.suggestedRiskPct = suggestedRiskPct;
+        // v2.1 §2: tier B = half risk (0.5%) and leverage ≤5x regardless of ATR percentile
+        const tierRisk = s.tier === 'B' ? 0.5 : suggestedRiskPct;
+        s.suggestedRiskPct = tierRisk;
         const slDist = s.entry > 0 ? Math.abs(s.entry - s.stopLoss) / s.entry : 0;
-        s.suggestedLeverage = slDist > 0
-          ? Math.min(Math.round((suggestedRiskPct / 100 / slDist) * 10) / 10, 10)
+        const lev = slDist > 0
+          ? Math.min(Math.round((tierRisk / 100 / slDist) * 10) / 10, 10)
           : 1;
+        s.suggestedLeverage = s.tier === 'B' ? Math.min(lev, 5) : lev;
       });
 
       // Read lock from Redis (persistent across cold starts)
@@ -1200,54 +1272,57 @@ export async function GET(req: NextRequest) {
       const onCooldown = !!last && !locked && (now - last.sentAt) < COOLDOWN_MS;
 
       let skipReason: string | undefined;
+      let skipKey:    string | undefined; // v2.1 §0: machine-readable gate id for the reject funnel
 
       // Phase 6: event filter (global; checked before per-symbol risk gates)
       if (eventFilter.active)
-        skipReason = eventFilter.reason ?? '事件過濾中，暫停新訊號';
+        { skipKey = 'event_filter';   skipReason = eventFilter.reason ?? '事件過濾中，暫停新訊號'; }
       // §4.4 Circuit breaker (global; set once before loop, checked per signal)
       else if (breaker.triggered)
-        skipReason = `熔斷 — ${breaker.reason}`;
+        { skipKey = 'circuit_breaker'; skipReason = `熔斷 — ${breaker.reason}`; }
       else if (totalOpenRisk >= MAX_TOTAL_RISK_PCT)
-        skipReason = `跳過 — 總持倉風險 ${totalOpenRisk.toFixed(1)}% 已達上限 ${MAX_TOTAL_RISK_PCT}%`;
+        { skipKey = 'total_risk_cap'; skipReason = `跳過 — 總持倉風險 ${totalOpenRisk.toFixed(1)}% 已達上限 ${MAX_TOTAL_RISK_PCT}%`; }
       else if (locked)
-        skipReason = `跳過 — 持倉中 (${last?.direction})`;
+        { skipKey = 'locked';         skipReason = `跳過 — 持倉中 (${last?.direction})`; }
       else if (sameCandle)
-        skipReason = `跳過 — 同 4h 蠟燭 (${topStrong?.direction})`;
+        { skipKey = 'same_candle';    skipReason = `跳過 — 同 4h 蠟燭 (${topStrong?.direction})`; }
       else if (onCooldown && last)
-        skipReason = `跳過 — 冷卻中 (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min)`;
+        { skipKey = 'cooldown';       skipReason = `跳過 — 冷卻中 (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min)`; }
       else if (topStrong && !confluenceMet)
-        skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向，4H bias: ${entryTfBias ?? '中性'})`;
+        { skipKey = 'confluence';     skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向，4H bias: ${entryTfBias ?? '中性'})`; }
       else if (topStrong && !entrySignal)
-        skipReason = `跳過 — 進場時區 (${entryTf}) 無合格信號（最高 ${topStrong.score}分@${topStrong.timeframe}，4H bias: ${entryTfBias ?? '中性'}）`;
+        { skipKey = 'no_entry_tf';    skipReason = `跳過 — 進場時區 (${entryTf}) 無合格信號（最高 ${topStrong.score}分@${topStrong.timeframe}，4H bias: ${entryTfBias ?? '中性'}）`; }
       else if (entrySignal) {
         const isLargeCap = symbol === 'BTCUSDT' || symbol === 'ETHUSDT';
 
         // §2.3 BTC regime filter (altcoins only)
         if (!isLargeCap && entrySignal.strategy === 'A') {
           if (btcState.regime === 'bullish' && entrySignal.direction === 'SHORT')
-            skipReason = `BTC 大盤偏多 — 跳過山寨做空趨勢單 (${symbol})`;
+            { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏多 — 跳過山寨做空趨勢單 (${symbol})`; }
           else if (btcState.regime === 'bearish' && entrySignal.direction === 'LONG')
-            skipReason = `BTC 大盤偏空 — 跳過山寨做多趨勢單 (${symbol})`;
+            { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏空 — 跳過山寨做多趨勢單 (${symbol})`; }
           else if (btcState.regime === 'chaotic') {
-            // §4.2 lists "BTC 混沌區 -10" as a deduction — apply the penalty and
-            // re-check the gate instead of hard-blocking every altcoin trend trade.
-            entrySignal.score -= 10;
-            entrySignal.reasons.push('⚠ BTC 大盤混沌 −10分');
-            if (entrySignal.score < STRONG_THRESHOLD)
-              skipReason = `BTC 混沌 — 扣分後 ${entrySignal.score} 分未達 ${STRONG_THRESHOLD} (${symbol})`;
+            // v2.1 §1.3: chaos downgrades instead of blocking — tier B,
+            // risk 0.5%, confidence -10, leverage ≤5x. Counter-trend vs a
+            // CLEAR BTC direction (branches above) is still hard-blocked.
+            entrySignal.tier               = 'B';
+            entrySignal.suggestedRiskPct   = 0.5;
+            entrySignal.suggestedLeverage  = Math.min(entrySignal.suggestedLeverage ?? 5, 5);
+            entrySignal.confidence         = Math.max(0, (entrySignal.confidence ?? 50) - 10);
+            entrySignal.reasons.push('⚠ BTC 混沌區 — 降級 B 級輕倉（風險 0.5%、槓桿 ≤5x）');
           }
         }
         if (!skipReason && !isLargeCap) {
           if (entrySignal.direction === 'LONG'  && btcState.longPaused)
-            skipReason = `BTC 1H 急跌 >1.5% — ${symbol} 做多訊號暫停`;
+            { skipKey = 'btc_pause'; skipReason = `BTC 1H 異常急跌（${btcState.movePct ?? '?'}%，門檻 ±${btcState.moveThresholdPct ?? '?'}%）— ${symbol} 做多暫停 2h`; }
           else if (entrySignal.direction === 'SHORT' && btcState.shortPaused)
-            skipReason = `BTC 1H 急漲 >1.5% — ${symbol} 做空訊號暫停`;
+            { skipKey = 'btc_pause'; skipReason = `BTC 1H 異常急漲（${btcState.movePct ?? '?'}%，門檻 ±${btcState.moveThresholdPct ?? '?'}%）— ${symbol} 做空暫停 2h`; }
         }
 
         // §4.3 Same-direction risk cap
         if (!skipReason && profileId) {
           const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol);
-          if (sdCheck.block) skipReason = `跳過 — ${sdCheck.reason}`;
+          if (sdCheck.block) { skipKey = 'same_dir_cap'; skipReason = `跳過 — ${sdCheck.reason}`; }
         }
 
         // Hard-stop duplicate check
@@ -1262,8 +1337,9 @@ export async function GET(req: NextRequest) {
                 .select('id', { count: 'exact', head: true })
                 .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('closed_at', null);
               if (c !== null && c > 0)
-                skipReason = `跳過 — 同幣種已有持倉 (${symbol})`;
+                { skipKey = 'has_open_position'; skipReason = `跳過 — 同幣種已有持倉 (${symbol})`; }
             } catch (e) {
+              skipKey = 'dup_check_error';
               skipReason = `跳過 — 重複檢查失敗 (${String(e).slice(0, 80)})`;
               console.error(`[analyze] hard-stop check threw for ${symbol}:`, String(e));
             }
@@ -1320,6 +1396,7 @@ export async function GET(req: NextRequest) {
                 funding_rate:        entrySignal.fundingRate ?? null,
                 suggested_risk_pct:  entrySignal.suggestedRiskPct ?? null,
                 suggested_leverage:  entrySignal.suggestedLeverage ?? null,
+                tier:                entrySignal.tier ?? 'A',
               };
 
               const ir = await admin.from('trades').insert(insertData);
@@ -1331,17 +1408,30 @@ export async function GET(req: NextRequest) {
                 // Treat as "already exists": don't set lock here; the winning instance will.
                 console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505) — another cron won the race`);
               } else if (ir.error.code === '42703') {
-                // New columns (status, signal_price, strategy, regime, confidence, funding_rate)
-                // may not yet be migrated — retry with only the pre-migration base columns.
+                // Two-stage fallback so a single missing NEW column doesn't strip
+                // columns that DO exist (status/signal_price own the limit-order flow).
+                // Stage 1: drop only 'tier' (newest, v2.1); Stage 2: pre-migration base.
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, suggested_risk_pct: _srp, suggested_leverage: _slev, ...baseData } = insertData;
-                const ir2 = await admin.from('trades').insert(baseData);
-                if (!ir2.error) {
+                const { tier: _tier1, ...noTierData } = insertData;
+                const irT = await admin.from('trades').insert(noTierData);
+                if (!irT.error) {
                   insertOk = true;
-                } else if (ir2.error.code === '23505') {
-                  console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505/fallback) — another cron won the race`);
+                  console.log(`[analyze] insert ok without 'tier' for ${entrySignal.symbol} — run: ALTER TABLE trades ADD COLUMN tier TEXT DEFAULT 'A'`);
+                } else if (irT.error.code === '23505') {
+                  console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505/no-tier) — another cron won the race`);
+                } else if (irT.error.code === '42703') {
+                  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                  const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, suggested_risk_pct: _srp, suggested_leverage: _slev, tier: _tier, ...baseData } = insertData;
+                  const ir2 = await admin.from('trades').insert(baseData);
+                  if (!ir2.error) {
+                    insertOk = true;
+                  } else if (ir2.error.code === '23505') {
+                    console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505/fallback) — another cron won the race`);
+                  } else {
+                    console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
+                  }
                 } else {
-                  console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir2.error.code}] ${ir2.error.message}`);
+                  console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${irT.error.code}] ${irT.error.message}`);
                 }
               } else {
                 console.error(`[analyze] trade insert failed for ${entrySignal.symbol}: [${ir.error.code}] ${ir.error.message}`);
@@ -1382,11 +1472,12 @@ export async function GET(req: NextRequest) {
             lineError = error;
           }
           if (profileId) {
-            const edir = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
-            const esym = entrySignal.symbol.replace('USDT', '/USDT');
+            const edir  = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
+            const esym  = entrySignal.symbol.replace('USDT', '/USDT');
+            const eTier = entrySignal.tier === 'B' ? ' 🅱輕倉' : '';
             await sendWebPushToUser(profileId, {
-              title: `${edir} ${esym} 交易信號`,
-              body: `${isLimitOrder ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分`,
+              title: `${edir} ${esym} 交易信號${eTier}`,
+              body: `${isLimitOrder ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分${entrySignal.tier === 'B' ? ' ｜ 風險0.5%' : ''}`,
               tag: `signal-${entrySignal.id}`,
             });
           }
@@ -1414,6 +1505,42 @@ export async function GET(req: NextRequest) {
             }
           }
         }
+      }
+
+      // ── v2.1 §0: reject funnel — log every candidate regardless of outcome ──
+      // Candidate = any qualifying signal existed OR raw score reached tier-B floor.
+      if (topStrong || rawTopScore >= 55) {
+        const signalSent = notified.includes(symbol);
+        const rejectedAt = signalSent ? null
+          : skipKey            ? skipKey
+          : !topStrong         ? 'score_gate'
+          : !profileId         ? 'no_profile'
+          : 'insert_failed';
+        funnelEntries.push({
+          at: Date.now(),
+          symbol,
+          strategy:  topStrong?.strategy ?? 'A',
+          direction: topStrong?.direction ?? null,
+          rawScore:  Math.max(rawTopScore, topStrong?.score ?? 0),
+          tier:      entrySignal?.tier ?? topStrong?.tier ?? null,
+          rejectedAt,
+          rejectDetail: skipReason
+            ?? (rejectedAt === 'score_gate'    ? `原始分 ${rawTopScore} 未達門檻或組數不足`
+              : rejectedAt === 'no_profile'    ? 'profileId 未解析，無法寫入 DB'
+              : rejectedAt === 'insert_failed' ? 'DB 寫入失敗（見 Vercel logs）'
+              : null),
+          filters: {
+            adx4h:          isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(1)),
+            regime:         symbolRegime,
+            btcRegime:      btcState.regime,
+            btcMovePct:     btcState.movePct ?? null,
+            btcPausedLong:  btcState.longPaused,
+            btcPausedShort: btcState.shortPaused,
+            agreeTFs,
+            entryTfBias,
+            totalOpenRisk,
+          },
+        });
       }
 
       results.push({
@@ -1452,6 +1579,29 @@ export async function GET(req: NextRequest) {
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
   const monitor = await monitorActiveTrades(lineToken, lineUserId, profileId)
     .catch(() => ({ monitored: 0, closed: 0, filled: 0, cancelled: 0 }));
+
+  // v2.1 §0: flush reject-funnel entries (single batched lpush per scan)
+  if (funnelEntries.length > 0) {
+    const rf = getRedis();
+    if (rf) {
+      try {
+        await rf.lpush('reject_funnel', ...funnelEntries.map(e => JSON.stringify(e)));
+        await rf.ltrim('reject_funnel', 0, 1499);          // cap memory
+        await rf.expire('reject_funnel', 14 * 24 * 3600);  // 14-day window
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  // v2.1 §1.2: persist ADX hysteresis state transitions (single hset per scan)
+  if (Object.keys(adxStateChanges).length > 0) {
+    const rA = getRedis();
+    if (rA) {
+      try {
+        await rA.hset('adx_states', adxStateChanges);
+        await rA.expire('adx_states', 14 * 24 * 3600);
+      } catch { /* non-fatal */ }
+    }
+  }
 
   // Persist scan summary so /api/scan-status (and the home-page panel) can show
   // why each coin was or wasn't signalled — spec §6 requires reject logs to be kept.
