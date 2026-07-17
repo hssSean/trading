@@ -104,6 +104,10 @@ export default function SettingsPage() {
   const [resetMsg,    setResetMsg]    = useState('');
   const [fullResetting, setFullResetting] = useState(false);
   const [fullResetMsg,  setFullResetMsg]  = useState('');
+  // Local string state so the field can be cleared while typing — committing
+  // parseFloat directly made empty input snap back to the previous value
+  // (the "stuck 1" bug: could never type 20 over a cleared field).
+  const [acctInput, setAcctInput] = useState<string | null>(null);
 
   // ── Web Push state ─────────────────────────────────────────────
   type PushStatus = 'unknown' | 'unsupported' | 'ios-hint' | 'denied' | 'enabled' | 'disabled' | 'loading';
@@ -634,26 +638,52 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* Account Size */}
+        {/* Account Size + per-trade risk */}
         <Section title="💰 帳戶資金（倉位計算用）">
           <p className="text-[#606080] text-xs mb-2 leading-5">
-            設定後，每張信號卡會根據 <span className="text-[#F0B90B]">1% 風險原則</span> 自動計算建議倉位大小
+            設定後，每張信號會根據 <span className="text-[#F0B90B]">{settings.riskPctPerTrade ?? 1}% 風險原則</span> 自動計算建議倉位、本金與槓桿
           </p>
           <div className="flex items-center gap-2">
             <input
               type="number"
-              value={settings.accountSize}
+              inputMode="decimal"
+              value={acctInput ?? String(settings.accountSize)}
               onChange={(e) => {
+                setAcctInput(e.target.value);
                 const v = parseFloat(e.target.value);
                 if (!isNaN(v) && v > 0) updateSettings({ accountSize: v });
               }}
+              onBlur={() => setAcctInput(null)} // snap display back to committed value
               placeholder="1000"
               className="input-field flex-1"
             />
             <span className="text-[#606080] text-sm shrink-0">USDT</span>
           </div>
+
+          <p className="text-[#606080] text-xs mt-3 mb-1.5">每筆風險比例（A 級單；B 級輕倉自動減半）</p>
+          <div className="flex gap-1.5 flex-wrap">
+            {[0.5, 1, 2, 3].map(p => (
+              <button
+                key={p}
+                onClick={() => updateSettings({ riskPctPerTrade: p })}
+                className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition-colors ${
+                  (settings.riskPctPerTrade ?? 1) === p
+                    ? p >= 2 ? 'bg-orange-500/20 border-orange-500/50 text-orange-400'
+                    :          'bg-[#F0B90B]/20 border-[#F0B90B]/50 text-[#F0B90B]'
+                    : 'border-[#1E1E2E] text-[#606080]'
+                }`}
+              >
+                {p}%
+              </button>
+            ))}
+          </div>
+          {(settings.riskPctPerTrade ?? 1) >= 2 && (
+            <p className="text-orange-400/80 text-xs mt-1.5">
+              ⚠ 高風險模式：連續虧損時資金回撤會很快，小資金滾倉建議搭配嚴格停損紀律
+            </p>
+          )}
           <p className="text-[#404060] text-xs mt-2">
-            每筆最大虧損 = {(settings.accountSize * 0.01).toFixed(0)} USDT（帳戶 1%）
+            每筆最大虧損 = {(settings.accountSize * (settings.riskPctPerTrade ?? 1) / 100).toFixed(2)} USDT（帳戶 {settings.riskPctPerTrade ?? 1}%）
           </p>
         </Section>
 

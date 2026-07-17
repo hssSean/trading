@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   vibrationEnabled: true,
   soundEnabled: false,
   accountSize: 1000,
+  riskPctPerTrade: 1,
 };
 
 // ── Ephemeral alert shown when auto-close fires ───────────────

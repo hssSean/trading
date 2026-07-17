@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { TradingSignal } from '@/types';
 import { useStore } from '@/store/useStore';
+import { calcPositionPlan } from '@/lib/position';
 import { formatDistanceToNow } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 
@@ -19,12 +20,12 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   const hasTrade   = useStore((s) => s.trades.some((t) => t.symbol === signal.symbol && !t.result));
   const justAdded  = useStore((s) => s.trades.some((t) => t.signalId === signal.id));
   const accountSize = useStore((s) => s.settings.accountSize);
+  const riskPct     = useStore((s) => s.settings.riskPctPerTrade ?? 1);
   const [flash, setFlash] = useState(false);
 
-  // Position sizing: 1% risk rule
-  const stopDistPct   = Math.abs(signal.entry - signal.stopLoss) / signal.entry;
-  const riskUSDT      = accountSize * 0.01;
-  const positionUSDT  = stopDistPct > 0 ? Math.round(riskUSDT / stopDistPct) : 0;
+  // Position sizing: user risk% (tier B halved, leverage ≤5x)
+  const effRisk = riskPct * (signal.tier === 'B' ? 0.5 : 1);
+  const plan    = calcPositionPlan(accountSize, effRisk, signal.entry, signal.stopLoss, signal.tier === 'B' ? 5 : 10);
   const isHighVol     = signal.reasons.some((r) => r.startsWith('⚠ 高波動'));
   const sp            = signal.signalPrice ?? 0;
   const isLimit       = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
@@ -111,11 +112,19 @@ export function SignalCard({ signal, onClick, compact }: Props) {
       {/* ── Position size + volatility ── */}
       <div className="flex items-center gap-2 mb-2">
         <div className="flex-1 bg-[#1A1A26] rounded-xl px-3 py-2">
-          <p className="text-[#606080] text-[9px]">建議倉位（1% 風險）</p>
+          <p className="text-[#606080] text-[9px]">建議倉位（{effRisk}% 風險）</p>
           <p className="text-[#EAEAF4] font-bold text-xs mt-0.5">
-            {positionUSDT > 0 ? `$${positionUSDT.toLocaleString()} USDT` : '—'}
-            <span className="text-[#404060] font-normal ml-1">（虧損上限 ${riskUSDT.toFixed(0)}）</span>
+            {plan ? (
+              <>
+                {plan.positionUSDT} USDT
+                <span className="text-[#F0B90B] font-semibold ml-1">本金 {plan.marginUSDT}U ×{plan.leverage}倍</span>
+                <span className="text-[#404060] font-normal ml-1">虧損上限 {plan.riskUSDT}U</span>
+              </>
+            ) : '—'}
           </p>
+          {plan?.belowMinNotional && (
+            <p className="text-orange-400/80 text-[9px] mt-0.5">⚠ 低於交易所最低下單額 5U，可能無法開單</p>
+          )}
         </div>
         {isHighVol && (
           <span className="text-xs font-semibold px-2 py-1 rounded-xl bg-orange-500/20 text-orange-400 border border-orange-500/30 shrink-0">

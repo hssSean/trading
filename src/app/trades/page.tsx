@@ -3,6 +3,7 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useStore } from '@/store/useStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
 import { fetchCurrentPrice } from '@/api/binance';
+import { calcPositionPlan } from '@/lib/position';
 import { TradeResult } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
@@ -43,15 +44,6 @@ function unlockCoin(symbol: string) {
   fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': secret } }).catch(() => {});
 }
 
-function calcPositionSize(entry: number, sl: number, accountSize: number) {
-  const stopPct = Math.abs(entry - sl) / entry;
-  if (stopPct <= 0) return null;
-  const riskUSDT    = accountSize * 0.01;
-  const positionUSDT = riskUSDT / stopPct;
-  const coins        = positionUSDT / entry;
-  return { riskUSDT, positionUSDT, coins };
-}
-
 // R multiple: PnL measured in units of initial risk (entry→SL distance).
 // A -12% loss with a 12% stop is -1R — identical damage to a -1% loss with
 // a 1% stop when position-sized correctly. Raw % comparisons are misleading.
@@ -72,6 +64,7 @@ export default function TradesPage() {
   const trades          = useStore(s => s.trades);
   const coins           = useStore(s => s.coins);
   const accountSize     = useStore(s => s.settings.accountSize);
+  const riskPct         = useStore(s => s.settings.riskPctPerTrade ?? 1);
   const closeTrade      = useStore(s => s.closeTrade);
   const addManualTrade  = useStore(s => s.addManualTrade);
   const updateTrade     = useStore(s => s.updateTrade);
@@ -1094,28 +1087,36 @@ export default function TradesPage() {
                   </div>
                 )}
 
-                {/* Position sizing (1% risk rule) for pending trades */}
+                {/* Position sizing (user risk%, tier B halved) for pending trades */}
                 {isPending && (() => {
-                  const pos = calcPositionSize(trade.entry, trade.stopLoss, accountSize);
-                  if (!pos) return null;
+                  const effRisk = riskPct * (trade.tier === 'B' ? 0.5 : 1);
+                  const plan = calcPositionPlan(accountSize, effRisk, trade.entry, trade.stopLoss, trade.tier === 'B' ? 5 : 10);
+                  if (!plan) return null;
                   const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
                   return (
                     <div className="mb-2 bg-[#0D1020] border border-[#F0B90B]/15 rounded-xl px-3 py-2">
-                      <p className="text-[#6B5A20] text-[9px] font-bold uppercase tracking-widest mb-1.5">倉位計算（1% 風險）</p>
-                      <div className="grid grid-cols-3 gap-1">
-                        <div className="text-center">
-                          <p className="text-[#404060] text-[8px]">風險金額</p>
-                          <p className="text-[#F0B90B] text-xs font-bold">${pos.riskUSDT.toFixed(0)}</p>
-                        </div>
+                      <p className="text-[#6B5A20] text-[9px] font-bold uppercase tracking-widest mb-1.5">倉位計算（{effRisk}% 風險）</p>
+                      <div className="grid grid-cols-4 gap-1">
                         <div className="text-center">
                           <p className="text-[#404060] text-[8px]">建議倉位</p>
-                          <p className="text-[#EAEAF4] text-xs font-bold">${pos.positionUSDT.toFixed(0)}</p>
+                          <p className="text-[#EAEAF4] text-xs font-bold">{plan.positionUSDT}U</p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[#404060] text-[8px]">本金×槓桿</p>
+                          <p className="text-[#F0B90B] text-xs font-bold">{plan.marginUSDT}U×{plan.leverage}</p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[#404060] text-[8px]">止損虧損</p>
+                          <p className="text-[#A0A0C0] text-xs font-bold">{plan.riskUSDT}U</p>
                         </div>
                         <div className="text-center">
                           <p className="text-[#404060] text-[8px]">止損幅度</p>
                           <p className={`text-xs font-bold ${slPct > 5 ? 'text-red-400' : 'text-[#A0A0C0]'}`}>{slPct.toFixed(2)}%</p>
                         </div>
                       </div>
+                      {plan.belowMinNotional && (
+                        <p className="text-orange-400/80 text-[9px] mt-1">⚠ 低於交易所最低下單額 5U</p>
+                      )}
                     </div>
                   );
                 })()}

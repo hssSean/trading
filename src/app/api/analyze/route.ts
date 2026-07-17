@@ -6,6 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 import { sendWebPushToUser } from '@/lib/webpush';
+import { calcPositionPlan, formatPlanLine } from '@/lib/position';
 
 export const maxDuration = 60;
 
@@ -1186,6 +1187,10 @@ export async function GET(req: NextRequest) {
   // Resolved Supabase profile UUID — used for trade insert + Web Push subscription lookup.
   // Fallback order: (1) line_user_id column match, (2) SUPABASE_PROFILE_ID env var (direct override).
   let profileId = '';
+  // Account settings synced from the app (profiles.settings JSONB) — drives the
+  // position/margin/leverage line in notifications. Defaults match the store.
+  let acctSize    = 1000;
+  let acctRiskPct = 1;
   {
     const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
     const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -1195,18 +1200,29 @@ export async function GET(req: NextRequest) {
         const lineAdmin = mkLineAdmin(sbUrl, sbKey, {
           auth: { autoRefreshToken: false, persistSession: false },
         });
+        const applySettings = (s: unknown) => {
+          const st = s as { accountSize?: number; riskPctPerTrade?: number } | null;
+          if (st?.accountSize && st.accountSize > 0)         acctSize    = st.accountSize;
+          if (st?.riskPctPerTrade && st.riskPctPerTrade > 0) acctRiskPct = st.riskPctPerTrade;
+        };
         if (lineUserId) {
           const { data: lp } = await lineAdmin
-            .from('profiles').select('id, line_token')
+            .from('profiles').select('id, line_token, settings')
             .eq('line_user_id', lineUserId).maybeSingle();
           if (lp?.line_token) lineToken = lp.line_token;
           if (lp?.id) profileId = lp.id;
+          if (lp?.settings) applySettings(lp.settings);
         }
         // Direct-UUID override: set SUPABASE_PROFILE_ID in Vercel env vars to bypass
         // line_user_id lookup (useful when line_user_id column is null or mismatched).
         if (!profileId && process.env.SUPABASE_PROFILE_ID) {
           profileId = process.env.SUPABASE_PROFILE_ID;
           console.log('[analyze] profileId resolved via SUPABASE_PROFILE_ID env var');
+          try {
+            const { data: sp } = await lineAdmin
+              .from('profiles').select('settings').eq('id', profileId).maybeSingle();
+            if (sp?.settings) applySettings(sp.settings);
+          } catch { /* keep defaults */ }
         }
       } catch (e) {
         console.error('[analyze] profile lookup threw:', String(e));
@@ -1426,6 +1442,26 @@ export async function GET(req: NextRequest) {
       // Strategy B is single-TF by design (BB+RSI confirmation is its own confluence)
       const isStratBSignal = allSignals.some(s => s.strategy === 'B');
       const confluenceMet  = agreeTFs >= 2 || biasConfirmed || isStratBSignal;
+
+      // ⚡短線 channel: a 15m signal at normal tier thresholds whose direction
+      // matches the 4H bias becomes a scalp order when the entry TF (1h) has
+      // no qualifying signal. 15m already passes the intraday hard gates
+      // (candle-pattern confirmation + structure alignment); tight 15m stops
+      // give larger notional at the same risk — the "small account compounding"
+      // mechanic without raising risk per trade.
+      let isScalp = false;
+      if (!entrySignal && biasConfirmed) {
+        const scalpSig = strong.find(s =>
+          s.timeframe === '15m' &&
+          isStrongEnough(s) &&
+          s.direction === entryTfBias &&
+          s.strategy !== 'B');
+        if (scalpSig) {
+          entrySignal = scalpSig;
+          isScalp = true;
+          scalpSig.reasons.push('⚡ 短線單：15m 訊號 + 4H 順向確認，適合快進快出');
+        }
+      }
 
       // Entry-TF fallback: an exceptional intraday signal (≥ threshold+10) whose
       // direction matches the 4H bias may substitute when the entry TF itself
@@ -1686,9 +1722,15 @@ export async function GET(req: NextRequest) {
             const edir  = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
             const esym  = entrySignal.symbol.replace('USDT', '/USDT');
             const eTier = entrySignal.tier === 'B' ? ' 🅱輕倉' : '';
+            const eKind = isScalp ? ' ⚡短線' : '';
+            // Concrete order instructions: notional / margin / leverage at the
+            // user's synced account size (tier B = half risk, leverage ≤5x)
+            const effRisk = acctRiskPct * (entrySignal.tier === 'B' ? 0.5 : 1);
+            const plan = calcPositionPlan(acctSize, effRisk, entrySignal.entry, entrySignal.stopLoss, entrySignal.tier === 'B' ? 5 : 10);
+            const planLine = plan ? `\n${formatPlanLine(plan)}｜止損虧 ${plan.riskUSDT}U` : '';
             await sendWebPushToUser(profileId, {
-              title: `${edir} ${esym} 交易信號${eTier}`,
-              body: `${isLimitOrder ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分${entrySignal.tier === 'B' ? ' ｜ 風險0.5%' : ''}`,
+              title: `${edir} ${esym} 交易信號${eTier}${eKind}`,
+              body: `${isLimitOrder ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分${planLine}`,
               tag: `signal-${entrySignal.id}`,
             });
           }
@@ -1699,18 +1741,22 @@ export async function GET(req: NextRequest) {
             const dir     = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
             const sym     = entrySignal.symbol.replace('USDT', '/USDT');
             const tp2     = entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0];
+            const effRisk = acctRiskPct * (entrySignal.tier === 'B' ? 0.5 : 1);
+            const plan    = calcPositionPlan(acctSize, effRisk, entrySignal.entry, entrySignal.stopLoss, entrySignal.tier === 'B' ? 5 : 10);
+            const planTxt = plan ? `\n${formatPlanLine(plan)}｜止損虧 ${plan.riskUSDT}U` : '';
             const entryMsg =
-              `【✅ 市場入場】${sym}\n` +
+              `【✅ 市場入場】${sym}${isScalp ? '（⚡短線）' : ''}\n` +
               `${dir} 已進場\n` +
               `進場價：$${fmtPrice(entrySignal.entry)}\n` +
-              `TP1：$${fmtPrice(entrySignal.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(entrySignal.stopLoss)}`;
+              `TP1：$${fmtPrice(entrySignal.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(entrySignal.stopLoss)}` +
+              planTxt;
             if (lineToken && lineUserId) {
               await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: entryMsg }]);
             }
             if (profileId) {
               await sendWebPushToUser(profileId, {
-                title: `✅ 市場入場 ${sym}`,
-                body: `${dir} $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)}`,
+                title: `✅ 市場入場 ${sym}${isScalp ? ' ⚡短線' : ''}`,
+                body: `${dir} $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)}${plan ? ` ｜ ${formatPlanLine(plan)}` : ''}`,
                 tag: `entry-${entrySignal.id}`,
               });
             }
