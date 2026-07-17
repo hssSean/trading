@@ -52,6 +52,7 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     signalPrice: (r.signal_price as number | null) ?? undefined,
     filledAt:    (r.filled_at as number | null) ?? undefined,
     tier:        ((r.tier as string | null) as 'A' | 'B' | undefined) ?? undefined,
+    scoreBreakdown: (r.score_breakdown as TradeRecord['scoreBreakdown'] | null) ?? undefined,
   };
 }
 

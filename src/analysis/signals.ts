@@ -582,6 +582,12 @@ export function generateSignals(
       regime: regime ?? 'ranging',
       strategy: 'A',
       tier: longTier,
+      // penalties derived as residual so the breakdown always sums to the score
+      scoreBreakdown: {
+        trend: longTrend, momentum: longMom, structure: longStruct,
+        volume: longVol, priceAction: longPAction,
+        penalties: longScore - 40 - longTrend - longMom - longStruct - longVol - longPAction,
+      },
     });
     if (longTier === 'B') longReasons.push('🅱 B級輕倉訊號（55-64分）— 建議風險 0.5%');
   }
@@ -619,6 +625,11 @@ export function generateSignals(
       regime: regime ?? 'ranging',
       strategy: 'A',
       tier: shortTier,
+      scoreBreakdown: {
+        trend: shortTrend, momentum: shortMom, structure: shortStruct,
+        volume: shortVol, priceAction: shortPAction,
+        penalties: shortScore - 40 - shortTrend - shortMom - shortStruct - shortVol - shortPAction,
+      },
     });
     if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（55-64分）— 建議風險 0.5%');
   }

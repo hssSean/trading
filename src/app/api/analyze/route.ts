@@ -941,6 +941,150 @@ async function cacheBreaker(r: import('@upstash/redis').Redis | null, profileId:
   try { await r.set(`circuit_breaker:${profileId}`, reason, { ex: Math.max(secLeft, 60) }); } catch { /* best-effort */ }
 }
 
+// ── Shadow simulation of rejected signals ──────────────────────
+// Spec §4.5: a rule may only be loosened when funnel data proves the signals
+// it kills are net-positive. Every gate-rejected candidate that had concrete
+// entry/SL/TP levels becomes a "shadow trade" simulated against real candles;
+// /api/reject-funnel reports per-gate would-have-won/lost + net R.
+interface ShadowTrade {
+  id: string;
+  at: number;               // rejection time
+  symbol: string;
+  direction: string;
+  timeframe: string;
+  entry: number;
+  stopLoss: number;
+  tp1: number;
+  tp2: number;
+  score: number;
+  tier: string | null;
+  strategy: string;
+  rejectedAt: string;       // gate id from the funnel
+  signalPrice: number;
+  status: 'waiting' | 'active' | 'done';
+  filledAt?: number;
+  tp1Hit?: boolean;
+  result?: string;          // WIN_TP1 | WIN_TP2 | LOSS | EXPIRED | TIMEOUT
+  exitPrice?: number;
+  closedAt?: number;
+  lastCheckedAt: number;
+}
+
+// Gates where a full signal existed — worth simulating. score_gate has no levels;
+// locked/same_candle/cooldown duplicate live trades and would double-count.
+const SHADOW_GATES = new Set([
+  'confluence', 'no_entry_tf', 'btc_direction', 'btc_pause', 'loss_cooldown',
+  'same_dir_cap', 'total_risk_cap', 'circuit_breaker', 'event_filter', 'insert_failed',
+]);
+const SHADOW_MAX = 300; // hash size guard
+
+function simulateShadow(st: ShadowTrade, candles: Candle[], now: number): void {
+  const isLong = st.direction === 'LONG';
+  const waitMs   = WAITING_EXPIRY_HOURS * 3600 * 1000;
+  const activeMs = INTRADAY_CLOSE_HOURS * 3600 * 1000;
+
+  if (st.status === 'waiting') {
+    for (const c of candles) {
+      if (c.closeTime <= st.at || c.openTime > st.at + waitMs) continue;
+      const touched = isLong ? c.low <= st.entry : c.high >= st.entry;
+      if (touched) { st.status = 'active'; st.filledAt = Math.max(c.openTime, st.at); break; }
+    }
+    if (st.status === 'waiting') {
+      if (now - st.at > waitMs) { st.status = 'done'; st.result = 'EXPIRED'; st.closedAt = now; }
+      return;
+    }
+  }
+  if (st.status !== 'active' || !st.filledAt) return;
+
+  for (const c of candles) {
+    if (c.closeTime <= st.filledAt) continue;
+    const hitSL  = isLong ? c.low  <= st.stopLoss : c.high >= st.stopLoss;
+    const hitTP1 = isLong ? c.high >= st.tp1      : c.low  <= st.tp1;
+    const hitTP2 = isLong ? c.high >= st.tp2      : c.low  <= st.tp2;
+    if (st.tp1Hit) {
+      if (hitTP2) { st.status = 'done'; st.result = 'WIN_TP2'; st.exitPrice = st.tp2;      st.closedAt = c.closeTime; return; }
+      if (hitSL)  { st.status = 'done'; st.result = 'WIN_TP1'; st.exitPrice = st.stopLoss; st.closedAt = c.closeTime; return; }
+      continue;
+    }
+    if (hitTP2)      { st.status = 'done'; st.result = 'WIN_TP2'; st.exitPrice = st.tp2; st.closedAt = c.closeTime; return; }
+    else if (hitTP1) { st.tp1Hit = true; continue; } // TP1-before-SL same-candle rule (matches monitor)
+    else if (hitSL)  { st.status = 'done'; st.result = 'LOSS'; st.exitPrice = st.stopLoss; st.closedAt = c.closeTime; return; }
+  }
+  if (now - st.filledAt > activeMs) {
+    const lastC  = candles[candles.length - 1];
+    st.status    = 'done';
+    st.result    = st.tp1Hit ? 'WIN_TP1' : 'TIMEOUT';
+    st.exitPrice = st.tp1Hit ? st.tp1 : lastC?.close;
+    st.closedAt  = now;
+  }
+}
+
+async function processShadowTrades(newCandidates: ShadowTrade[]): Promise<void> {
+  const r = getRedis();
+  if (!r) return; // simulation needs persistence
+  try {
+    const raw = (await r.hgetall<Record<string, unknown>>('shadow_trades')) ?? {};
+    const shadows = new Map<string, ShadowTrade>();
+    for (const [id, v] of Object.entries(raw)) {
+      try {
+        const st = (typeof v === 'string' ? JSON.parse(v) : v) as ShadowTrade;
+        if (st && st.symbol && st.status) shadows.set(id, st);
+      } catch { /* drop malformed entry */ }
+    }
+
+    const writes: Record<string, string> = {};
+
+    // Merge new candidates — one live shadow per symbol+direction (a persistent
+    // reject would otherwise add a duplicate every 5-minute scan)
+    const liveKeys = new Set(
+      Array.from(shadows.values()).filter(s => s.status !== 'done').map(s => `${s.symbol}:${s.direction}`),
+    );
+    for (const c of newCandidates) {
+      if (shadows.size >= SHADOW_MAX) break;
+      const key = `${c.symbol}:${c.direction}`;
+      if (liveKeys.has(key)) continue;
+      liveKeys.add(key);
+      shadows.set(c.id, c);
+      writes[c.id] = JSON.stringify(c);
+    }
+
+    // Advance live shadows — one candle fetch per symbol, capped per run
+    const now  = Date.now();
+    const live = Array.from(shadows.values()).filter(s => s.status !== 'done');
+    const bySymbol = new Map<string, ShadowTrade[]>();
+    live.forEach(s => {
+      const arr = bySymbol.get(s.symbol) ?? [];
+      arr.push(s);
+      bySymbol.set(s.symbol, arr);
+    });
+
+    let fetches = 0;
+    for (const [symbol, group] of Array.from(bySymbol.entries())) {
+      if (fetches >= 8) break; // rest advance next cron (5 min later)
+      fetches++;
+      let candles: Candle[] = [];
+      try { candles = await fetchCandles(symbol, '1h', 96); } catch { continue; }
+      for (const st of group) {
+        simulateShadow(st, candles, now);
+        st.lastCheckedAt = now;
+        writes[st.id] = JSON.stringify(st);
+      }
+    }
+
+    // Prune done shadows past the 14-day analysis window
+    const toDelete: string[] = [];
+    for (const [id, st] of Array.from(shadows.entries())) {
+      if (st.status === 'done' && now - (st.closedAt ?? st.at) > 14 * 24 * 3600 * 1000) toDelete.push(id);
+    }
+
+    if (Object.keys(writes).length > 0) await r.hset('shadow_trades', writes);
+    if (toDelete.length > 0) await r.hdel('shadow_trades', ...toDelete);
+    await r.expire('shadow_trades', 14 * 24 * 3600);
+  } catch (e) {
+    console.error('[shadow] simulation failed:', String(e).slice(0, 200));
+  }
+}
+
 // ── §2.3 BTC regime (fetched once per cron run) ───────────────
 interface BtcRegimeState {
   regime: 'bullish' | 'bearish' | 'chaotic';
@@ -1099,6 +1243,8 @@ export async function GET(req: NextRequest) {
   const notified: string[] = [];
   // v2.1 §0: reject funnel — one record per candidate signal, sent or not
   const funnelEntries: Array<Record<string, unknown>> = [];
+  // Rejected candidates with concrete levels → simulated as shadow trades
+  const shadowCandidates: ShadowTrade[] = [];
 
   // §2.3 BTC regime — fetch once, apply to all altcoin signals
   const btcState = await fetchBtcRegime();
@@ -1437,6 +1583,7 @@ export async function GET(req: NextRequest) {
                 suggested_risk_pct:  entrySignal.suggestedRiskPct ?? null,
                 suggested_leverage:  entrySignal.suggestedLeverage ?? null,
                 tier:                entrySignal.tier ?? 'A',
+                score_breakdown:     entrySignal.scoreBreakdown ?? null,
               };
 
               // Missing-column detection: PostgREST returns PGRST204 ("Could not
@@ -1456,18 +1603,18 @@ export async function GET(req: NextRequest) {
               } else if (isMissingColumn(ir.error.code, ir.error.message)) {
                 // Two-stage fallback so a single missing NEW column doesn't strip
                 // columns that DO exist (status/signal_price own the limit-order flow).
-                // Stage 1: drop only 'tier' (newest, v2.1); Stage 2: pre-migration base.
+                // Stage 1: drop v2.1+ columns (tier, score_breakdown); Stage 2: pre-migration base.
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                const { tier: _tier1, ...noTierData } = insertData;
+                const { tier: _tier1, score_breakdown: _sb1, ...noTierData } = insertData;
                 const irT = await admin.from('trades').insert(noTierData);
                 if (!irT.error) {
                   insertOk = true;
-                  console.log(`[analyze] insert ok without 'tier' for ${entrySignal.symbol} — run: ALTER TABLE trades ADD COLUMN tier TEXT DEFAULT 'A'`);
+                  console.log(`[analyze] insert ok without v2.1 columns for ${entrySignal.symbol} — run: ALTER TABLE trades ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'A'; ALTER TABLE trades ADD COLUMN IF NOT EXISTS score_breakdown JSONB;`);
                 } else if (irT.error.code === '23505') {
                   console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505/no-tier) — another cron won the race`);
                 } else if (isMissingColumn(irT.error.code, irT.error.message)) {
                   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                  const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, suggested_risk_pct: _srp, suggested_leverage: _slev, tier: _tier, ...baseData } = insertData;
+                  const { status: _s, signal_price: _sp, strategy: _str, regime: _reg, confidence: _conf, funding_rate: _fr, suggested_risk_pct: _srp, suggested_leverage: _slev, tier: _tier, score_breakdown: _sb, ...baseData } = insertData;
                   const ir2 = await admin.from('trades').insert(baseData);
                   if (!ir2.error) {
                     insertOk = true;
@@ -1589,6 +1736,32 @@ export async function GET(req: NextRequest) {
             totalOpenRisk,
           },
         });
+
+        // Shadow candidate: gate-rejected with concrete levels → simulate outcome
+        const shadowSrc = entrySignal ?? topStrong;
+        if (rejectedAt && SHADOW_GATES.has(rejectedAt) && shadowSrc) {
+          const ssp = shadowSrc.signalPrice ?? 0;
+          const isLimit = ssp > 0 && Math.abs(shadowSrc.entry - ssp) / ssp > 0.003;
+          shadowCandidates.push({
+            id: `shdw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            at: Date.now(),
+            symbol,
+            direction: shadowSrc.direction,
+            timeframe: shadowSrc.timeframe,
+            entry: shadowSrc.entry,
+            stopLoss: shadowSrc.stopLoss,
+            tp1: shadowSrc.takeProfits[0],
+            tp2: shadowSrc.takeProfits[1] ?? shadowSrc.takeProfits[0],
+            score: shadowSrc.score,
+            tier: shadowSrc.tier ?? null,
+            strategy: shadowSrc.strategy ?? 'A',
+            rejectedAt,
+            signalPrice: ssp,
+            status: isLimit ? 'waiting' : 'active',
+            ...(isLimit ? {} : { filledAt: Date.now() }),
+            lastCheckedAt: Date.now(),
+          });
+        }
       }
 
       results.push({
@@ -1628,6 +1801,9 @@ export async function GET(req: NextRequest) {
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
   const monitor = await monitorActiveTrades(lineToken, lineUserId, profileId)
     .catch(() => ({ monitored: 0, closed: 0, filled: 0, cancelled: 0 }));
+
+  // Shadow simulation: merge new rejects, advance live ones against real candles
+  await processShadowTrades(shadowCandidates);
 
   // v2.1 §0: flush reject-funnel entries (single batched lpush per scan)
   if (funnelEntries.length > 0) {

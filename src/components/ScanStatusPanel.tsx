@@ -53,7 +53,13 @@ interface FunnelStats {
   total: number;
   sent: number;
   rejected: number;
-  reasons: Array<{ key: string; count: number; pctOfRejected: number }>;
+  reasons: Array<{
+    key: string;
+    count: number;
+    pctOfRejected: number;
+    // Simulated outcome of what this gate rejected: netR < 0 = gate saved money
+    shadow?: { win: number; loss: number; other: number; pending: number; netR: number };
+  }>;
 }
 
 const BTC_REGIME_LABEL: Record<string, { text: string; cls: string }> = {
@@ -176,15 +182,26 @@ export function ScanStatusPanel() {
               <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1">
                 近3天訊號漏斗 — 候選 {funnel.total} · 出單 <span className="text-green-400">{funnel.sent}</span>
               </p>
-              {funnel.reasons.slice(0, 5).map(r => (
-                <div key={r.key} className="flex items-center gap-2 text-[10px] leading-4">
-                  <span className="text-[#606080] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
-                  <div className="flex-1 h-1 bg-[#1A1A26] rounded-full overflow-hidden">
-                    <div className="h-full bg-red-400/50 rounded-full" style={{ width: `${r.pctOfRejected}%` }} />
+              {funnel.reasons.slice(0, 5).map(r => {
+                const sh = r.shadow;
+                const decided = sh ? sh.win + sh.loss + sh.other : 0;
+                return (
+                  <div key={r.key} className="text-[10px] leading-4 mb-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[#606080] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
+                      <div className="flex-1 h-1 bg-[#1A1A26] rounded-full overflow-hidden">
+                        <div className="h-full bg-red-400/50 rounded-full" style={{ width: `${r.pctOfRejected}%` }} />
+                      </div>
+                      <span className="text-[#606080] w-14 shrink-0 text-right">{r.count} ({r.pctOfRejected}%)</span>
+                    </div>
+                    {sh && decided > 0 && (
+                      <p className={`pl-2 ${sh.netR <= 0 ? 'text-green-400/70' : 'text-orange-400/90'}`}>
+                        └ 模擬被擋訊號：✓賺{sh.win} ✗虧{sh.loss}{sh.other > 0 ? ` ⏱其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R {sh.netR <= 0 ? '（這關擋得對）' : '（擋掉了賺錢單）'}
+                      </p>
+                    )}
                   </div>
-                  <span className="text-[#606080] w-14 shrink-0 text-right">{r.count} ({r.pctOfRejected}%)</span>
-                </div>
-              ))}
+                );
+              })}
               {funnel.reasons.length === 0 && (
                 <p className="text-[#404060] text-[10px]">尚無被拒紀錄</p>
               )}

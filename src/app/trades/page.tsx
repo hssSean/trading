@@ -52,6 +52,22 @@ function calcPositionSize(entry: number, sl: number, accountSize: number) {
   return { riskUSDT, positionUSDT, coins };
 }
 
+// R multiple: PnL measured in units of initial risk (entry→SL distance).
+// A -12% loss with a 12% stop is -1R — identical damage to a -1% loss with
+// a 1% stop when position-sized correctly. Raw % comparisons are misleading.
+function calcRMultiple(t: { entry: number; stopLoss: number; pnlPercent?: number }): number | null {
+  const riskPct = Math.abs(t.entry - t.stopLoss) / t.entry * 100;
+  if (riskPct <= 0 || t.pnlPercent === undefined) return null;
+  return t.pnlPercent / riskPct;
+}
+
+// Account-level impact assuming the suggested risk sizing (A tier 1%, B tier 0.5%)
+function accountPnlPct(t: { entry: number; stopLoss: number; pnlPercent?: number; tier?: 'A' | 'B' }): number | null {
+  const r = calcRMultiple(t);
+  if (r === null) return null;
+  return r * (t.tier === 'B' ? 0.5 : 1.0);
+}
+
 export default function TradesPage() {
   const trades          = useStore(s => s.trades);
   const coins           = useStore(s => s.coins);
@@ -145,6 +161,23 @@ export default function TradesPage() {
   const totalReturn  = closed.length > 0
     ? closed.reduce((a, t) => a + (t.pnlPercent ?? 0), 0)
     : null;
+
+  // ── R-multiple stats (risk-normalized; the honest scorecard) ──
+  const { totalR, accountReturn, avgR } = useMemo(() => {
+    let rSum = 0, acctSum = 0, n = 0;
+    closed.forEach(t => {
+      const r = calcRMultiple(t);
+      if (r === null) return;
+      rSum += r;
+      acctSum += r * (t.tier === 'B' ? 0.5 : 1.0);
+      n++;
+    });
+    return {
+      totalR:        n > 0 ? rSum : null,
+      accountReturn: n > 0 ? acctSum : null,
+      avgR:          n > 0 ? rSum / n : null,
+    };
+  }, [closed]);
 
   // ── Extended stats ───────────────────────────────────────────
   const avgWin  = wins.length   > 0 ? (wins.reduce((a, t)   => a + (t.pnlPercent ?? 0), 0) / wins.length).toFixed(2)   : null;
@@ -519,10 +552,12 @@ export default function TradesPage() {
             color={winRate !== null ? (winRate >= 50 ? '#00C851' : '#FF4444') : undefined}
           />
           <StatCard
-            label="累積報酬"
-            value={totalReturn !== null ? `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(2)}%` : '—'}
-            sub="全部加起來"
-            color={totalReturn !== null ? (totalReturn >= 0 ? '#00C851' : '#FF4444') : undefined}
+            label="累積損益 (R)"
+            value={totalR !== null ? `${totalR >= 0 ? '+' : ''}${totalR.toFixed(1)}R` : '—'}
+            sub={accountReturn !== null && totalReturn !== null
+              ? `帳戶 ${accountReturn >= 0 ? '+' : ''}${accountReturn.toFixed(1)}% · 價格 ${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(1)}%`
+              : '依建議倉位換算'}
+            color={totalR !== null ? (totalR >= 0 ? '#00C851' : '#FF4444') : undefined}
           />
           <StatCard
             label="賺賠比"
@@ -1097,6 +1132,12 @@ export default function TradesPage() {
                 {trade.reasons && trade.reasons.length > 0 && (
                   <div className="mt-2 bg-[#0D1820] border border-blue-400/10 rounded-xl px-3 py-2">
                     <p className="text-[#405060] text-[9px] mb-1 font-semibold uppercase tracking-wide">分析依據</p>
+                    {trade.scoreBreakdown && (
+                      <p className="text-[#5A8090] text-[10px] leading-[1.5] mb-1">
+                        評分：趨勢{trade.scoreBreakdown.trend} · 動能{trade.scoreBreakdown.momentum} · 結構{trade.scoreBreakdown.structure} · 量能{trade.scoreBreakdown.volume} · K線{trade.scoreBreakdown.priceAction}
+                        {trade.scoreBreakdown.penalties < 0 ? ` · 扣分${trade.scoreBreakdown.penalties}` : ''}
+                      </p>
+                    )}
                     {trade.reasons.map((r, i) => (
                       <p key={i} className="text-[#5A8090] text-[10px] leading-[1.5]">• {r}</p>
                     ))}
@@ -1137,14 +1178,25 @@ export default function TradesPage() {
                 )}
 
                 {/* Result row for closed trades */}
-                {!isPending && !isWaiting && trade.exitPrice !== undefined && (
-                  <div className="flex items-center justify-between mt-1 pt-2 border-t border-[#1E1E2E]">
-                    <span className="text-[#606080] text-xs">出場 ${fmtPrice(trade.exitPrice)}</span>
-                    <span className={`text-sm font-extrabold ${isWin ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
-                      {trade.pnlPercent !== undefined ? `${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent}%` : '—'}
-                    </span>
-                  </div>
-                )}
+                {!isPending && !isWaiting && trade.exitPrice !== undefined && (() => {
+                  const r    = calcRMultiple(trade);
+                  const acct = accountPnlPct(trade);
+                  return (
+                    <div className="flex items-center justify-between mt-1 pt-2 border-t border-[#1E1E2E]">
+                      <span className="text-[#606080] text-xs">出場 ${fmtPrice(trade.exitPrice)}</span>
+                      <span className="text-right">
+                        <span className={`text-sm font-extrabold ${isWin ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+                          {trade.pnlPercent !== undefined ? `${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent}%` : '—'}
+                        </span>
+                        {r !== null && (
+                          <span className="block text-[10px] text-[#606080]">
+                            {r >= 0 ? '+' : ''}{r.toFixed(1)}R{acct !== null ? ` · 帳戶 ${acct >= 0 ? '+' : ''}${acct.toFixed(2)}%` : ''}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })()}
 
                 {/* Timestamp + actions */}
                 <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#1E1E2E]">

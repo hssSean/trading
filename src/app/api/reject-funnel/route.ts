@@ -23,6 +23,51 @@ interface FunnelEntry {
   filters: Record<string, unknown>;
 }
 
+interface ShadowEntry {
+  symbol: string;
+  direction: string;
+  entry: number;
+  stopLoss: number;
+  tp1: number;
+  rejectedAt: string;
+  status: string;
+  result?: string;
+  exitPrice?: number;
+}
+
+// Per-gate simulated outcome of rejected signals. netR < 0 = the gate saved
+// money (killed mostly losers); netR > 0 = it blocked winners → loosen candidate.
+interface ShadowStat {
+  win: number;
+  loss: number;
+  other: number;   // EXPIRED / TIMEOUT
+  pending: number;
+  netR: number;
+}
+
+function aggregateShadows(shadows: ShadowEntry[]): Record<string, ShadowStat> {
+  const stats: Record<string, ShadowStat> = {};
+  for (const st of shadows) {
+    const g = (stats[st.rejectedAt] ??= { win: 0, loss: 0, other: 0, pending: 0, netR: 0 });
+    if (st.status !== 'done') { g.pending++; continue; }
+    const risk = Math.abs(st.entry - st.stopLoss);
+    const rOf = (exit: number) =>
+      risk > 0 ? (st.direction === 'LONG' ? exit - st.entry : st.entry - exit) / risk : 0;
+    if (st.result === 'WIN_TP1' || st.result === 'WIN_TP2') {
+      g.win++;
+      g.netR += rOf(st.exitPrice ?? st.tp1);
+    } else if (st.result === 'LOSS') {
+      g.loss++;
+      g.netR -= 1;
+    } else {
+      g.other++;
+      if (st.result === 'TIMEOUT' && st.exitPrice) g.netR += rOf(st.exitPrice);
+    }
+  }
+  for (const g of Object.values(stats)) g.netR = parseFloat(g.netR.toFixed(2));
+  return stats;
+}
+
 // v2.1 §0: aggregate the reject funnel — which gate kills the most candidates.
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -36,10 +81,18 @@ export async function GET(req: NextRequest) {
 
   try {
     const redis = Redis.fromEnv();
-    const raw   = await redis.lrange('reject_funnel', 0, -1);
+    const [raw, rawShadows] = await Promise.all([
+      redis.lrange('reject_funnel', 0, -1),
+      redis.hgetall<Record<string, unknown>>('shadow_trades'),
+    ]);
     const entries: FunnelEntry[] = raw
       .map(r => { try { return typeof r === 'string' ? JSON.parse(r) : r; } catch { return null; } })
       .filter((e): e is FunnelEntry => !!e && typeof e.at === 'number' && e.at >= cutoff);
+
+    const shadows: ShadowEntry[] = Object.values(rawShadows ?? {})
+      .map(v => { try { return (typeof v === 'string' ? JSON.parse(v) : v) as ShadowEntry; } catch { return null; } })
+      .filter((s): s is ShadowEntry => !!s && !!s.rejectedAt);
+    const shadowStats = aggregateShadows(shadows);
 
     const total = entries.length;
     const sent  = entries.filter(e => e.rejectedAt === null).length;
@@ -55,6 +108,7 @@ export async function GET(req: NextRequest) {
         key, count,
         pctOfRejected: rejected > 0 ? Math.round((count / rejected) * 100) : 0,
         pctOfTotal:    total    > 0 ? Math.round((count / total)    * 100) : 0,
+        ...(shadowStats[key] ? { shadow: shadowStats[key] } : {}),
       }))
       .sort((a, b) => b.count - a.count);
 
@@ -67,6 +121,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       ok: true, days, total, sent, rejected, reasons, topSymbols,
+      shadowStats,
       recent: entries.slice(0, 20),
     });
   } catch (e) {

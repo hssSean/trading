@@ -87,6 +87,16 @@ export interface TechnicalIndicators {
   atrPercentile?: number; // 0-100, position in 90-day ATR distribution
 }
 
+// v2 spec §5: per-group score contributions, persisted for win-rate attribution (§6)
+export interface ScoreBreakdown {
+  trend: number;
+  momentum: number;
+  structure: number;
+  volume: number;
+  priceAction: number;
+  penalties: number; // negative; includes no-level penalty
+}
+
 export interface TradingSignal {
   id: string;
   symbol: string;
@@ -116,6 +126,7 @@ export interface TradingSignal {
   suggestedLeverage?: number; // risk% / SL-distance%, capped 10x
   // v2.1 §2: signal tier — A (65+, ≥3 groups, 1% risk) | B (55-64, ≥2 groups, 0.5% risk)
   tier?: 'A' | 'B';
+  scoreBreakdown?: ScoreBreakdown;
 }
 
 export interface WatchedCoin {
@@ -167,6 +178,7 @@ export interface TradeRecord {
   status?: 'waiting' | 'active' | 'tp1_hit'; // 'tp1_hit' = TP1 reached, monitoring for TP2
   signalPrice?: number;           // market price when signal was generated
   tier?: 'A' | 'B';               // v2.1 signal tier (B = half-risk light position)
+  scoreBreakdown?: ScoreBreakdown; // per-group contributions for attribution
 }
 
 export interface AnalysisResult {
