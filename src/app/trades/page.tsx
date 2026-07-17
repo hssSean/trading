@@ -122,6 +122,17 @@ export default function TradesPage() {
   const pending       = useMemo(() => trades.filter(t => !t.result && t.status !== 'waiting'), [trades]);
   // 追蹤TP2 = TP1 hit, result locked as WIN_TP1, not yet finally closed
   const watchingTp2   = useMemo(() => trades.filter(t => t.status === 'tp1_hit' && t.result === 'WIN_TP1' && !t.closedAt), [trades]);
+  // Live-PnL counts so 浮盈/浮虧 chips show how many trades they'd match
+  const liveCounts    = useMemo(() => {
+    let up = 0, down = 0;
+    pending.forEach(t => {
+      const px = coins.find(c => c.symbol === t.symbol)?.currentPrice ?? 0;
+      if (!px) return;
+      const pnl = t.direction === 'LONG' ? (px - t.entry) / t.entry : (t.entry - px) / t.entry;
+      if (pnl > 0) up++; else if (pnl < 0) down++;
+    });
+    return { up, down };
+  }, [pending, coins]);
   const wins    = closed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
   const losses  = closed.filter(t => t.result === 'LOSS');
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
@@ -755,15 +766,15 @@ export default function TradesPage() {
         {/* Row 1: 狀態 filter */}
         <div className="flex gap-1.5 mb-2 flex-wrap">
           {([
-            ['ALL',       '全部'],
+            ['ALL',       `全部 (${waiting.length + pending.length + closed.length})`],
             ['PENDING',   `持倉 (${pending.length})`],
             ['WAITING',   waiting.length > 0 ? `等待進場 (${waiting.length})` : '等待進場'],
             ['CLOSED',    `結束 (${closed.length})`],
-            ['PROFIT',    '浮盈'],
-            ['LOSS_LIVE', '浮虧'],
+            ['PROFIT',    liveCounts.up   > 0 ? `浮盈 (${liveCounts.up})`   : '浮盈'],
+            ['LOSS_LIVE', liveCounts.down > 0 ? `浮虧 (${liveCounts.down})` : '浮虧'],
           ] as const).map(([f, label]) => (
             <button key={f} onClick={() => { setFilter(f); if (f !== 'CLOSED') setResultFilter('ALL'); }}
-              className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${
+              className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition-colors ${
                 filter === f
                   ? f === 'PROFIT'    ? 'bg-green-500 border-green-500 text-white'
                   : f === 'LOSS_LIVE' ? 'bg-red-500 border-red-500 text-white'
@@ -788,7 +799,7 @@ export default function TradesPage() {
               ['LOSS', `止損 (${losses.length})`],
             ] as const).map(([f, label]) => (
               <button key={f} onClick={() => setResultFilter(f)}
-                className={`text-xs px-3 py-1 rounded-full font-semibold border transition-colors ${
+                className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition-colors ${
                   resultFilter === f
                     ? f === 'WIN'  ? 'bg-green-500 border-green-500 text-white'
                     : f === 'LOSS' ? 'bg-red-500 border-red-500 text-white'
@@ -808,7 +819,7 @@ export default function TradesPage() {
           {/* Direction */}
           {(['ALL', 'LONG', 'SHORT'] as const).map(d => (
             <button key={d} onClick={() => setDirFilter(d)}
-              className={`text-xs px-2.5 py-1 rounded-full font-semibold border transition-colors ${dirFilter === d
+              className={`text-xs px-2.5 py-1.5 rounded-full font-semibold border transition-colors ${dirFilter === d
                 ? d === 'LONG'  ? 'bg-green-500/20 border-green-500/50 text-green-400'
                 : d === 'SHORT' ? 'bg-red-500/20 border-red-500/50 text-red-400'
                 :                 'bg-[#F0B90B]/20 border-[#F0B90B]/50 text-[#F0B90B]'
@@ -820,7 +831,7 @@ export default function TradesPage() {
           {/* Date range */}
           {([['all', '全部'], ['week', '本週'], ['month', '本月']] as const).map(([d, label]) => (
             <button key={d} onClick={() => setDateFilter(d)}
-              className={`text-xs px-2.5 py-1 rounded-full font-semibold border transition-colors ${dateFilter === d ? 'bg-blue-500/20 border-blue-500/40 text-blue-400' : 'border-[#1E1E2E] text-[#404060]'}`}>
+              className={`text-xs px-2.5 py-1.5 rounded-full font-semibold border transition-colors ${dateFilter === d ? 'bg-blue-500/20 border-blue-500/40 text-blue-400' : 'border-[#1E1E2E] text-[#404060]'}`}>
               {label}
             </button>
           ))}
@@ -851,11 +862,27 @@ export default function TradesPage() {
       {/* Trade list */}
       <div className="flex-1 overflow-y-auto px-4 pt-3 scroll-container">
         {filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-48 gap-2 text-center">
-            <p className="text-5xl">📋</p>
-            <p className="text-[#A0A0C0] font-semibold">還沒有交易紀錄</p>
-            <p className="text-[#606080] text-sm">伺服器每 5 分鐘自動分析，達到強訊號時自動建立並即時推播</p>
-          </div>
+          trades.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-48 gap-2 text-center">
+              <p className="text-5xl">📋</p>
+              <p className="text-[#A0A0C0] font-semibold">還沒有交易紀錄</p>
+              <p className="text-[#606080] text-sm">伺服器每 5 分鐘自動分析，達到強訊號時自動建立並即時推播</p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-48 gap-2 text-center">
+              <p className="text-5xl">🔍</p>
+              <p className="text-[#A0A0C0] font-semibold">此分類目前沒有紀錄</p>
+              <p className="text-[#606080] text-sm">
+                目前共 {closed.length} 已結束 · {pending.length} 持倉 · {waiting.length} 掛單
+              </p>
+              <button
+                onClick={() => { setFilter('ALL'); setResultFilter('ALL'); setDirFilter('ALL'); setDateFilter('all'); }}
+                className="mt-1 text-xs px-4 py-2 rounded-full bg-[#F0B90B]/15 border border-[#F0B90B]/40 text-[#F0B90B] font-semibold active:opacity-70"
+              >
+                顯示全部紀錄
+              </button>
+            </div>
+          )
         ) : (
           filtered.map(trade => {
             const isWaiting     = trade.status === 'waiting';

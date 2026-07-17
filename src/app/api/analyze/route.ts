@@ -51,6 +51,31 @@ function getRedis(): Redis | null {
 // In-memory fallback (lost on cold start, but works when Redis isn't wired)
 const memLock = new Map<string, LockEntry>();
 
+// ── Post-loss cooldown ─────────────────────────────────────────
+// 2026-07-17 journal review: AKE stopped out, unlocked, and re-longed the same
+// day for a second -12%. After a LOSS close, block the same symbol+direction
+// for 24h — re-entering a setup that just proved wrong needs a fresh day.
+const LOSS_COOLDOWN_SEC = 24 * 3600;
+const memLossCd = new Map<string, number>(); // `${symbol}:${dir}` → expiry ms
+
+async function setLossCooldown(symbol: string, direction: string): Promise<void> {
+  memLossCd.set(`${symbol}:${direction}`, Date.now() + LOSS_COOLDOWN_SEC * 1000);
+  const r = getRedis();
+  if (r) {
+    try { await r.set(`loss_cd:${symbol}:${direction}`, '1', { ex: LOSS_COOLDOWN_SEC }); } catch { /* mem holds */ }
+  }
+}
+
+async function isOnLossCooldown(symbol: string, direction: string): Promise<boolean> {
+  const mem = memLossCd.get(`${symbol}:${direction}`);
+  if (mem && mem > Date.now()) return true;
+  const r = getRedis();
+  if (r) {
+    try { return !!(await r.get(`loss_cd:${symbol}:${direction}`)); } catch { /* fall through */ }
+  }
+  return false;
+}
+
 async function getLock(symbol: string): Promise<LockEntry | null> {
   const r = getRedis();
   if (r) {
@@ -616,6 +641,11 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     }
 
     await unlockSymbol(trade.symbol as string);
+
+    // Post-loss cooldown: same symbol+direction blocked for 24h (see helper docs)
+    if (closeResult === 'LOSS') {
+      await setLossCooldown(trade.symbol as string, trade.direction as string);
+    }
 
     {
       const dir = isLong ? '▲ 做多' : '▼ 做空';
@@ -1319,6 +1349,12 @@ export async function GET(req: NextRequest) {
             { skipKey = 'btc_pause'; skipReason = `BTC 1H 異常急漲（${btcState.movePct ?? '?'}%，門檻 ±${btcState.moveThresholdPct ?? '?'}%）— ${symbol} 做空暫停 2h`; }
         }
 
+        // Post-loss cooldown: this symbol+direction stopped out within 24h
+        if (!skipReason && await isOnLossCooldown(symbol, entrySignal.direction)) {
+          skipKey = 'loss_cooldown';
+          skipReason = `跳過 — ${symbol} ${entrySignal.direction === 'LONG' ? '做多' : '做空'} 24h 內止損過，同向暫停一天`;
+        }
+
         // §4.3 Same-direction risk cap
         if (!skipReason && profileId) {
           const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol);
@@ -1333,9 +1369,12 @@ export async function GET(req: NextRequest) {
             try {
               const { createClient: mkChk } = await import('@supabase/supabase-js');
               const chk = mkChk(_su, _sk, { auth: { autoRefreshToken: false, persistSession: false } });
+              // Symbol-global (no user_id filter): single-user system, and legacy
+              // rows with NULL user_id must still block — 7/17 saw two overlapping
+              // AKE longs slip past the user-scoped version of this check.
               const { count: c } = await chk.from('trades')
                 .select('id', { count: 'exact', head: true })
-                .eq('user_id', profileId).eq('symbol', entrySignal.symbol).is('closed_at', null);
+                .eq('symbol', entrySignal.symbol).is('closed_at', null);
               if (c !== null && c > 0)
                 { skipKey = 'has_open_position'; skipReason = `跳過 — 同幣種已有持倉 (${symbol})`; }
             } catch (e) {
@@ -1364,10 +1403,10 @@ export async function GET(req: NextRequest) {
             const { createClient: mkAdmin } = await import('@supabase/supabase-js');
             const admin = mkAdmin(sbUrl, sbKey, { auth: { autoRefreshToken: false, persistSession: false } });
 
-            // Final duplicate guard (Redis lock may be lost after Vercel cold start)
+            // Final duplicate guard (Redis lock may be lost after Vercel cold start).
+            // Symbol-global on purpose — see hard-stop duplicate check above.
             const { count } = await admin.from('trades')
               .select('id', { count: 'exact', head: true })
-              .eq('user_id', profileId)
               .eq('symbol', entrySignal.symbol)
               .is('closed_at', null);
 

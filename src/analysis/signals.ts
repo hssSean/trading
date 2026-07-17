@@ -205,8 +205,10 @@ export function generateSignals(
   const patterns   = detectCandlePatterns(candles);
   const divergence = detectRsiDivergence(candles);
 
-  // Hard gate: ATR > 40% means the coin swings too wildly to set a meaningful SL
-  if (atrPct > 0.40) return [];
+  // Hard gate: extreme volatility → no tradeable SL. 2026-07-17 journal review:
+  // two AKE longs (ATR 8.8%/9.9%) both hit their ATR-widened -12% stops within
+  // hours. A coin needing a >6% stop on 1h isn't a setup — it's a coin flip.
+  if (atrPct > 0.06) return [];
 
   // EMA200 zone: wider for short TF (5m/15m EMA200 fluctuates more)
   const ema200Zone  = intraday ? 0.015 : 0.008;
@@ -543,9 +545,12 @@ export function generateSignals(
 
   // ── LONG signal ──────────────────────────────────────────────
   // v2.1 §1.5 tier: A = 65+/≥3 groups (1% risk) | B = 55-64/≥2 groups (0.5% risk)
+  // B-tier additionally requires normal volatility (ATR ≤3%): 2026-07-17 review —
+  // all 3 losses were B-tier and the two big ones were high-vol coins. Marginal
+  // score + wild coin is the worst combination; only A-tier may absorb high vol.
   const longTier: 'A' | 'B' | null =
     longScore >= effectiveMinScore && longGroups >= 3 ? 'A'
-    : longScore >= MIN_SCORE_TIER_B && longGroups >= 2 ? 'B'
+    : longScore >= MIN_SCORE_TIER_B && longGroups >= 2 && atrPct <= HIGH_VOLIT_PCT ? 'B'
     : null;
   if (longTier && longScore > shortScore && longIntradayOk) {
     const sl   = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
@@ -584,7 +589,7 @@ export function generateSignals(
   // ── SHORT signal ─────────────────────────────────────────────
   const shortTier: 'A' | 'B' | null =
     shortScore >= effectiveMinScore && shortGroups >= 3 ? 'A'
-    : shortScore >= MIN_SCORE_TIER_B && shortGroups >= 2 ? 'B'
+    : shortScore >= MIN_SCORE_TIER_B && shortGroups >= 2 && atrPct <= HIGH_VOLIT_PCT ? 'B'
     : null;
   if (shortTier && shortScore > longScore && shortIntradayOk) {
     const sl   = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)
