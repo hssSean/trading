@@ -192,9 +192,14 @@ export function generateSignals(
   }
 
   const ind     = computeIndicators(candles);
-  const prevInd = computeIndicators(candles.slice(0, -1));
+  // prevInd values now come free from ind.rsiPrev / ind.macdHistogramPrev
+  // (same series, no 2nd computeIndicators pass — halves indicator CPU per TF).
+  const prevInd = { rsi: ind.rsiPrev ?? 50, macdHistogram: ind.macdHistogramPrev ?? 0 };
   // structure already computed above for hard gate 1
-  const obs     = findOrderBlocks(candles).filter((ob) => !ob.mitigated);
+  // Single O(n²) order-block scan; both the unmitigated set and the breaker
+  // (mitigated) set below are derived from this one result.
+  const allOBs    = findOrderBlocks(candles);
+  const obs       = allOBs.filter((ob) => !ob.mitigated);
   const fvgs      = findFairValueGaps(candles).filter((f) => !f.filled);
   const srLevels  = findSRLevels(candles);
 
@@ -370,8 +375,7 @@ export function generateSignals(
     }
   }
 
-  // ── Breaker blocks → structure group ─────────────────────────
-  const allOBs    = findOrderBlocks(candles);
+  // ── Breaker blocks → structure group (reuse allOBs from above) ──
   const breakerBull = allOBs.find(ob => ob.mitigated && ob.type === 'bearish' && price >= ob.low * 0.999 && price <= ob.high * 1.005);
   const breakerBear = allOBs.find(ob => ob.mitigated && ob.type === 'bullish' && price <= ob.high * 1.001 && price >= ob.low * 0.995);
   if (breakerBull) { lStruct += 2; longReasons.push('看漲破壞塊（空頭 OB 突破轉支撐）'); }
@@ -658,7 +662,7 @@ export function generateMeanReversionSignals(
   if (candles.length < 35) return [];
 
   const ind     = computeIndicators(candles);
-  const prevInd = computeIndicators(candles.slice(0, -1));
+  const prevInd = { rsi: ind.rsiPrev ?? 50 }; // prev RSI free from ind — no 2nd compute
 
   const bb = ind.bb;
   if (!bb || isNaN(bb.upper) || isNaN(bb.lower) || isNaN(bb.middle)) return [];

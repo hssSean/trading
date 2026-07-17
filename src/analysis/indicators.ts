@@ -222,5 +222,8 @@ export function computeIndicators(candles: Candle[]): TechnicalIndicators {
     adxMinus: adxResult.minusDI,
     bb,
     donchian,
+    // Previous-candle values from the same arrays — free "prevInd" replacement
+    rsiPrev:           n >= 1 ? (rsiValues[n - 1] ?? 50) : 50,
+    macdHistogramPrev: n >= 1 ? (histogram[n - 1] ?? 0)  : 0,
   };
 }

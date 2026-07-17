@@ -78,6 +78,9 @@ export interface TechnicalIndicators {
   ema50: number;
   ema200: number;
   trend: 'bullish' | 'bearish' | 'neutral';
+  // Previous-candle values, read from the same series (avoids a 2nd full compute)
+  rsiPrev?: number;
+  macdHistogramPrev?: number;
   // Phase 1 additions — optional for backward compat
   adx?: number;
   adxPlus?: number;  // +DI

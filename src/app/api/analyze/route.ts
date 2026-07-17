@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume, fetchFundingRate } from '@/api/binance';
-import { computeIndicators, calcAtrHistory, calcAtrPercentile } from '@/analysis/indicators';
+import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
@@ -882,7 +882,11 @@ async function checkSameDirectionRisk(profileId: string, direction: string, symb
 }
 
 // ── §4.4 Circuit breaker ──────────────────────────────────────
-// Triggered when today's closed trades hit ≥3 consecutive losses OR cumulative PnL ≤ -3%.
+// Triggered when today's closed trades hit ≥3 consecutive losses OR cumulative
+// ACCOUNT loss ≤ -3%. 2026-07-18 fix: measure account impact (R × tier risk),
+// NOT raw pnl_percent. A single ATR-based -12% stop is only -1R = -1% account;
+// summing raw % tripped the breaker on one bad candle and froze signals all day.
+// Cache key is v2 so any stuck v1 (`circuit_breaker:`) key is abandoned on deploy.
 async function checkCircuitBreaker(profileId: string): Promise<{ triggered: boolean; reason?: string }> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -891,7 +895,7 @@ async function checkCircuitBreaker(profileId: string): Promise<{ triggered: bool
   const r = getRedis();
   if (r) {
     try {
-      const cached = await r.get<string>(`circuit_breaker:${profileId}`);
+      const cached = await r.get<string>(`circuit_breaker_v2:${profileId}`);
       if (cached) return { triggered: true, reason: cached };
     } catch { /* fall through */ }
   }
@@ -904,25 +908,31 @@ async function checkCircuitBreaker(profileId: string): Promise<{ triggered: bool
     todayUTC.setUTCHours(0, 0, 0, 0);
 
     const { data } = await adm.from('trades')
-      .select('result, pnl_percent, closed_at')
+      .select('result, pnl_percent, entry, stop_loss, tier, closed_at')
       .eq('user_id', profileId).not('result', 'is', null)
       .gte('closed_at', todayUTC.getTime())
       .order('closed_at', { ascending: false });
 
     if (!data || data.length === 0) return { triggered: false };
 
-    // Check 1: cumulative daily PnL ≤ -3%
-    const dailyPnl = (data as { result: string; pnl_percent?: number | null }[])
-      .reduce((s, t) => s + (t.pnl_percent ?? 0), 0);
-    if (dailyPnl <= -3) {
-      const reason = `熔斷：當日累計虧損 ${dailyPnl.toFixed(2)}%（≤ -3%）`;
+    // Check 1: cumulative ACCOUNT loss ≤ -3% (R-multiple × tier risk)
+    const rows = data as { result: string; pnl_percent?: number | null; entry?: number | null; stop_loss?: number | null; tier?: string | null }[];
+    const dailyAcct = rows.reduce((s, t) => {
+      if (t.pnl_percent == null || !t.entry || !t.stop_loss) return s;
+      const stopPct = Math.abs(t.entry - t.stop_loss) / t.entry * 100;
+      if (stopPct <= 0) return s;
+      const rMultiple = t.pnl_percent / stopPct;          // e.g. -12% / 12% = -1R
+      return s + rMultiple * (t.tier === 'B' ? 0.5 : 1.0); // account % at suggested risk
+    }, 0);
+    if (dailyAcct <= -3) {
+      const reason = `熔斷：當日帳戶虧損 ${dailyAcct.toFixed(2)}%（≤ -3%）`;
       await cacheBreaker(r, profileId, reason, todayUTC);
       return { triggered: true, reason };
     }
 
     // Check 2: 3 consecutive losses in today's trades
     let streak = 0;
-    for (const t of data as { result: string }[]) {
+    for (const t of rows) {
       if (t.result === 'LOSS') streak++;
       else break;
     }
@@ -938,7 +948,7 @@ async function checkCircuitBreaker(profileId: string): Promise<{ triggered: bool
 async function cacheBreaker(r: import('@upstash/redis').Redis | null, profileId: string, reason: string, todayUTC: Date) {
   if (!r) return;
   const secLeft = Math.ceil((todayUTC.getTime() + 86_400_000 - Date.now()) / 1000);
-  try { await r.set(`circuit_breaker:${profileId}`, reason, { ex: Math.max(secLeft, 60) }); } catch { /* best-effort */ }
+  try { await r.set(`circuit_breaker_v2:${profileId}`, reason, { ex: Math.max(secLeft, 60) }); } catch { /* best-effort */ }
 }
 
 // ── Shadow simulation of rejected signals ──────────────────────
@@ -1104,10 +1114,13 @@ async function fetchBtcRegime(): Promise<BtcRegimeState> {
       fetchCandles('BTCUSDT', '4h', 250),
       fetchCandles('BTCUSDT', '1h', 20), // 20 bars → enough for ATR(14)
     ]);
-    const btcInd = computeIndicators(btc4h);
-    const btcClose = btc4h[btc4h.length - 1].close;
-    const ema50  = btcInd.ema50  ?? NaN;
-    const ema200 = btcInd.ema200;
+    // Only EMA50/EMA200 needed for regime — skip full indicator compute
+    const btcClose  = btc4h[btc4h.length - 1].close;
+    const btcCloses = btc4h.map(c => c.close);
+    const e50Arr    = calcEma(btcCloses, 50);
+    const e200Arr   = calcEma(btcCloses, 200);
+    const ema50  = e50Arr[e50Arr.length - 1]   ?? NaN;
+    const ema200 = e200Arr[e200Arr.length - 1] ?? NaN;
     if (!isNaN(ema50) && !isNaN(ema200)) {
       if (ema50 > ema200 && btcClose > ema50)      state.regime = 'bullish';
       else if (ema50 < ema200 && btcClose < ema50) state.regime = 'bearish';
@@ -1296,8 +1309,9 @@ export async function GET(req: NextRequest) {
         // 540 bars = 90 days of 4H candles — enough for ADX regime + 90-day ATR percentile
         if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandles(symbol, '4h', 540));
         const fourHC   = candleCache.get('4h')!;
-        const fourHInd = computeIndicators(fourHC);
-        symbolAdx = fourHInd.adx ?? NaN;
+        // Only ADX is needed here — computing full indicators (EMA200/MACD/BB/…)
+        // over 540 bars every scan was the single biggest CPU sink.
+        symbolAdx = calcAdx(fourHC, 14).adx ?? NaN;
         if (!isNaN(symbolAdx)) {
           regimeDetermined = true;
           if (symbolAdx >= 23)      symbolRegime = 'trending';
@@ -1363,9 +1377,11 @@ export async function GET(req: NextRequest) {
               try {
                 if (!candleCache.has(htfTf)) candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 250));
                 const htfC   = candleCache.get(htfTf)!;
-                const htfInd = computeIndicators(htfC);
                 const htfPx  = htfC[htfC.length - 1].close;
-                const e200   = htfInd.ema200;
+                // Only EMA200 is needed for HTF bias — skip the full indicator set
+                const htfCloses = htfC.map(c => c.close);
+                const e200Arr   = calcEma(htfCloses, 200);
+                const e200      = e200Arr[e200Arr.length - 1];
                 if (!isNaN(e200) && e200 > 0) {
                   const near = Math.abs(htfPx - e200) / e200 < 0.015;
                   if (!near) htfBias = htfPx > e200 ? 'LONG' : 'SHORT';
@@ -1893,15 +1909,23 @@ export async function DELETE(req: NextRequest) {
   const r = getRedis();
 
   if (!symbol) {
-    // Reset ALL tlock keys
+    // Reset ALL locks + risk-control state (breaker, BTC pause, loss cooldown).
+    // ?scope=locks limits it to tlocks only; default clears everything.
+    const scope = req.nextUrl.searchParams.get('scope');
     if (r) {
       try {
-        const keys = await r.keys('tlock:*');
+        const patterns = scope === 'locks'
+          ? ['tlock:*']
+          : ['tlock:*', 'circuit_breaker*', 'btc_pause:*', 'loss_cd:*'];
+        const keyGroups = await Promise.all(patterns.map(p => r.keys(p)));
+        const keys = keyGroups.flat();
         if (keys.length > 0) await Promise.all(keys.map(k => r.del(k)));
-        return NextResponse.json({ ok: true, cleared: keys.length, usingRedis: true });
+        return NextResponse.json({ ok: true, cleared: keys.length, scope: scope ?? 'all', usingRedis: true });
       } catch { /* fall through */ }
     }
     memLock.clear();
+    memLossCd.clear();
+    memBtcPause.long = 0; memBtcPause.short = 0;
     return NextResponse.json({ ok: true, cleared: memLock.size, usingRedis: false });
   }
 
