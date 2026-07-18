@@ -371,16 +371,25 @@ export default function TradesPage() {
   }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, now, coins]);
 
   const exportCsv = () => {
-    const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,分析依據,個人備註';
+    // 時間輸出 ISO（含年份）：舊格式「7/17 上午08:00」缺年份，
+    // 匯回「績效體檢」或 Excel 排序都會出問題
+    const isoDate = (ts: number) => {
+      const d = new Date(ts);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    // 策略標籤（tier×時框）：給「績效體檢」的逐策略分析用
+    const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,策略,分析依據,個人備註';
     const rows = closed.map(t =>
       [
         t.id, t.symbol, t.direction, t.timeframe, t.strength, t.score,
         t.entry, t.stopLoss, t.tp1, t.tp2,
-        fmtDate(t.openedAt),
-        fmtDate(t.closedAt ?? t.openedAt),
+        isoDate(t.openedAt),
+        isoDate(t.closedAt ?? t.openedAt),
         RESULT_LABEL[t.result ?? 'MANUAL_CLOSE'],
         t.exitPrice ?? '',
         t.pnlPercent ?? '',
+        `${t.tier ?? 'A'}級·${t.timeframe}`,
         `"${(t.reasons ?? []).join(' | ').replace(/"/g, '""')}"`,
         `"${(t.entryNotes ?? '').replace(/"/g, '""')}"`,
       ].join(',')

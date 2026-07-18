@@ -42,3 +42,4 @@
 4. **CSV 編碼回退**：Python 用 utf-8-sig→cp950；瀏覽器用 TextDecoder('utf-8', fatal)→TextDecoder('big5')，語意等價（Encoding Standard 的 big5 涵蓋 cp950 常用範圍），讀到 big5 時同樣在來源字串標註提醒。
 5. **時間解析**：Python strptime 多格式表 → TS 手寫對應正則（不引依賴）；同樣去除時區（naive）。
 6. **golden files**：本地 Python 3.12 跑 `core.cli analyze <example> --json`，存 `tests/antigambling/fixtures/`；比對範圍＝verdict（level/red_flags/metrics/significance）、out_of_sample、tag_verdicts、counterfactual、follow_guru、breakeven；`profile` 跳過。
+7. **同義詞表擴充（超出 Python 原表，2026-07-18）**：為讓本站「紀錄」頁匯出檔直接可用，symbol 加 `幣種`；pnl 末端加 `損益%／損益率／報酬率%`（金額欄名在前、先比中；只剩 % 欄時以 % 為損益單位並在 warnings 揭露 —— 統計檢定尺度不變）。時間解析加 zh-TW `[YYYY/]M/D 上午|下午HH:MM` 格式，缺年份時假設今年並警告。回歸測試在 `tests/antigambling/app-export.test.ts`。golden 範例不含這些欄名，數值一致性不受影響。

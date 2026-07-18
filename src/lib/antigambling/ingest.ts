@@ -12,6 +12,8 @@ export const FIELD_SYNONYMS: Record<string, string[]> = {
     'symbol', 'ticker', '代號', '股票代號', '標的', '商品', '幣別', 'pair',
     'instrument', 'code', 'stockcode', '證券代號',
     '證券名稱', '股票名稱', '商品名稱', 'market', 'underlyingsymbol', 'contract',
+    // 本站「紀錄」頁匯出檔（超出原 Python 對照表的擴充，見 merge-notes）
+    '幣種',
   ],
   side: [
     'side', '方向', '買賣', '買賣別', '交易別', 'buysell', 'direction', 'type',
@@ -49,6 +51,10 @@ export const FIELD_SYNONYMS: Record<string, string[]> = {
     'net_pnl', '賺賠',
     // 注意：不收 "return" —— 它常指「報酬率(%)」而非損益金額
     '損益金額', '淨收付', '淨收付金額', 'realized profit', 'fifopnlrealized',
+    // 百分比損益（本站匯出檔用「損益%」）：放在最末 —— 同檔若有金額欄
+    // 會先被比中；只剩 % 欄時以「%」為損益單位分析（統計檢定不受尺度影響），
+    // 並在 warnings 明確告知使用者單位是 %
+    '損益%', '損益率', '報酬率%',
   ],
   tag: [
     'tag', '策略', 'strategy', '標籤', '備註', 'note', 'remark', '策略名稱',
@@ -90,10 +96,29 @@ function parseSide(value: unknown): Side {
 }
 
 // 時間格式（依 Python 版的嘗試順序；%m/%d/%Y 先於 %d/%m/%Y）
-function parseTime(value: unknown): Date {
+// state.assumedYear：遇到缺年份的中文格式（如「7/17 上午08:00」，本站舊版
+// 匯出檔）時假設為今年，並回報給呼叫端在 warnings 揭露
+function parseTime(value: unknown, state?: { assumedYear?: boolean }): Date {
   if (value instanceof Date) return value;
   const s = String(value).trim();
   let m: RegExpExecArray | null;
+
+  // zh-TW toLocaleString 格式：[YYYY/]M/D 上午|下午HH:MM[:SS]
+  m = /^(?:(\d{4})[/\-年])?(\d{1,2})[/月](\d{1,2})日?\s*(上午|下午)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (m) {
+    let year: number;
+    if (m[1]) {
+      year = +m[1];
+    } else {
+      year = new Date().getFullYear();
+      if (state) state.assumedYear = true;
+    }
+    let hour = +m[5];
+    // zh-TW 慣例：上午12 → 0 時；下午12 → 12 時；下午1-11 → +12
+    if (m[4] === '上午' && hour === 12) hour = 0;
+    else if (m[4] === '下午' && hour !== 12) hour += 12;
+    return mkDate(year, +m[2], +m[3], hour, +m[6], +(m[7] ?? 0), s);
+  }
 
   // %Y-%m-%d [%H:%M[:%S]] 與 %Y/%m/%d [%H:%M[:%S]]
   m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
@@ -288,6 +313,7 @@ export function parseTradeLog(opts: {
   let skipped = 0;
   const skipReasons: string[] = [];
   const unknownMultiplierSymbols = new Set<string>();
+  const timeState: { assumedYear?: boolean } = {};
 
   for (const row of rows) {
     const rowNo = trades.length + skipped + 1;
@@ -301,10 +327,10 @@ export function parseTradeLog(opts: {
 
     let entryTime: Date, exitTime: Date;
     try {
-      entryTime = parseTime(get(row, 'entry_time', '1970-01-01'));
+      entryTime = parseTime(get(row, 'entry_time', '1970-01-01'), timeState);
       const rawExit = get(row, 'exit_time');
       exitTime = rawExit !== null && rawExit !== undefined && rawExit !== ''
-        ? parseTime(rawExit) : entryTime;
+        ? parseTime(rawExit, timeState) : entryTime;
     } catch (exc) {
       skipped++;
       if (skipReasons.length < 10) {
@@ -408,6 +434,15 @@ export function parseTradeLog(opts: {
   }
   if (usedEncoding === 'big5') {
     warnings.push('檔案以 Big5/cp950 編碼讀取 —— 若見亂碼請改存 CSV UTF-8');
+  }
+  // 百分比損益欄（如本站匯出的「損益%」）：統計檢定不受尺度影響，
+  // 但所有金額類指標（期望值/總損益/回撤金額）單位都是「%」而非錢
+  const pnlCol = fieldMap['pnl'];
+  if (pnlCol && /[%％率]/.test(pnlCol)) {
+    warnings.push(`損益欄「${pnlCol}」是百分比 —— 分析結果的期望值/總損益單位為「%」而非金額（統計裁決不受影響）`);
+  }
+  if (timeState.assumedYear) {
+    warnings.push(`時間欄缺年份（如「7/17 上午08:00」），已假設為 ${new Date().getFullYear()} 年 —— 若紀錄跨年請改用含年份的格式重新匯出`);
   }
 
   const log: AgTradeLog = {
