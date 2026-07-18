@@ -7,6 +7,7 @@ const NAV = [
   { href: '/', label: '首頁', icon: '🏠' },
   { href: '/signals', label: '信號', icon: '📊' },
   { href: '/trades', label: '紀錄', icon: '📋' },
+  { href: '/health-check', label: '體檢', icon: '🩺' },
   { href: '/settings', label: '設定', icon: '⚙️' },
 ];
 

@@ -1,0 +1,175 @@
+{
+  "source": "tw_stock_gambling.csv (csv, 載入 35 筆, 略過 0 筆)",
+  "markets": [
+    "tw_stock"
+  ],
+  "verdict": {
+    "level": "gambling",
+    "should_discourage": true,
+    "headline": "⛔ 這是賭博:你的策略樣本期望值為負 —— 方法不變,長期繼續的統計預期就是虧損。",
+    "required_trades": null,
+    "metrics": {
+      "total_trades": 35,
+      "wins": 8,
+      "losses": 27,
+      "breakeven": 0,
+      "win_rate": 0.22857142857142856,
+      "avg_win": 13716.046875,
+      "avg_loss": 19196.56574074074,
+      "payoff_ratio": 0.7145052432941443,
+      "profit_factor": 0.21170525727233908,
+      "expectancy": -11673.682857142858,
+      "expectancy_r": -0.6081130872470527,
+      "total_pnl": -408578.9,
+      "total_fees": 140578.9,
+      "gross_profit": 109728.375,
+      "gross_loss": 518307.275,
+      "max_drawdown": 414297.85000000003,
+      "max_drawdown_pct": 0.33021891363949485,
+      "max_consecutive_losses": 9,
+      "sharpe": -0.689886831615078,
+      "sortino": -0.6140901962536786,
+      "largest_win": 45013.75,
+      "largest_loss": -65037.5,
+      "top_trade_pnl_share": 0.4102288947594458,
+      "avg_holding_days": 0.0,
+      "is_mostly_intraday": true,
+      "drawdown_pct_reliable": true,
+      "r_multiples_count": 35
+    },
+    "significance": {
+      "n": 35,
+      "mean": -11673.682857142858,
+      "std": 18794.36605845342,
+      "t_stat": -3.674635203478768,
+      "p_value_t": 0.9995930672417433,
+      "p_value_bootstrap": 0.9998000399920016,
+      "ci_low": -17768.49785714286,
+      "ci_high": -5490.542857142858,
+      "is_significant": false
+    },
+    "red_flags": [
+      {
+        "code": "negative_expectancy",
+        "severity": "high",
+        "message": "每筆交易的樣本期望值為負(-11673.68)。方法不變的話,長期繼續的統計預期就是虧損。"
+      },
+      {
+        "code": "long_losing_streak",
+        "severity": "medium",
+        "message": "曾連續虧損 9 次。請誠實問自己:連賠這麼多次,你還守得住原本的紀律嗎?"
+      },
+      {
+        "code": "intraday_noise",
+        "severity": "medium",
+        "message": "你的交易以當沖/極短線為主,且統計上看不出穩定優勢。高頻短線的成本與雜訊極高,長期勝出者鳳毛麟角。"
+      },
+      {
+        "code": "thin_profit_factor",
+        "severity": "low",
+        "message": "獲利因子僅 0.21(總獲利 ÷ 總虧損)。幾乎是在原地打轉,扣掉沒算到的成本後很可能其實在虧。"
+      }
+    ],
+    "reasons": [
+      "在 35 筆(已達判定門檻)交易下,每筆平均損益為 -11673.68(已含成本)。正期望值是任何可持續策略的最低門檻,而你目前是負的。"
+    ],
+    "advice": [
+      "立刻停止用真金白銀執行這套方法 — 它不是『還沒成功』,而是『方向錯誤』。",
+      "帳面曾經賺錢的部分,統計上更像運氣而非本事;運氣會均值回歸。",
+      "回到紙上模擬,先找到『期望值為正』的進出場規則,再談下一步。"
+    ]
+  },
+  "profile": {
+    "style": "當沖 / 極短線(高頻、高成本、最接近賭博的型態)",
+    "style_code": "scalp_intraday",
+    "dominant_market": "tw_stock",
+    "dominant_side": "long",
+    "avg_holding_days": 0.0,
+    "median_holding_days": 0.0,
+    "symbol_concentration": 0.3142857142857143,
+    "distinct_symbols": 14,
+    "tags": {
+      "當沖追高": 19,
+      "聽明牌": 16
+    },
+    "per_tag_winrate": {
+      "當沖追高": 0.21052631578947367,
+      "聽明牌": 0.25
+    },
+    "notes": [
+      "以當沖為主:這類交易長期能穩定獲利的比例極低,且成本侵蝕嚴重。"
+    ]
+  },
+  "out_of_sample": {
+    "in_sample": {
+      "label": "樣本內(前段)",
+      "n_trades": 24,
+      "win_rate": 0.2916666666666667,
+      "expectancy": -9634.930208333333,
+      "profit_factor": 0.28719401354538465,
+      "total_pnl": -231238.325,
+      "p_value_bootstrap": 0.99000199960008,
+      "is_significant": false
+    },
+    "out_sample": {
+      "label": "樣本外(後段)",
+      "n_trades": 11,
+      "win_rate": 0.09090909090909091,
+      "expectancy": -16121.870454545455,
+      "profit_factor": 0.085409311399353,
+      "total_pnl": -177340.575,
+      "p_value_bootstrap": 1.0,
+      "is_significant": false
+    },
+    "edge_persisted": false,
+    "degradation": 0.6732731951292715,
+    "headline": "🎲 連樣本內都沒有正期望值 —— 這份紀錄看不出任何可延續的優勢。",
+    "interpretation": [
+      "前段本身就不賺錢,談不上『優勢延續』的問題。",
+      "目前的證據比較支持『這是賭博/虧損策略』而非『有方法』。",
+      "前提提醒:此驗證假設你的規則沒有「看著後段資料」調整過。若你是看完整段歷史才定規則,後段對你並不是真正沒看過的資料,這裡的結論會偏樂觀。"
+    ]
+  },
+  "tag_verdicts": [
+    {
+      "tag": "聽明牌",
+      "n_trades": 16,
+      "expectancy": -13419.014062499999,
+      "total_pnl": -214704.225,
+      "win_rate": 0.25,
+      "profit_factor": 0.2556699233211237,
+      "low_sample": true,
+      "is_losing": true
+    },
+    {
+      "tag": "當沖追高",
+      "n_trades": 19,
+      "expectancy": -10203.930263157894,
+      "total_pnl": -193874.675,
+      "win_rate": 0.21052631578947367,
+      "profit_factor": 0.1565323119906828,
+      "low_sample": true,
+      "is_losing": true
+    }
+  ],
+  "follow_guru": {
+    "n_trades": 16,
+    "expectancy": -13419.014062499999,
+    "total_pnl": -214704.225,
+    "level": "insufficient"
+  },
+  "counterfactual": {
+    "worst_tag": "聽明牌",
+    "before_expectancy": -11673.682857142858,
+    "after_expectancy": -10203.930263157894,
+    "before_total_pnl": -408578.9,
+    "after_total_pnl": -193874.675
+  },
+  "breakeven": {
+    "already_positive": false,
+    "structurally_hard": false,
+    "required_win_rate": 0.5832586420550466,
+    "required_payoff_ratio": 3.3750000000000004,
+    "fee_cut_to_breakeven": null
+  }
+}

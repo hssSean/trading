@@ -1,0 +1,173 @@
+{
+  "source": "crypto_luck.json (json, 載入 22 筆, 略過 0 筆)",
+  "markets": [
+    "crypto"
+  ],
+  "verdict": {
+    "level": "insufficient",
+    "should_discourage": true,
+    "headline": "⚠️ 樣本不足(22 筆):目前帳面為負(每筆 -192.61),但樣本太少,還無法斷定是方法錯還是運氣差。",
+    "required_trades": null,
+    "metrics": {
+      "total_trades": 22,
+      "wins": 3,
+      "losses": 19,
+      "breakeven": 0,
+      "win_rate": 0.13636363636363635,
+      "avg_win": 3030.3999999999996,
+      "avg_loss": 701.502105263158,
+      "payoff_ratio": 4.319872994341464,
+      "profit_factor": 0.6820852096328628,
+      "expectancy": -192.60636363636388,
+      "expectancy_r": -0.2745627734988912,
+      "total_pnl": -4237.340000000004,
+      "total_fees": 687.34,
+      "gross_profit": 9091.199999999999,
+      "gross_loss": 13328.540000000003,
+      "max_drawdown": 11322.340000000002,
+      "max_drawdown_pct": 0.5126710436948155,
+      "max_consecutive_losses": 16,
+      "sharpe": -0.08640413283480124,
+      "sortino": -0.20898968738374266,
+      "largest_win": 8446.999999999998,
+      "largest_loss": -3054.0,
+      "top_trade_pnl_share": 0.9291402675114395,
+      "avg_holding_days": 1.0909090909090908,
+      "is_mostly_intraday": false,
+      "drawdown_pct_reliable": true,
+      "r_multiples_count": 22
+    },
+    "significance": {
+      "n": 22,
+      "mean": -192.6063636363638,
+      "std": 2082.5153992446026,
+      "t_stat": -0.43380419840831796,
+      "p_value_t": 0.6655727072821667,
+      "p_value_bootstrap": 0.6232753449310138,
+      "ci_low": -881.3654545454544,
+      "ci_high": 782.9399999999996,
+      "is_significant": false
+    },
+    "red_flags": [
+      {
+        "code": "negative_expectancy",
+        "severity": "high",
+        "message": "每筆交易的樣本期望值為負(-192.61)。方法不變的話,長期繼續的統計預期就是虧損。"
+      },
+      {
+        "code": "concentrated_profit",
+        "severity": "high",
+        "message": "光是最賺的一筆,就佔了總獲利的 93%。你的『獲利』高度依賴單次幸運,而非可重複的方法。"
+      },
+      {
+        "code": "severe_drawdown",
+        "severity": "high",
+        "message": "最大回撤達 51%。這代表過程中你的帳戶曾腰斬以上 — 多數人撐不過這種壓力。"
+      },
+      {
+        "code": "long_losing_streak",
+        "severity": "medium",
+        "message": "曾連續虧損 16 次。請誠實問自己:連賠這麼多次,你還守得住原本的紀律嗎?"
+      },
+      {
+        "code": "thin_profit_factor",
+        "severity": "low",
+        "message": "獲利因子僅 0.68(總獲利 ÷ 總虧損)。幾乎是在原地打轉,扣掉沒算到的成本後很可能其實在虧。"
+      }
+    ],
+    "reasons": [
+      "目前只有 22 筆交易,帳面期望值為負。但在這個樣本量下,負期望同樣可能只是隨機的壞運,尚不足以定論。"
+    ],
+    "advice": [
+      "在用小額(可承受全損的金額)累積到約 9999 筆交易前,不要加大部位。",
+      "把每一筆交易的『進場理由』記錄下來(用 tag 欄位),日後才能驗證是哪套邏輯有效。"
+    ]
+  },
+  "profile": {
+    "style": "短線波段(數日內進出)",
+    "style_code": "swing_short",
+    "dominant_market": "crypto",
+    "dominant_side": "long",
+    "avg_holding_days": 1.0909090909090908,
+    "median_holding_days": 1.0,
+    "symbol_concentration": 0.6363636363636364,
+    "distinct_symbols": 6,
+    "tags": {
+      "追突破": 13,
+      "梭哈迷因": 9
+    },
+    "per_tag_winrate": {
+      "追突破": 0.07692307692307693,
+      "梭哈迷因": 0.2222222222222222
+    },
+    "notes": []
+  },
+  "out_of_sample": {
+    "in_sample": {
+      "label": "樣本內(前段)",
+      "n_trades": 12,
+      "win_rate": 0.25,
+      "expectancy": 313.9916666666665,
+      "profit_factor": 1.7078128228730294,
+      "total_pnl": 3767.8999999999974,
+      "p_value_bootstrap": 0.2751449710057988,
+      "is_significant": false
+    },
+    "out_sample": {
+      "label": "樣本外(後段)",
+      "n_trades": 10,
+      "win_rate": 0.0,
+      "expectancy": -800.5240000000001,
+      "profit_factor": 0.0,
+      "total_pnl": -8005.240000000001,
+      "p_value_bootstrap": 0.9932013597280543,
+      "is_significant": false
+    },
+    "edge_persisted": false,
+    "degradation": 3.549507152525281,
+    "headline": "⚠️ 優勢消失:樣本內看似有效,但在樣本外大幅衰退或翻負。",
+    "interpretation": [
+      "樣本內期望值 +313.99 → 樣本外 -800.52(衰減 355%)。",
+      "這是過度配適 / 倖存者偏差的典型徵兆:策略只是『記住了』舊行情,",
+      "面對新資料就失靈。把這種策略自動化,等於把運氣當實力下注。",
+      "前提提醒:此驗證假設你的規則沒有「看著後段資料」調整過。若你是看完整段歷史才定規則,後段對你並不是真正沒看過的資料,這裡的結論會偏樂觀。"
+    ]
+  },
+  "tag_verdicts": [
+    {
+      "tag": "追突破",
+      "n_trades": 13,
+      "expectancy": -216.11846153846156,
+      "total_pnl": -2809.54,
+      "win_rate": 0.07692307692307693,
+      "profit_factor": 0.05451718637474172,
+      "low_sample": true,
+      "is_losing": true
+    },
+    {
+      "tag": "梭哈迷因",
+      "n_trades": 9,
+      "expectancy": -158.64444444444484,
+      "total_pnl": -1427.8000000000036,
+      "win_rate": 0.2222222222222222,
+      "profit_factor": 0.8621415467799554,
+      "low_sample": true,
+      "is_losing": true
+    }
+  ],
+  "follow_guru": null,
+  "counterfactual": {
+    "worst_tag": "追突破",
+    "before_expectancy": -192.60636363636388,
+    "after_expectancy": -158.64444444444484,
+    "before_total_pnl": -4237.340000000004,
+    "after_total_pnl": -1427.8000000000036
+  },
+  "breakeven": {
+    "already_positive": false,
+    "structurally_hard": false,
+    "required_win_rate": 0.18797441237105844,
+    "required_payoff_ratio": 6.333333333333334,
+    "fee_cut_to_breakeven": null
+  }
+}

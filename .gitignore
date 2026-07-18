@@ -31,3 +31,6 @@ npm-debug.log*
 
 # typescript incremental build cache
 *.tsbuildinfo
+
+# porting reference repos (do not commit)
+reference/

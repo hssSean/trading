@@ -1,0 +1,149 @@
+{
+  "source": "us_stock_edge.csv (csv, 載入 42 筆, 略過 0 筆)",
+  "markets": [
+    "us_stock"
+  ],
+  "verdict": {
+    "level": "statistical_edge",
+    "should_discourage": false,
+    "headline": "✅ 具統計優勢:在現有樣本下,你的正期望值通過了顯著性檢定。",
+    "required_trades": 30,
+    "metrics": {
+      "total_trades": 42,
+      "wins": 30,
+      "losses": 12,
+      "breakeven": 0,
+      "win_rate": 0.7142857142857143,
+      "avg_win": 1848.5166666666667,
+      "avg_loss": 828.4583333333334,
+      "payoff_ratio": 2.23127294673842,
+      "profit_factor": 5.5781823668460495,
+      "expectancy": 1083.6666666666667,
+      "expectancy_r": 1.3080521048131568,
+      "total_pnl": 45514.0,
+      "total_fees": 76.0,
+      "gross_profit": 55455.5,
+      "gross_loss": 9941.5,
+      "max_drawdown": 2702.0,
+      "max_drawdown_pct": 0.08513990420973028,
+      "max_consecutive_losses": 2,
+      "sharpe": 0.6280641028849947,
+      "sortino": 2.110345034014658,
+      "largest_win": 7948.0,
+      "largest_loss": -2702.0,
+      "top_trade_pnl_share": 0.14332212314378195,
+      "avg_holding_days": 45.26190476190476,
+      "is_mostly_intraday": false,
+      "drawdown_pct_reliable": true,
+      "r_multiples_count": 42
+    },
+    "significance": {
+      "n": 42,
+      "mean": 1083.6666666666667,
+      "std": 1799.6277076603544,
+      "t_stat": 3.9024530686432968,
+      "p_value_t": 0.00017353408809643998,
+      "p_value_bootstrap": 0.0005998800239952009,
+      "ci_low": 567.3214285714286,
+      "ci_high": 1664.3809523809523,
+      "is_significant": true
+    },
+    "red_flags": [],
+    "reasons": [
+      "平均每筆損益 +1083.67,bootstrap p=0.001、t 檢定 p=0.000,雙雙顯著。",
+      "信賴區間 [567.32, 1664.38] 完全落在 0 以上。"
+    ],
+    "advice": [
+      "這是『目前為止』的證據,不是未來的保證。市場會變,優勢會衰減。",
+      "持續監控:若新交易讓顯著性掉回不顯著,代表優勢可能正在消失。",
+      "務必做樣本外回測,並用本工具產生策略骨架,把規則固化下來避免情緒干擾。"
+    ]
+  },
+  "profile": {
+    "style": "中長期持有(數月)",
+    "style_code": "position",
+    "dominant_market": "us_stock",
+    "dominant_side": "long",
+    "avg_holding_days": 45.26190476190476,
+    "median_holding_days": 48.0,
+    "symbol_concentration": 0.42857142857142855,
+    "distinct_symbols": 8,
+    "tags": {
+      "季線突破": 29,
+      "均線多頭": 13
+    },
+    "per_tag_winrate": {
+      "季線突破": 0.896551724137931,
+      "均線多頭": 0.3076923076923077
+    },
+    "notes": []
+  },
+  "out_of_sample": {
+    "in_sample": {
+      "label": "樣本內(前段)",
+      "n_trades": 29,
+      "win_rate": 0.7586206896551724,
+      "expectancy": 1241.310344827586,
+      "profit_factor": 6.631727158948686,
+      "total_pnl": 35998.0,
+      "p_value_bootstrap": 0.0009998000399920016,
+      "is_significant": true
+    },
+    "out_sample": {
+      "label": "樣本外(後段)",
+      "n_trades": 13,
+      "win_rate": 0.6153846153846154,
+      "expectancy": 732.0,
+      "profit_factor": 3.680940977602479,
+      "total_pnl": 9516.0,
+      "p_value_bootstrap": 0.022195560887822437,
+      "is_significant": true
+    },
+    "edge_persisted": true,
+    "degradation": 0.41030057225401406,
+    "headline": "✅ 優勢延續:樣本內展現的正期望值,在樣本外仍然存在且統計顯著。",
+    "interpretation": [
+      "樣本內期望值 +1241.31 → 樣本外 +732.00(衰減 41%),仍維持正值且通過顯著性檢定。",
+      "這是相對強的證據:優勢不只是貼合舊資料,在沒看過的後段也成立。",
+      "但仍非保證 —— 市場結構改變時,優勢可能在未來才衰減。",
+      "前提提醒:此驗證假設你的規則沒有「看著後段資料」調整過。若你是看完整段歷史才定規則,後段對你並不是真正沒看過的資料,這裡的結論會偏樂觀。"
+    ]
+  },
+  "tag_verdicts": [
+    {
+      "tag": "均線多頭",
+      "n_trades": 13,
+      "expectancy": -435.6538461538462,
+      "total_pnl": -5663.5,
+      "win_rate": 0.3076923076923077,
+      "profit_factor": 0.3531863864778438,
+      "low_sample": true,
+      "is_losing": true
+    },
+    {
+      "tag": "季線突破",
+      "n_trades": 29,
+      "expectancy": 1764.7413793103449,
+      "total_pnl": 51177.5,
+      "win_rate": 0.896551724137931,
+      "profit_factor": 44.169548713622945,
+      "low_sample": true,
+      "is_losing": false
+    }
+  ],
+  "follow_guru": null,
+  "counterfactual": {
+    "worst_tag": "均線多頭",
+    "before_expectancy": 1083.6666666666667,
+    "after_expectancy": 1764.7413793103449,
+    "before_total_pnl": 45514.0,
+    "after_total_pnl": 51177.5
+  },
+  "breakeven": {
+    "already_positive": true,
+    "structurally_hard": false,
+    "required_win_rate": null,
+    "required_payoff_ratio": null,
+    "fee_cut_to_breakeven": null
+  }
+}
