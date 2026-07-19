@@ -42,6 +42,7 @@ const REJECT_LABEL: Record<string, string> = {
   btc_pause:         'BTC 急漲跌暫停',
   same_dir_cap:      '同向上限',
   loss_cooldown:     '止損後冷卻24h',
+  bias_hold:         '反向bias保留',
   has_open_position: '已有持倉',
   dup_check_error:   '重複檢查失敗',
   score_gate:        '分數/組數未達',

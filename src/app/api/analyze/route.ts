@@ -88,6 +88,36 @@ async function isOnLossCooldown(symbol: string, direction: string): Promise<bool
   return false;
 }
 
+// ── v2.4 §1: Directional bias hold after an "opportunity-expired" cancel ──────
+// When a limit order is cancelled because the entry never triggered (timeout /
+// price ran away / TP1 hit without us) — the DIRECTION was still right, we just
+// missed the entry. Spec red line: such a cancel must NEVER lead straight to a
+// reverse order. We hold the bias for 12 bars: same-direction re-entry is fine,
+// opposite-direction signals are downgraded to watch (skipped). A "thesis
+// invalidated" cancel (structure broke) sets NO hold — reverse is allowed.
+const BIAS_HOLD_BARS = 12;
+const memBiasHold = new Map<string, { dir: string; until: number }>(); // symbol → held dir
+
+async function setBiasHold(symbol: string, direction: string, ttlSec: number): Promise<void> {
+  memBiasHold.set(symbol, { dir: direction, until: Date.now() + ttlSec * 1000 });
+  const r = getRedis();
+  if (r) {
+    try { await r.set(`bias_hold:${symbol}`, direction, { ex: ttlSec }); } catch { /* mem holds */ }
+  }
+}
+
+async function getBiasHold(symbol: string): Promise<string | null> {
+  const r = getRedis();
+  if (r) {
+    try {
+      const v = await r.get<string>(`bias_hold:${symbol}`);
+      if (v) return v;
+    } catch { /* fall through to memory */ }
+  }
+  const mem = memBiasHold.get(symbol);
+  return mem && mem.until > Date.now() ? mem.dir : null;
+}
+
 async function getLock(symbol: string): Promise<LockEntry | null> {
   const r = getRedis();
   if (r) {
@@ -279,6 +309,10 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     let fillCandle: Candle | null = null;
     let cancelReason: string | null = null; // 完整訊息（LINE / 詳細）
     let cancelBody: string | null = null;   // 短訊息（push body）
+    // v2.4 §1.1: 取消原因分兩類，反向權限完全不同
+    //   opportunity_expired（機會過期）：方向仍成立，只是沒等到進場 → 保留 bias、禁反向
+    //   thesis_invalidated（論點失效）：進場理由被推翻 → 不保留 bias、反向照冷卻規則
+    let cancelClass: 'opportunity_expired' | 'thesis_invalidated' | null = null;
     for (const c of candles) {
       const touched = isLong
         ? c.low  <= entry * 1.001 && (sp === 0 || sp > entry * 1.002)
@@ -288,6 +322,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       if (isLong ? c.close <= slPx : c.close >= slPx) {
         cancelReason = `價格收盤${isLong ? '跌破' : '突破'}止損位 $${fmtPrice(slPx)}，進場前提已失效，掛單取消`;
         cancelBody   = '結構已突破，setup 失效';
+        cancelClass  = 'thesis_invalidated'; // 論點失效 → 反向可依冷卻規則
         break;
       }
       // 行情走遠：自掛單當下（signal_price）朝獲利方向走了 ≥1R —— 回不到進場位。
@@ -296,11 +331,13 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       if (sp > 0 && risk > 0 && (isLong ? c.close >= sp + risk : c.close <= sp - risk)) {
         cancelReason = `價格自掛單當下 $${fmtPrice(sp)} 已朝${isLong ? '上' : '下'}走了 1R 以上，未回測進場位 $${fmtPrice(entry)}，回測機率大減 —— 放棄追進`;
         cancelBody   = '行情已走遠，不追單';
+        cancelClass  = 'opportunity_expired'; // 方向對、只是沒進到 → 保留 bias、禁反向
         break;
       }
       if (isLong ? c.high >= (trade.tp1 as number) : c.low <= (trade.tp1 as number)) {
         cancelReason = `價格未回測至進場位 $${fmtPrice(entry)}，直接到達 TP1 $${fmtPrice(trade.tp1 as number)}，掛單已自動取消`;
         cancelBody   = 'TP1 直接到達，跳過進場';
+        cancelClass  = 'opportunity_expired'; // 方向對到都到 TP1 了 → 保留 bias、禁反向
         break;
       }
     }
@@ -312,6 +349,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     if (!isFilled && !cancelReason && isExpired) {
       cancelReason = `掛單超過 ${WAITING_EXPIRY_BARS} 根 ${trade.timeframe ?? '1h'} K 線未成交，已自動取消（規格 §3-A）`;
       cancelBody   = `逾期 ${WAITING_EXPIRY_BARS} 根 K 線未成交`;
+      cancelClass  = 'opportunity_expired'; // C1 超時 → 保留 bias、禁反向（v2.4 §1.1 紅線）
     }
     const isCancelled = !isFilled && cancelReason !== null;
 
@@ -375,12 +413,21 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       } else {
         await unlockSymbol(trade.symbol as string);
         cancelled++;
+        // v2.4 §1.2: opportunity-expired cancels hold the direction bias for 12
+        // bars so a reverse order can't fire straight after (the red line). A
+        // thesis-invalidated cancel (structure broke) sets no hold.
+        if (cancelClass === 'opportunity_expired') {
+          const holdSec = BIAS_HOLD_BARS * tfBarMinutes(trade.timeframe as string | null) * 60;
+          await setBiasHold(trade.symbol as string, trade.direction as string, holdSec);
+        }
         // Notify only after row is confirmed gone — prevents repeat if delete had failed.
         // cancelReason/cancelBody were set during the chronological scan above.
         {
           const dir = isLong ? '▲ 做多' : '▼ 做空';
           const sym = (trade.symbol as string).replace('USDT', '/USDT');
-          const reason = cancelReason ?? '掛單已自動取消';
+          const holdNote = cancelClass === 'opportunity_expired'
+            ? `\n（${isLong ? '多頭' : '空頭'} bias 保留 ${BIAS_HOLD_BARS} 根 K 線，期間反向訊號僅列觀察，同向可重掛）` : '';
+          const reason = (cancelReason ?? '掛單已自動取消') + holdNote;
           const cancelMsg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
           if (lineToken && lineUserId) {
             await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: cancelMsg }]);
@@ -419,13 +466,19 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     const isTp1Hit      = trade.status === 'tp1_hit';
     const tradeStrategy = (trade.strategy as string | null) ?? '';
 
-    // ── Phase 5: Trailing stop state ─────────────────────────────
-    // Load from DB (columns may not exist yet — undefined → safe defaults via ??)
-    const isTrailingActive  = (trade.trailing_stop_active as boolean | null) ?? false;
+    // ── Protective stop state (v2.4 §2: unified ladder + trailing) ───────────
+    // current_stop persists ONE protective stop across scans:
+    //   pre-TP1  → profit ladder (+0.5R→breakeven, +1.0R→+0.3R)
+    //   post-TP1 → 2×ATR trailing
+    // Loaded regardless of the active flag so the pre-TP1 ladder also persists.
+    // A non-zero protective stop is the irreversible "reached +0.5R" mark that
+    // permanently disables the time stop for this trade.
     const savedTrailingStop = (trade.current_stop as number | null) ?? 0;
-    let trailingStop        = isTrailingActive && savedTrailingStop > 0 ? savedTrailingStop : 0;
+    let trailingStop        = savedTrailingStop > 0 ? savedTrailingStop : 0;
     let trailingStopUpdated = false;
-    let hitTrailingStop     = false;
+    let hitTrailingStop     = false;  // post-TP1 trailing exit (WIN_TP1)
+    let hitProtLadder       = false;  // pre-TP1 ladder exit (breakeven / +0.3R)
+    const riskDist          = Math.abs((trade.entry as number) - (trade.stop_loss as number));
 
     // Simple 14-period ATR from 1H candles — used to set/ratchet trailing stop.
     // Only computed for Strategy A trades; Strategy B uses fixed TP=BB middle (no trailing).
@@ -444,7 +497,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     }
 
     // Pre-loop: initialize trailing stop for existing tp1_hit trades that pre-date the columns.
-    // When isTp1Hit=true but isTrailingActive=false (columns newly migrated or first run),
+    // When isTp1Hit=true but no current_stop is stored (columns newly migrated or first run),
     // seed from TP1 price so the ratchet loop has a valid anchor rather than an arbitrary close.
     if (isTp1Hit && tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
       trailingStop = isLong
@@ -480,19 +533,34 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         if (c.high >= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
         }
-        // Trailing stop fires before original SL — gives better exit after TP1
-        if (localTp1Hit && trailingStop > 0 && c.low <= trailingStop) {
-          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
+        // Protective stop fires before original SL. Uses the value from BEFORE this
+        // candle's ratchet, so a stop just initialized this candle isn't self-triggered.
+        // Post-TP1 → WIN_TP1 (trailing); pre-TP1 → MANUAL_CLOSE (ladder: breakeven/+0.3R).
+        if (trailingStop > 0 && c.low <= trailingStop) {
+          if (localTp1Hit) { closeResult = 'WIN_TP1'; hitTrailingStop = true; }
+          else             { closeResult = 'MANUAL_CLOSE'; hitProtLadder = true; }
+          closePrice = trailingStop; break;
         }
         if (c.low <= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
           closePrice  = trade.stop_loss as number;
           break;
         }
-        // Ratchet trailing stop upward as price advances (not on the init candle)
+        // Post-TP1: ratchet trailing stop upward via 2×ATR (not on the init candle)
         if (localTp1Hit && !justInitializedTrailing && tradeStrategy === 'A' && atr1h > 0) {
           const candidate = c.close - 2 * atr1h;
           if (candidate > trailingStop) { trailingStop = candidate; trailingStopUpdated = true; }
+        }
+        // Pre-TP1 profit ladder (v2.4 §2): based on the max favourable excursion
+        // reached (candle high). +1.0R → stop to entry+0.3R; +0.5R → breakeven.
+        // Ratchet only up. Checked after the hit test so a newly-set stop isn't
+        // triggered by the same candle that created it.
+        if (!localTp1Hit && riskDist > 0) {
+          const rHigh = (c.high - (trade.entry as number)) / riskDist;
+          const rung  = rHigh >= 1.0 ? (trade.entry as number) + 0.3 * riskDist
+                      : rHigh >= 0.5 ? (trade.entry as number)
+                      : 0;
+          if (rung > trailingStop) { trailingStop = rung; trailingStopUpdated = true; }
         }
       } else {
         if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
@@ -507,19 +575,51 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         if (c.low <= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
         }
-        if (localTp1Hit && trailingStop > 0 && c.high >= trailingStop) {
-          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
+        // Protective stop (SHORT: stop is ABOVE, hit when high >= stop).
+        // Post-TP1 → WIN_TP1 (trailing); pre-TP1 → MANUAL_CLOSE (ladder).
+        if (trailingStop > 0 && c.high >= trailingStop) {
+          if (localTp1Hit) { closeResult = 'WIN_TP1'; hitTrailingStop = true; }
+          else             { closeResult = 'MANUAL_CLOSE'; hitProtLadder = true; }
+          closePrice = trailingStop; break;
         }
         if (c.high >= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
           closePrice  = trade.stop_loss as number;
           break;
         }
-        // Ratchet trailing stop downward as price advances (SHORT)
+        // Post-TP1: ratchet trailing stop downward via 2×ATR (SHORT)
         if (localTp1Hit && !justInitializedTrailing && tradeStrategy === 'A' && atr1h > 0) {
           const candidate = c.close + 2 * atr1h;
           if (trailingStop === 0 || candidate < trailingStop) { trailingStop = candidate; trailingStopUpdated = true; }
         }
+        // Pre-TP1 profit ladder (SHORT mirror): +1.0R → entry−0.3R; +0.5R → breakeven.
+        // Ratchet only DOWN (stop moves toward profit as price falls).
+        if (!localTp1Hit && riskDist > 0) {
+          const rLow = ((trade.entry as number) - c.low) / riskDist;
+          const rung = rLow >= 1.0 ? (trade.entry as number) - 0.3 * riskDist
+                     : rLow >= 0.5 ? (trade.entry as number)
+                     : 0;
+          if (rung > 0 && (trailingStop === 0 || rung < trailingStop)) { trailingStop = rung; trailingStopUpdated = true; }
+        }
+      }
+    }
+
+    // v2.4 §2.2: notify on a pre-TP1 ladder rung being newly raised (breakeven /
+    // +0.3R) so the user knows "this trade is now risk-free / profit-locked, hold
+    // for TP1". Only fires on the transition (not hourly) to avoid push spam.
+    if (!closeResult && !justHitTp1 && !localTp1Hit && trailingStopUpdated && trailingStop > 0 && riskDist > 0) {
+      const rOf = (stop: number) => (isLong ? stop - (trade.entry as number) : (trade.entry as number) - stop) / riskDist;
+      const prevProtR = savedTrailingStop > 0 ? rOf(savedTrailingStop) : -Infinity;
+      const newProtR  = rOf(trailingStop);
+      if (newProtR > prevProtR + 1e-9 && profileId) {
+        const dir = isLong ? '▲ 做多' : '▼ 做空';
+        const sym = (trade.symbol as string).replace('USDT', '/USDT');
+        const atBreakeven = Math.abs(newProtR) < 0.05;
+        await sendWebPushToUser(profileId, {
+          title: `🛡 ${sym} ${atBreakeven ? '止損移至保本' : '止損鎖 +0.3R'}`,
+          body: `${dir} 曾達 ${atBreakeven ? '+0.5R' : '+1.0R'}，${atBreakeven ? '此單已無虧損風險' : '已鎖定利潤'}，續抱等 TP1`,
+          tag: `ladder-${trade.id}-${atBreakeven ? 'be' : 'r03'}`, // rung-specific tag → at most one push per rung
+        });
       }
     }
 
@@ -611,11 +711,14 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     const ageHours       = (now - ((trade.filled_at ?? trade.opened_at ?? 0) as number)) / 3_600_000;
     const lastClose      = candles.length > 0 ? candles[candles.length - 1].close : null;
 
-    // v2 spec §3-A 時間止損：進場後 8 根（該時框）K 線未達 +0.5R → 平價/小損出場。
-    // 2026-07-19 漏斗數據：持倉鎖定佔全部拒絕 41%（第一名）—— 停滯單提早
-    // 釋放倉位是容量最大的槓桿。已達 TP1 的單在獲利管理模式，不適用。
+    // v2.4 §2.1 時間止損：只清理「停滯單」（從未達 +0.5R），永不平獲利中的單。
+    //   trailingStop > 0  = 曾達 +0.5R（利潤階梯已啟動，不可逆）→ 時間止損永久解除
+    //   trailingStop === 0 = 從未達 +0.5R
+    //     8 根 K 線後仍在 −0.3R ~ +0.3R 之間震盪 → 建議市價出場（釋放倉位）
+    //     已接近止損（< −0.3R）→ 不動，讓原止損決定（不提前認賠）
+    //     +0.3R ~ +0.5R（正在推進）→ 不動，給它到 +0.5R 鎖利的機會
     let timeStopFired = false;
-    if (!closeResult && !localTp1Hit && lastClose !== null) {
+    if (!closeResult && !localTp1Hit && trailingStop === 0 && lastClose !== null && riskDist > 0) {
       const barMinutes = trade.timeframe === '5m' ? 5
         : trade.timeframe === '15m' ? 15
         : trade.timeframe === '4h' ? 240
@@ -623,16 +726,13 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         : 60;
       const ageBars = (now - ((trade.filled_at ?? trade.opened_at ?? 0) as number)) / (barMinutes * 60_000);
       if (ageBars >= 8) {
-        const riskDist = Math.abs((trade.entry as number) - (trade.stop_loss as number));
-        if (riskDist > 0) {
-          const progressR = (isLong
-            ? lastClose - (trade.entry as number)
-            : (trade.entry as number) - lastClose) / riskDist;
-          if (progressR < 0.5) {
-            closeResult   = 'MANUAL_CLOSE';
-            closePrice    = lastClose;
-            timeStopFired = true;
-          }
+        const progressR = (isLong
+          ? lastClose - (trade.entry as number)
+          : (trade.entry as number) - lastClose) / riskDist;
+        if (progressR >= -0.3 && progressR <= 0.3) {
+          closeResult   = 'MANUAL_CLOSE';
+          closePrice    = lastClose;
+          timeStopFired = true;
         }
       }
     }
@@ -729,8 +829,12 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       const pnlStr = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       let closeMsg: string;
       let pushTitle: string;
-      if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
-        closeMsg   = `【⏱ 時間止損】${sym}\n${dir} 8 根 K 線未達 +0.5R，平價出場釋放倉位（規格 §3-A）\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
+      if (closeResult === 'MANUAL_CLOSE' && hitProtLadder) {
+        const atBreakeven = Math.abs(closePrice - (trade.entry as number)) / (trade.entry as number) < 0.0005;
+        closeMsg   = `【🛡 利潤保護出場】${sym}\n${dir} 曾達 +0.5R 後回落，${atBreakeven ? '保本' : '鎖 +0.3R'}出場（規格 §2.2 利潤階梯）\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
+        pushTitle  = `🛡 利潤保護 ${sym}`;
+      } else if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
+        closeMsg   = `【⏱ 時間止損】${sym}\n${dir} 8 根 K 線停滯於 ±0.3R，平價出場釋放倉位（規格 §2.1）\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle  = `⏱ 時間止損 ${sym}`;
       } else if (closeResult === 'MANUAL_CLOSE') {
         closeMsg   = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
@@ -1650,6 +1754,17 @@ export async function GET(req: NextRequest) {
         if (!skipReason && await isOnLossCooldown(symbol, entrySignal.direction)) {
           skipKey = 'loss_cooldown';
           skipReason = `跳過 — ${symbol} ${entrySignal.direction === 'LONG' ? '做多' : '做空'} 24h 內止損過，同向暫停一天`;
+        }
+
+        // v2.4 §1.2: directional bias hold — after an opportunity-expired cancel,
+        // an OPPOSITE-direction signal is downgraded to watch (skipped) until the
+        // 12-bar hold lapses. Same-direction signals pass through untouched.
+        if (!skipReason) {
+          const heldDir = await getBiasHold(symbol);
+          if (heldDir && heldDir !== entrySignal.direction) {
+            skipKey = 'bias_hold';
+            skipReason = `觀察單 — ${symbol} ${heldDir === 'LONG' ? '多頭' : '空頭'} bias 保留中（掛單超時取消，方向未失效），反向訊號不進場`;
+          }
         }
 
         // §4.3 Same-direction risk cap（風險加權：A=1%、B=0.5%）
