@@ -59,11 +59,11 @@ const memLock = new Map<string, LockEntry>();
 const LOSS_COOLDOWN_SEC = 24 * 3600;
 const memLossCd = new Map<string, number>(); // `${symbol}:${dir}` → expiry ms
 
-async function setLossCooldown(symbol: string, direction: string): Promise<void> {
-  memLossCd.set(`${symbol}:${direction}`, Date.now() + LOSS_COOLDOWN_SEC * 1000);
+async function setLossCooldown(symbol: string, direction: string, ttlSec: number = LOSS_COOLDOWN_SEC): Promise<void> {
+  memLossCd.set(`${symbol}:${direction}`, Date.now() + ttlSec * 1000);
   const r = getRedis();
   if (r) {
-    try { await r.set(`loss_cd:${symbol}:${direction}`, '1', { ex: LOSS_COOLDOWN_SEC }); } catch { /* mem holds */ }
+    try { await r.set(`loss_cd:${symbol}:${direction}`, '1', { ex: ttlSec }); } catch { /* mem holds */ }
   }
 }
 
@@ -123,7 +123,10 @@ const COINS_TTL           = 60 * 60 * 1000;
 async function getDefaultCoins(): Promise<string[]> {
   if (Date.now() - cachedAt < COINS_TTL && cachedCoins.length > 0) return cachedCoins;
   try {
-    cachedCoins = await fetchTopCoinsByVolume(15);
+    // Spec §2.1 = top 20 by volume. Was cut to 15 for CPU; the 2026-07-18
+    // indicator optimizations roughly halved per-coin cost, so restore 20 —
+    // more distinct coins directly reduces 持倉鎖定 collisions (41% of rejects).
+    cachedCoins = await fetchTopCoinsByVolume(20);
     cachedAt    = Date.now();
     return cachedCoins;
   } catch {
@@ -566,6 +569,32 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     const ageHours       = (now - ((trade.filled_at ?? trade.opened_at ?? 0) as number)) / 3_600_000;
     const lastClose      = candles.length > 0 ? candles[candles.length - 1].close : null;
 
+    // v2 spec §3-A 時間止損：進場後 8 根（該時框）K 線未達 +0.5R → 平價/小損出場。
+    // 2026-07-19 漏斗數據：持倉鎖定佔全部拒絕 41%（第一名）—— 停滯單提早
+    // 釋放倉位是容量最大的槓桿。已達 TP1 的單在獲利管理模式，不適用。
+    let timeStopFired = false;
+    if (!closeResult && !localTp1Hit && lastClose !== null) {
+      const barMinutes = trade.timeframe === '5m' ? 5
+        : trade.timeframe === '15m' ? 15
+        : trade.timeframe === '4h' ? 240
+        : trade.timeframe === '1d' ? 1440
+        : 60;
+      const ageBars = (now - ((trade.filled_at ?? trade.opened_at ?? 0) as number)) / (barMinutes * 60_000);
+      if (ageBars >= 8) {
+        const riskDist = Math.abs((trade.entry as number) - (trade.stop_loss as number));
+        if (riskDist > 0) {
+          const progressR = (isLong
+            ? lastClose - (trade.entry as number)
+            : (trade.entry as number) - lastClose) / riskDist;
+          if (progressR < 0.5) {
+            closeResult   = 'MANUAL_CLOSE';
+            closePrice    = lastClose;
+            timeStopFired = true;
+          }
+        }
+      }
+    }
+
     if (!closeResult && ageHours >= autoCloseHours && lastClose !== null) {
       closeResult = localTp1Hit ? 'WIN_TP1' : 'MANUAL_CLOSE';
       closePrice  = lastClose;
@@ -646,6 +675,10 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     // Post-loss cooldown: same symbol+direction blocked for 24h (see helper docs)
     if (closeResult === 'LOSS') {
       await setLossCooldown(trade.symbol as string, trade.direction as string);
+    } else if (timeStopFired) {
+      // 時間止損＝盤面停滯而非證偽；短冷卻 4h 防止立刻重進同一個停滯 setup
+      // 空轉手續費，倉位仍讓給其他幣種
+      await setLossCooldown(trade.symbol as string, trade.direction as string, 4 * 3600);
     }
 
     {
@@ -654,7 +687,10 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       const pnlStr = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       let closeMsg: string;
       let pushTitle: string;
-      if (closeResult === 'MANUAL_CLOSE') {
+      if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
+        closeMsg   = `【⏱ 時間止損】${sym}\n${dir} 8 根 K 線未達 +0.5R，平價出場釋放倉位（規格 §3-A）\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
+        pushTitle  = `⏱ 時間止損 ${sym}`;
+      } else if (closeResult === 'MANUAL_CLOSE') {
         closeMsg   = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle  = `⏱ 到期平倉 ${sym}`;
       } else {
@@ -853,9 +889,15 @@ async function checkEventFilter(): Promise<{ active: boolean; reason?: string }>
   }
 }
 
-// ── §4.3 Same-direction open-risk cap ────────────────────────
-// Max 2 same-direction trades total; altcoins (non-BTC/ETH) share one bucket, max 1.
-async function checkSameDirectionRisk(profileId: string, direction: string, symbol: string): Promise<{ block: boolean; reason?: string }> {
+// ── §4.3 Same-direction open-risk cap（風險加權）──────────────
+// Spec 原文是「同向合計風險 ≤ 2%」，舊實作卻數「筆數 ≤ 2」——B 級輕倉
+// 只佔 0.5% 風險，按筆數算會把容量砍半（2026-07-19 漏斗數據：同向上限
+// 佔全部拒絕 11-23%，是第二大容量瓶頸）。改為：
+//   同向合計風險 + 新單風險 ≤ 2.0%；山寨桶（非BTC/ETH）同向 ≤ 1.0%。
+// A 級 = 1%、B 級 = 0.5%（tier 欄位缺失的舊資料保守當 1%）。
+async function checkSameDirectionRisk(
+  profileId: string, direction: string, symbol: string, newTier: string | null | undefined,
+): Promise<{ block: boolean; reason?: string }> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key || !profileId) return { block: false };
@@ -863,20 +905,35 @@ async function checkSameDirectionRisk(profileId: string, direction: string, symb
     const { createClient: mk } = await import('@supabase/supabase-js');
     const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 
-    const { count: total } = await adm.from('trades')
-      .select('id', { count: 'exact', head: true })
+    const { data } = await adm.from('trades')
+      .select('symbol, tier')
       .eq('user_id', profileId).eq('direction', direction).is('closed_at', null);
-    if ((total ?? 0) >= 2)
-      return { block: true, reason: `同向上限：${direction} 已有 ${total} 筆持倉（上限 2）` };
+    const rows = (data ?? []) as { symbol: string; tier?: string | null }[];
+
+    const riskOf = (tier: string | null | undefined) => (tier === 'B' ? 0.5 : 1.0);
+    const newRisk = riskOf(newTier);
+
+    let totalRisk = 0;
+    let altRisk = 0;
+    for (const row of rows) {
+      const r = riskOf(row.tier);
+      totalRisk += r;
+      if (!row.symbol.startsWith('BTC') && !row.symbol.startsWith('ETH')) altRisk += r;
+    }
+
+    if (totalRisk + newRisk > 2.0) {
+      return {
+        block: true,
+        reason: `同向風險上限：${direction} 已占用 ${totalRisk.toFixed(1)}%，新單 ${newRisk.toFixed(1)}% 會超過 2%`,
+      };
+    }
 
     const isAltcoin = !symbol.startsWith('BTC') && !symbol.startsWith('ETH');
-    if (isAltcoin) {
-      const { count: altCount } = await adm.from('trades')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', profileId).eq('direction', direction).is('closed_at', null)
-        .not('symbol', 'like', 'BTC%').not('symbol', 'like', 'ETH%');
-      if ((altCount ?? 0) >= 1)
-        return { block: true, reason: `山寨同向上限：同方向山寨幣已有持倉 ${direction}` };
+    if (isAltcoin && altRisk + newRisk > 1.0) {
+      return {
+        block: true,
+        reason: `山寨同向風險上限：${direction} 山寨桶已占用 ${altRisk.toFixed(1)}%，加新單會超過 1%`,
+      };
     }
     return { block: false };
   } catch { return { block: false }; }
@@ -1553,9 +1610,9 @@ export async function GET(req: NextRequest) {
           skipReason = `跳過 — ${symbol} ${entrySignal.direction === 'LONG' ? '做多' : '做空'} 24h 內止損過，同向暫停一天`;
         }
 
-        // §4.3 Same-direction risk cap
+        // §4.3 Same-direction risk cap（風險加權：A=1%、B=0.5%）
         if (!skipReason && profileId) {
-          const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol);
+          const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol, entrySignal.tier);
           if (sdCheck.block) { skipKey = 'same_dir_cap'; skipReason = `跳過 — ${sdCheck.reason}`; }
         }
 

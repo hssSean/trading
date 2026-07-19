@@ -138,13 +138,13 @@ export default function HomePage() {
     if (!silent) setAutoLoading(true);
     setAutoMsg('');
     try {
-      const top = await fetchTopCoinsByVolume(15); // match server's 15-coin scan
+      const top = await fetchTopCoinsByVolume(20); // match server's 20-coin scan (spec §2.1)
       const store = useStore.getState();
       const existing = new Set(store.coins.map((c) => c.symbol));
       const toAdd = top.filter((s) => !existing.has(s));
       toAdd.forEach((s) => store.addCoin(s));
       if (!silent) {
-        setAutoMsg('已載入成交量前 15 名，新增 ' + toAdd.length + ' 個幣種');
+        setAutoMsg('已載入成交量前 20 名，新增 ' + toAdd.length + ' 個幣種');
         setTimeout(() => setAutoMsg(''), 4000);
       }
       const CONC = 3;
