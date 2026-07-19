@@ -28,7 +28,18 @@ const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2h cooldown between signals (was
 const STRONG_THRESHOLD   = 65;               // Strategy A: v2 spec ≥65 to notify
 const STRONG_THRESHOLD_B = 13;               // Strategy B: base 10 (BB+RSI cross) + ≥1 confirmation
 const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older than 24h
-const WAITING_EXPIRY_HOURS = 8;              // cancel unfilled limit orders after 8h
+const WAITING_EXPIRY_HOURS = 8;              // candle-window fallback for waiting orders
+const WAITING_EXPIRY_BARS  = 4;              // spec §3-A: 掛單有效期最多 4 根（該時框）K 線
+
+function tfBarMinutes(tf: string | null | undefined): number {
+  switch (tf) {
+    case '5m':  return 5;
+    case '15m': return 15;
+    case '4h':  return 240;
+    case '1d':  return 1440;
+    default:    return 60;
+  }
+}
 
 // Per-strategy threshold: Strategy B uses a 0-19 scoring scale; Strategy A uses 0-100.
 // v2.1 §1.5: tiered Strategy-A signals (A=65+/B=55+) are pre-gated inside
@@ -256,21 +267,50 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     const isLong = trade.direction === 'LONG';
     const sp     = (trade.signal_price ?? 0) as number;
     const entry  = trade.entry as number;
+    const slPx   = trade.stop_loss as number;
+    const risk   = Math.abs(entry - slPx);
 
-    // Fill: any 1h candle's low (LONG) / high (SHORT) touched entry ±0.1%
-    const fillCandle = candles.find(c =>
-      isLong
+    // ── 時序掃描：成交（影線觸及）vs 掛單失效（收盤確認），先到先贏 ──
+    // spec §3-A：掛單期間若進場前提失效須立即取消，不是傻等逾期。
+    // 失效三型（皆用收盤價確認，符合規格「收盤確認」精神）：
+    //   1. 結構突破：收盤越過止損位 —— 進場理由（FVG/支撐/阻力）已被有效突破
+    //   2. 行情走遠：未回測就朝目標方向走了 ≥1R —— 回到進場位的機率大減，不追
+    //   3. TP1 直達：連 TP1 都到了還沒成交（外圈保險，通常第 2 條先觸發）
+    let fillCandle: Candle | null = null;
+    let cancelReason: string | null = null; // 完整訊息（LINE / 詳細）
+    let cancelBody: string | null = null;   // 短訊息（push body）
+    for (const c of candles) {
+      const touched = isLong
         ? c.low  <= entry * 1.001 && (sp === 0 || sp > entry * 1.002)
-        : c.high >= entry * 0.999 && (sp === 0 || sp < entry * 0.998)
-    );
+        : c.high >= entry * 0.999 && (sp === 0 || sp < entry * 0.998);
+      if (touched) { fillCandle = c; break; }
+
+      if (isLong ? c.close <= slPx : c.close >= slPx) {
+        cancelReason = `價格收盤${isLong ? '跌破' : '突破'}止損位 $${fmtPrice(slPx)}，進場前提已失效，掛單取消`;
+        cancelBody   = '結構已突破，setup 失效';
+        break;
+      }
+      if (risk > 0 && (isLong ? c.close >= entry + risk : c.close <= entry - risk)) {
+        cancelReason = `價格未回測進場位 $${fmtPrice(entry)}，已朝目標方向走了 1R 以上，回測機率大減 —— 放棄追進`;
+        cancelBody   = '行情已走遠，不追單';
+        break;
+      }
+      if (isLong ? c.high >= (trade.tp1 as number) : c.low <= (trade.tp1 as number)) {
+        cancelReason = `價格未回測至進場位 $${fmtPrice(entry)}，直接到達 TP1 $${fmtPrice(trade.tp1 as number)}，掛單已自動取消`;
+        cancelBody   = 'TP1 直接到達，跳過進場';
+        break;
+      }
+    }
     const isFilled = !!fillCandle;
 
-    // Cancel: expired, OR any candle shows TP1 reached without price pulling back to entry
-    const isExpired = (now - ((trade.opened_at ?? 0) as number)) > WAITING_EXPIRY_HOURS * 3_600_000;
-    const tpAlreadyPassed = !isFilled && candles.some(c =>
-      isLong ? c.high >= (trade.tp1 as number) : c.low <= (trade.tp1 as number)
-    );
-    const isCancelled = !isFilled && (isExpired || tpAlreadyPassed);
+    // spec §3-A：掛單有效期最多 4 根（該時框）K 線
+    const expiryMs  = WAITING_EXPIRY_BARS * tfBarMinutes(trade.timeframe as string | null) * 60_000;
+    const isExpired = (now - ((trade.opened_at ?? 0) as number)) > expiryMs;
+    if (!isFilled && !cancelReason && isExpired) {
+      cancelReason = `掛單超過 ${WAITING_EXPIRY_BARS} 根 ${trade.timeframe ?? '1h'} K 線未成交，已自動取消（規格 §3-A）`;
+      cancelBody   = `逾期 ${WAITING_EXPIRY_BARS} 根 K 線未成交`;
+    }
+    const isCancelled = !isFilled && cancelReason !== null;
 
     if (isFilled) {
       const filledAt = fillCandle!.closeTime ?? now;
@@ -332,13 +372,12 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       } else {
         await unlockSymbol(trade.symbol as string);
         cancelled++;
-        // Notify only after row is confirmed gone — prevents repeat if delete had failed
+        // Notify only after row is confirmed gone — prevents repeat if delete had failed.
+        // cancelReason/cancelBody were set during the chronological scan above.
         {
           const dir = isLong ? '▲ 做多' : '▼ 做空';
           const sym = (trade.symbol as string).replace('USDT', '/USDT');
-          const reason = isExpired
-            ? `掛單逾期 ${WAITING_EXPIRY_HOURS} 小時未成交，已自動取消`
-            : `價格未回測至進場位 $${fmtPrice(entry)}，直接到達 TP1 $${fmtPrice(trade.tp1 as number)}，掛單已自動取消`;
+          const reason = cancelReason ?? '掛單已自動取消';
           const cancelMsg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
           if (lineToken && lineUserId) {
             await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: cancelMsg }]);
@@ -346,7 +385,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
           if (profileId) {
             await sendWebPushToUser(profileId, {
               title: `⚠️ 掛單取消 ${sym}`,
-              body: `${dir} ${isExpired ? `逾期 ${WAITING_EXPIRY_HOURS}h 未成交` : 'TP1 直接到達，跳過進場'}`,
+              body: `${dir} ${cancelBody ?? '掛單已取消'}`,
               tag: `cancel-${trade.id}`,
             });
           }

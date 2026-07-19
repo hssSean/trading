@@ -60,6 +60,21 @@ function accountPnlPct(t: { entry: number; stopLoss: number; pnlPercent?: number
   return r * (t.tier === 'B' ? 0.5 : 1.0);
 }
 
+// Win/loss is judged by realized PnL, not just the result label: a profitable
+// 時間止損/到期平倉 (MANUAL_CLOSE) counts as a win, a losing one as a loss.
+// WIN_TP*/LOSS keep their explicit meaning; a breakeven MANUAL_CLOSE (pnl 0) is neither.
+type ClosedLike = { result?: TradeResult; pnlPercent?: number };
+function isWinTrade(t: ClosedLike): boolean {
+  if (t.result === 'WIN_TP1' || t.result === 'WIN_TP2') return true;
+  if (t.result === 'MANUAL_CLOSE') return (t.pnlPercent ?? 0) > 0;
+  return false;
+}
+function isLossTrade(t: ClosedLike): boolean {
+  if (t.result === 'LOSS') return true;
+  if (t.result === 'MANUAL_CLOSE') return (t.pnlPercent ?? 0) < 0;
+  return false;
+}
+
 export default function TradesPage() {
   const trades          = useStore(s => s.trades);
   const coins           = useStore(s => s.coins);
@@ -142,8 +157,8 @@ export default function TradesPage() {
     });
     return { up, down };
   }, [pending, coins]);
-  const wins    = closed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
-  const losses  = closed.filter(t => t.result === 'LOSS');
+  const wins    = closed.filter(isWinTrade);
+  const losses  = closed.filter(isLossTrade);
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
   const avgPnl  = closed.length > 0
     ? (closed.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / closed.length).toFixed(2)
@@ -204,8 +219,8 @@ export default function TradesPage() {
 
   const longClosed  = closed.filter(t => t.direction === 'LONG');
   const shortClosed = closed.filter(t => t.direction === 'SHORT');
-  const longWins    = longClosed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
-  const shortWins   = shortClosed.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+  const longWins    = longClosed.filter(isWinTrade);
+  const shortWins   = shortClosed.filter(isWinTrade);
   const longWinRate  = longClosed.length  > 0 ? Math.round(longWins.length  / longClosed.length  * 100) : null;
   const shortWinRate = shortClosed.length > 0 ? Math.round(shortWins.length / shortClosed.length * 100) : null;
 
@@ -215,7 +230,7 @@ export default function TradesPage() {
       .filter(t => t.result)
       .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
       .forEach(t => {
-        if (t.result === 'LOSS') { cur++; best = Math.max(best, cur); } else cur = 0;
+        if (isLossTrade(t)) { cur++; best = Math.max(best, cur); } else cur = 0;
       });
     return best;
   }, [trades]);
@@ -264,7 +279,7 @@ export default function TradesPage() {
       const e = map.get(key) ?? { pnl: 0, wins: 0, total: 0 };
       map.set(key, {
         pnl:   e.pnl + (t.pnlPercent ?? 0),
-        wins:  e.wins + (t.result === 'WIN_TP1' || t.result === 'WIN_TP2' ? 1 : 0),
+        wins:  e.wins + (isWinTrade(t) ? 1 : 0),
         total: e.total + 1,
       });
     });
@@ -281,7 +296,7 @@ export default function TradesPage() {
     { label: '18+',   min: 18, max: 999 },
   ].map(r => {
     const inRange = closed.filter(t => (t.score ?? 0) >= r.min && (t.score ?? 0) <= r.max);
-    const ws = inRange.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+    const ws = inRange.filter(isWinTrade);
     return {
       label: r.label,
       total: inRange.length,
@@ -296,7 +311,7 @@ export default function TradesPage() {
     return KW.map(kw => {
       const m = closed.filter(t => t.reasons?.some(r => r.includes(kw)));
       if (m.length < 2) return null;
-      const ws = m.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
+      const ws = m.filter(isWinTrade);
       return { label: kw, total: m.length, wr: Math.round(ws.length / m.length * 100) };
     }).filter((x): x is NonNullable<typeof x> => x !== null)
       .sort((a, b) => b.wr - a.wr).slice(0, 8);
@@ -309,7 +324,7 @@ export default function TradesPage() {
       const tf = t.timeframe ?? '?';
       const e = map.get(tf) ?? { wins: 0, total: 0, pnl: 0 };
       map.set(tf, {
-        wins:  e.wins + (t.result === 'WIN_TP1' || t.result === 'WIN_TP2' ? 1 : 0),
+        wins:  e.wins + (isWinTrade(t) ? 1 : 0),
         total: e.total + 1,
         pnl:   e.pnl + (t.pnlPercent ?? 0),
       });
@@ -345,8 +360,8 @@ export default function TradesPage() {
              : [...waiting, ...pending, ...closed];
     // Closed result sub-filter
     if (filter === 'CLOSED' && resultFilter !== 'ALL') {
-      if (resultFilter === 'WIN')  base = base.filter(t => t.result === 'WIN_TP1' || t.result === 'WIN_TP2');
-      if (resultFilter === 'LOSS') base = base.filter(t => t.result === 'LOSS');
+      if (resultFilter === 'WIN')  base = base.filter(isWinTrade);
+      if (resultFilter === 'LOSS') base = base.filter(isLossTrade);
     }
     // Direction filter
     if (dirFilter !== 'ALL') base = base.filter(t => t.direction === dirFilter);
@@ -926,7 +941,7 @@ export default function TradesPage() {
             const isTp1Hit      = trade.status === 'tp1_hit';
             const isWatchingTp2 = isTp1Hit && trade.result === 'WIN_TP1' && !trade.closedAt;
             const isPending     = !trade.result && !isWaiting;
-            const isWin     = trade.result === 'WIN_TP1' || trade.result === 'WIN_TP2';
+            const isWin     = isWinTrade(trade);
             const coinData  = coins.find(c => c.symbol === trade.symbol);
             const livePx    = coinData?.currentPrice ?? 0;
 
@@ -1017,12 +1032,20 @@ export default function TradesPage() {
                       </>
                     ) : isWatchingTp2 ? (
                       <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-semibold border border-green-500/40">✅ TP1·等TP2</span>
-                    ) : (
-                      <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
-                        style={{ background: `${RESULT_COLOR[trade.result!]}20`, color: RESULT_COLOR[trade.result!] }}>
-                        {RESULT_LABEL[trade.result!]}
-                      </span>
-                    )}
+                    ) : (() => {
+                      // MANUAL_CLOSE (時間止損/到期平倉) colored by realized PnL so a
+                      // profitable one reads as a win, not the neutral yellow default.
+                      const isManual = trade.result === 'MANUAL_CLOSE';
+                      const color = isManual
+                        ? (isWin ? '#00C851' : isLossTrade(trade) ? '#FF4444' : '#F0B90B')
+                        : RESULT_COLOR[trade.result!];
+                      return (
+                        <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
+                          style={{ background: `${color}20`, color }}>
+                          {RESULT_LABEL[trade.result!]}
+                        </span>
+                      );
+                    })()}
                     <span className="text-[#F0B90B] text-xs font-bold">{trade.score}分</span>
                   </div>
                 </div>
