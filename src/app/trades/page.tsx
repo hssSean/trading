@@ -647,7 +647,7 @@ export default function TradesPage() {
                   <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">風報比分析</p>
                   <div className="grid grid-cols-3 gap-1.5">
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
-                      <p className="text-[#404060] text-[8px]">計畫平均 RR</p>
+                      <p className="text-[#404060] text-[8px]">計畫 RR（到 TP2）</p>
                       <p className="text-[#A0A0C0] text-xs font-bold">{avgPlannedRR ? `1:${avgPlannedRR}` : '—'}</p>
                     </div>
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
