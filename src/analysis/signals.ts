@@ -143,7 +143,14 @@ const MIN_SCORE_TIER_B   = 55; // tier B threshold (light position)
 const MIN_SCORE_LONGTF   = 67; // 4h/1d tier A needs 2 extra points
 const MIN_RR_INTRADAY    = 1.2;
 const MIN_RR_SWING       = 2.0;
-const HIGH_VOLIT_PCT     = 0.03;
+const HIGH_VOLIT_PCT     = 0.03;  // ATR% above this → −3 penalty (soft signal)
+// B-tier volatility cap, separated from the −3 penalty threshold (2026-07-20):
+// the funnel's #1 killer (分數/組數未達 38%) was largely normal-vol altcoins
+// scoring 55-64 blocked by the old 3% B-tier cap. The AKE-type disasters were
+// ATR 8.8-9.9%, already caught independently by the hard 6% gate below —
+// so 3% double-penalized ordinary altcoins. 4.5% still blocks the wildest
+// coins for marginal (B-tier) signals while restoring normal-vol flow.
+const B_TIER_MAX_ATR     = 0.045;
 const NO_LEVEL_PENALTY   = 3;
 const GROUP_CAPS = { trend: 15, momentum: 10, structure: 15, volume: 10, priceAction: 10 } as const;
 
@@ -554,7 +561,7 @@ export function generateSignals(
   // score + wild coin is the worst combination; only A-tier may absorb high vol.
   const longTier: 'A' | 'B' | null =
     longScore >= effectiveMinScore && longGroups >= 3 ? 'A'
-    : longScore >= MIN_SCORE_TIER_B && longGroups >= 2 && atrPct <= HIGH_VOLIT_PCT ? 'B'
+    : longScore >= MIN_SCORE_TIER_B && longGroups >= 2 && atrPct <= B_TIER_MAX_ATR ? 'B'
     : null;
   if (longTier && longScore > shortScore && longIntradayOk) {
     const sl   = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
@@ -599,7 +606,7 @@ export function generateSignals(
   // ── SHORT signal ─────────────────────────────────────────────
   const shortTier: 'A' | 'B' | null =
     shortScore >= effectiveMinScore && shortGroups >= 3 ? 'A'
-    : shortScore >= MIN_SCORE_TIER_B && shortGroups >= 2 && atrPct <= HIGH_VOLIT_PCT ? 'B'
+    : shortScore >= MIN_SCORE_TIER_B && shortGroups >= 2 && atrPct <= B_TIER_MAX_ATR ? 'B'
     : null;
   if (shortTier && shortScore > longScore && shortIntradayOk) {
     const sl   = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)

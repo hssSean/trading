@@ -289,11 +289,11 @@ export default function TradesPage() {
       .map(([key, v]) => ({ key, pnl: parseFloat(v.pnl.toFixed(2)), wins: v.wins, total: v.total }));
   }, [closed]);
 
-  // 評分區間效益（哪個分數段勝率最高）
+  // 評分區間效益（哪個分數段勝率最高）— 對應 v2.1 分級（B級55-64 / A級65+）
   const scoreRanges = useMemo(() => [
-    { label: '12–14', min: 12, max: 14 },
-    { label: '15–17', min: 15, max: 17 },
-    { label: '18+',   min: 18, max: 999 },
+    { label: '55–64 (B級)', min: 55, max: 64 },
+    { label: '65–74 (A級)', min: 65, max: 74 },
+    { label: '75+ (A級高分)', min: 75, max: 999 },
   ].map(r => {
     const inRange = closed.filter(t => (t.score ?? 0) >= r.min && (t.score ?? 0) <= r.max);
     const ws = inRange.filter(isWinTrade);
