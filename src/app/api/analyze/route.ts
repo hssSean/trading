@@ -290,8 +290,11 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         cancelBody   = '結構已突破，setup 失效';
         break;
       }
-      if (risk > 0 && (isLong ? c.close >= entry + risk : c.close <= entry - risk)) {
-        cancelReason = `價格未回測進場位 $${fmtPrice(entry)}，已朝目標方向走了 1R 以上，回測機率大減 —— 放棄追進`;
+      // 行情走遠：自掛單當下（signal_price）朝獲利方向走了 ≥1R —— 回不到進場位。
+      // 必須錨定 sp（下單當下價），不能用 entry±risk：回調/反彈單的 entry±risk
+      // 剛好落在下單價附近，會讓掛單一放上去就被誤判走遠而秒取消。
+      if (sp > 0 && risk > 0 && (isLong ? c.close >= sp + risk : c.close <= sp - risk)) {
+        cancelReason = `價格自掛單當下 $${fmtPrice(sp)} 已朝${isLong ? '上' : '下'}走了 1R 以上，未回測進場位 $${fmtPrice(entry)}，回測機率大減 —— 放棄追進`;
         cancelBody   = '行情已走遠，不追單';
         break;
       }
