@@ -254,20 +254,35 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
   }
 
-  // Warn when the same symbol has multiple open trades — indicates prior inconsistency
-  // (e.g. client-created + server-created, or signal fired twice during key-missing window).
-  // Each trade is still processed independently; the real fix is per-event idempotency below.
-  const symbolCounts = new Map<string, number>();
-  [...waiting, ...active].forEach(t => {
-    const s = t.symbol as string;
-    symbolCounts.set(s, (symbolCounts.get(s) ?? 0) + 1);
-  });
-  symbolCounts.forEach((cnt, sym) => {
-    if (cnt > 1) console.error(`[monitor] ${sym} has ${cnt} open trades — duplicate may cause spurious notifications`);
-  });
-
   const now = Date.now();
   let filled = 0, cancelled = 0, closed = 0;
+
+  // ── Duplicate cleanup: a symbol should have at most ONE open trade ──────────
+  // A stale WAITING limit order alongside a filled ACTIVE/TP1 trade for the same
+  // symbol is a duplicate (a race let two inserts through). It causes the exact
+  // symptoms reported: the extra copy shows "持倉中" prematurely, and the monitor
+  // fires a fill notification for one copy and a stop/breakeven for the other
+  // back-to-back. Delete the stale waiting duplicate so only the real trade runs.
+  {
+    const activeSymbols = new Set(active.map(t => t.symbol as string));
+    const staleWaiting = waiting.filter(t => activeSymbols.has(t.symbol as string));
+    if (staleWaiting.length > 0) {
+      const ids = staleWaiting.map(t => t.id as string);
+      try { await admin.from('trades').delete().in('id', ids); } catch { /* best effort */ }
+      for (const t of staleWaiting) {
+        console.log(`[monitor] deleted stale waiting duplicate ${t.id} (${t.symbol} already has an active trade)`);
+      }
+      // Remove them from this run's waiting set so they aren't processed/notified.
+      const staleIds = new Set(ids);
+      for (let i = waiting.length - 1; i >= 0; i--) {
+        if (staleIds.has(waiting[i].id as string)) waiting.splice(i, 1);
+      }
+    }
+    if (waiting.length === 0 && active.length === 0) {
+      if (rLock) { try { await rLock.del('monitor-run-lock'); } catch { /* best-effort */ } }
+      return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
+    }
+  }
 
   // Update last_monitored_at after each check so the next run only fetches new candles.
   // 42703 = column not yet migrated → skip silently (non-critical optimisation).
@@ -1376,6 +1391,23 @@ async function fetchBtcRegime(): Promise<BtcRegimeState> {
 // ── GET — run analysis + send LINE ────────────────────────────
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  // ── Scan run-lock: serialize the whole scan+insert so a double-fired cron
+  // (retry / misconfigured schedule) can't run two concurrent scans that each
+  // insert the same symbol — the root cause of duplicate open trades. NX+70s
+  // (> maxDuration 60s) auto-expires even if the function is killed; the normal
+  // 5-min cadence is unaffected. Skipped when Redis isn't wired (single-runner).
+  {
+    const rScan = getRedis();
+    if (rScan) {
+      try {
+        const got = await rScan.set('scan-run-lock', Date.now(), { nx: true, ex: 70 });
+        if (!got) {
+          return NextResponse.json({ ok: true, skipped: 'scan already running (lock held)' });
+        }
+      } catch { /* Redis error — proceed without the lock rather than block scans */ }
+    }
+  }
 
   const coinsParam = req.nextUrl.searchParams.get('coins') ?? process.env.WATCH_COINS ?? '';
   const tfParam    = process.env.ANALYSIS_TIMEFRAMES ?? '5m,15m,1h';

@@ -153,6 +153,27 @@ export async function loadFromSupabase(userId: string) {
         (nowTs - t.openedAt < SYNC_GRACE_MS)   // keep: just-created, upload may be in flight
       ),
     }));
+
+    // Collapse duplicate OPEN trades per symbol (a symbol can have at most one
+    // open trade). A stale 'waiting' alongside a filled 'active' shows the same
+    // signal twice — keep the most advanced (tp1_hit > active > waiting), newest
+    // as tie-breaker. Closed trades are never collapsed (history).
+    const STATUS_RANK: Record<string, number> = { tp1_hit: 3, active: 2, waiting: 1 };
+    useStore.setState(s => {
+      const bestOpenBySymbol = new Map<string, TradeRecord>();
+      for (const t of s.trades) {
+        if (t.result) continue;
+        const cur = bestOpenBySymbol.get(t.symbol);
+        if (!cur) { bestOpenBySymbol.set(t.symbol, t); continue; }
+        const better =
+          (STATUS_RANK[t.status ?? 'active'] ?? 2) - (STATUS_RANK[cur.status ?? 'active'] ?? 2)
+          || t.openedAt - cur.openedAt;
+        if (better > 0) bestOpenBySymbol.set(t.symbol, t);
+      }
+      return {
+        trades: s.trades.filter(t => t.result || bestOpenBySymbol.get(t.symbol) === t),
+      };
+    });
   }
 
   // Load profile
