@@ -315,6 +315,14 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     const slPx   = trade.stop_loss as number;
     const risk   = Math.abs(entry - slPx);
 
+    // ── 時間錨（修正「掛單沒成交就說已達 +0.5R」）──────────────────
+    // 抓 K 線時往前退了 1 小時（覆蓋掛單當下那根），但成交/失效判定絕不能
+    // 用「掛單之前」的歷史價格 —— 否則掛單前價格剛好碰到進場價會被誤判成交，
+    // 接著那段歷史又漲過 +0.5R，整個生命週期在使用者反應前就跑完。
+    // 只採計「開盤時間 ≥ 掛單時間」的 K 線（完全發生在掛單之後）。
+    const placedAt   = (trade.opened_at ?? 0) as number;
+    const evalCandles = candles.filter(c => c.openTime >= placedAt);
+
     // ── 時序掃描：成交（影線觸及）vs 掛單失效（收盤確認），先到先贏 ──
     // spec §3-A：掛單期間若進場前提失效須立即取消，不是傻等逾期。
     // 失效三型（皆用收盤價確認，符合規格「收盤確認」精神）：
@@ -328,7 +336,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     //   opportunity_expired（機會過期）：方向仍成立，只是沒等到進場 → 保留 bias、禁反向
     //   thesis_invalidated（論點失效）：進場理由被推翻 → 不保留 bias、反向照冷卻規則
     let cancelClass: 'opportunity_expired' | 'thesis_invalidated' | null = null;
-    for (const c of candles) {
+    for (const c of evalCandles) {
       const touched = isLong
         ? c.low  <= entry * 1.001 && (sp === 0 || sp > entry * 1.002)
         : c.high >= entry * 0.999 && (sp === 0 || sp < entry * 0.998);
@@ -527,11 +535,17 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     // localTp1Hit tracks TP1 across this scan (DB state + any new hit found in candles)
     let localTp1Hit = isTp1Hit;
 
+    // 時間錨（同 Phase 1 修正）：TP/SL/利潤階梯只採計「成交之後開盤」的 K 線。
+    // 否則成交前的歷史價格會被算進最大有利波幅（maxR），讓一筆剛成交的單
+    // 立刻被誤判「曾達 +0.5R」而觸發保本/移動止損通知。ATR 用全部 K 線無妨。
+    const fillAnchor  = (trade.filled_at ?? trade.opened_at ?? 0) as number;
+    const evalCandles = candles.filter(c => c.openTime >= fillAnchor);
+
     // Scan candles in chronological order.
     // Check order within each candle: TP1 first, then TP2, then trailing stop, then SL.
     // Same-candle TP1+SL → TP1 wins (price hit TP1 before reversing to SL).
     // Same-candle TP1+trailing stop → trailing stop fires (TP2 not reached, trailing is lower bound).
-    for (const c of candles) {
+    for (const c of evalCandles) {
       let justInitializedTrailing = false; // per-iteration flag: skip ratchet on init candle
 
       if (isLong) {
