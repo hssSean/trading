@@ -139,11 +139,16 @@ export default function TradesPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
+  // 「真正結束」= 已有平倉時間（closedAt）。TP1 達標但仍在等 TP2 的單（result=WIN_TP1、
+  // status=tp1_hit、尚無 closedAt）不算結束 —— 要等它碰移動止損或 TP2 才結束。
+  const isFinallyClosed = (t: (typeof trades)[number]) =>
+    !!t.closedAt || (!!t.result && t.status !== 'tp1_hit');
+
   // Memoize derived arrays: prevents filtered from recomputing on every store update (coins poll).
   const waiting       = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);
-  const closed        = useMemo(() => trades.filter(t => !!t.result), [trades]);
-  // 持倉中 = active & not closed (exclude waiting)
-  const pending       = useMemo(() => trades.filter(t => !t.result && t.status !== 'waiting'), [trades]);
+  const closed        = useMemo(() => trades.filter(isFinallyClosed), [trades]);
+  // 持倉中 = 未真正結束且非等待進場（含 TP1 已達標、追蹤 TP2 中的單）
+  const pending       = useMemo(() => trades.filter(t => !isFinallyClosed(t) && t.status !== 'waiting'), [trades]);
   // 追蹤TP2 = TP1 hit, result locked as WIN_TP1, not yet finally closed
   const watchingTp2   = useMemo(() => trades.filter(t => t.status === 'tp1_hit' && t.result === 'WIN_TP1' && !t.closedAt), [trades]);
   // Live-PnL counts so 浮盈/浮虧 chips show how many trades they'd match
@@ -1118,6 +1123,26 @@ export default function TradesPage() {
                     </div>
                   </div>
                 )}
+
+                {/* Live trailing stop for TP1-watching trades — where to move your stop */}
+                {isWatchingTp2 && (() => {
+                  const stopLvl = trade.currentStop && trade.currentStop > 0 ? trade.currentStop : trade.entry;
+                  const lockedR = Math.abs(trade.entry - trade.stopLoss) > 0
+                    ? (trade.direction === 'LONG' ? stopLvl - trade.entry : trade.entry - stopLvl) / Math.abs(trade.entry - trade.stopLoss)
+                    : 0;
+                  return (
+                    <div className="mb-2 bg-blue-500/5 border border-blue-500/20 rounded-xl px-3 py-2 flex items-center justify-between">
+                      <div>
+                        <p className="text-blue-400/80 text-[9px] font-semibold uppercase tracking-wide">🛡 移動止損（請移到這）</p>
+                        <p className="text-blue-400 text-sm font-bold">${fmtPrice(stopLvl)}</p>
+                      </div>
+                      <p className="text-[10px] text-right leading-4 text-[#606080]">
+                        {lockedR >= 0.05 ? `已鎖 +${lockedR.toFixed(1)}R` : '保本（無虧損風險）'}<br/>
+                        碰到即以此價出場
+                      </p>
+                    </div>
+                  );
+                })()}
 
                 {/* Position sizing (user risk%, tier B halved) for pending trades */}
                 {isPending && (() => {

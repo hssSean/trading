@@ -500,7 +500,6 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     let trailingStop        = savedTrailingStop > 0 ? savedTrailingStop : 0;
     let trailingStopUpdated = false;
     let hitTrailingStop     = false;  // post-TP1 trailing exit (WIN_TP1)
-    let hitProtLadder       = false;  // pre-TP1 ladder exit (breakeven / +0.3R)
     const riskDist          = Math.abs((trade.entry as number) - (trade.stop_loss as number));
 
     // Simple 14-period ATR from 1H candles — used to set/ratchet trailing stop.
@@ -562,13 +561,11 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         if (c.high >= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
         }
-        // Protective stop fires before original SL. Uses the value from BEFORE this
-        // candle's ratchet, so a stop just initialized this candle isn't self-triggered.
-        // Post-TP1 → WIN_TP1 (trailing); pre-TP1 → MANUAL_CLOSE (ladder: breakeven/+0.3R).
-        if (trailingStop > 0 && c.low <= trailingStop) {
-          if (localTp1Hit) { closeResult = 'WIN_TP1'; hitTrailingStop = true; }
-          else             { closeResult = 'MANUAL_CLOSE'; hitProtLadder = true; }
-          closePrice = trailingStop; break;
+        // Trailing stop fires before original SL — ONLY active after TP1 (2026-07-21:
+        // the pre-TP1 profit ladder was removed; the stop stays at the original SL
+        // until TP1 is reached).
+        if (localTp1Hit && trailingStop > 0 && c.low <= trailingStop) {
+          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
         }
         if (c.low <= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
@@ -579,17 +576,6 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         if (localTp1Hit && !justInitializedTrailing && tradeStrategy === 'A' && atr1h > 0) {
           const candidate = c.close - 2 * atr1h;
           if (candidate > trailingStop) { trailingStop = candidate; trailingStopUpdated = true; }
-        }
-        // Pre-TP1 profit ladder (v2.4 §2): based on the max favourable excursion
-        // reached (candle high). +1.0R → stop to entry+0.3R; +0.5R → breakeven.
-        // Ratchet only up. Checked after the hit test so a newly-set stop isn't
-        // triggered by the same candle that created it.
-        if (!localTp1Hit && riskDist > 0) {
-          const rHigh = (c.high - (trade.entry as number)) / riskDist;
-          const rung  = rHigh >= 1.0 ? (trade.entry as number) + 0.3 * riskDist
-                      : rHigh >= 0.5 ? (trade.entry as number)
-                      : 0;
-          if (rung > trailingStop) { trailingStop = rung; trailingStopUpdated = true; }
         }
       } else {
         if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
@@ -604,12 +590,9 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         if (c.low <= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
         }
-        // Protective stop (SHORT: stop is ABOVE, hit when high >= stop).
-        // Post-TP1 → WIN_TP1 (trailing); pre-TP1 → MANUAL_CLOSE (ladder).
-        if (trailingStop > 0 && c.high >= trailingStop) {
-          if (localTp1Hit) { closeResult = 'WIN_TP1'; hitTrailingStop = true; }
-          else             { closeResult = 'MANUAL_CLOSE'; hitProtLadder = true; }
-          closePrice = trailingStop; break;
+        // Trailing stop (SHORT: stop is ABOVE, hit when high >= stop) — ONLY after TP1.
+        if (localTp1Hit && trailingStop > 0 && c.high >= trailingStop) {
+          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
         }
         if (c.high >= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
@@ -621,33 +604,23 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
           const candidate = c.close + 2 * atr1h;
           if (trailingStop === 0 || candidate < trailingStop) { trailingStop = candidate; trailingStopUpdated = true; }
         }
-        // Pre-TP1 profit ladder (SHORT mirror): +1.0R → entry−0.3R; +0.5R → breakeven.
-        // Ratchet only DOWN (stop moves toward profit as price falls).
-        if (!localTp1Hit && riskDist > 0) {
-          const rLow = ((trade.entry as number) - c.low) / riskDist;
-          const rung = rLow >= 1.0 ? (trade.entry as number) - 0.3 * riskDist
-                     : rLow >= 0.5 ? (trade.entry as number)
-                     : 0;
-          if (rung > 0 && (trailingStop === 0 || rung < trailingStop)) { trailingStop = rung; trailingStopUpdated = true; }
-        }
       }
     }
 
-    // v2.4 §2.2: notify on a pre-TP1 ladder rung being newly raised (breakeven /
-    // +0.3R) so the user knows "this trade is now risk-free / profit-locked, hold
-    // for TP1". Only fires on the transition (not hourly) to avoid push spam.
-    if (!closeResult && !justHitTp1 && !localTp1Hit && trailingStopUpdated && trailingStop > 0 && riskDist > 0) {
+    // Notify when the post-TP1 trailing stop is newly raised (locks in more profit).
+    // Only fires on a meaningful upward move (≥0.15R) to avoid per-scan spam; the
+    // live stop level is also shown on the position card via /api/trade-status.
+    if (!closeResult && !justHitTp1 && localTp1Hit && trailingStopUpdated && trailingStop > 0 && riskDist > 0) {
       const rOf = (stop: number) => (isLong ? stop - (trade.entry as number) : (trade.entry as number) - stop) / riskDist;
       const prevProtR = savedTrailingStop > 0 ? rOf(savedTrailingStop) : -Infinity;
       const newProtR  = rOf(trailingStop);
-      if (newProtR > prevProtR + 1e-9 && profileId) {
+      if (newProtR > prevProtR + 0.15 && profileId) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = (trade.symbol as string).replace('USDT', '/USDT');
-        const atBreakeven = Math.abs(newProtR) < 0.05;
         await sendWebPushToUser(profileId, {
-          title: `🛡 ${sym} ${atBreakeven ? '止損移至保本' : '止損鎖 +0.3R'}`,
-          body: `${dir} 曾達 ${atBreakeven ? '+0.5R' : '+1.0R'}，${atBreakeven ? '此單已無虧損風險' : '已鎖定利潤'}，續抱等 TP1`,
-          tag: `ladder-${trade.id}-${atBreakeven ? 'be' : 'r03'}`, // rung-specific tag → at most one push per rung
+          title: `🛡 ${sym} 移動止損上移`,
+          body: `${dir} TP1 已達標，止損上移至 $${fmtPrice(trailingStop)}（鎖 +${newProtR.toFixed(1)}R），續抱等 TP2`,
+          tag: `trail-${trade.id}`, // one tag → latest move replaces the previous push
         });
       }
     }
@@ -740,14 +713,12 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     const ageHours       = (now - ((trade.filled_at ?? trade.opened_at ?? 0) as number)) / 3_600_000;
     const lastClose      = candles.length > 0 ? candles[candles.length - 1].close : null;
 
-    // v2.4 §2.1 時間止損：只清理「停滯單」（從未達 +0.5R），永不平獲利中的單。
-    //   trailingStop > 0  = 曾達 +0.5R（利潤階梯已啟動，不可逆）→ 時間止損永久解除
-    //   trailingStop === 0 = 從未達 +0.5R
-    //     8 根 K 線後仍在 −0.3R ~ +0.3R 之間震盪 → 建議市價出場（釋放倉位）
-    //     已接近止損（< −0.3R）→ 不動，讓原止損決定（不提前認賠）
-    //     +0.3R ~ +0.5R（正在推進）→ 不動，給它到 +0.5R 鎖利的機會
+    // 時間止損：只清理「未達 TP1 的停滯單」，永不平已達 TP1（獲利管理中）的單。
+    //   8 根 K 線後仍在 −0.3R ~ +0.3R 之間震盪 → 建議市價出場（釋放倉位）
+    //   已接近止損（< −0.3R）→ 不動，讓原止損決定（不提前認賠）
+    //   +0.3R 以上（正在推進）→ 不動，給它走到 TP1 的機會
     let timeStopFired = false;
-    if (!closeResult && !localTp1Hit && trailingStop === 0 && lastClose !== null && riskDist > 0) {
+    if (!closeResult && !localTp1Hit && lastClose !== null && riskDist > 0) {
       const barMinutes = trade.timeframe === '5m' ? 5
         : trade.timeframe === '15m' ? 15
         : trade.timeframe === '4h' ? 240
@@ -858,12 +829,8 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       const pnlStr = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       let closeMsg: string;
       let pushTitle: string;
-      if (closeResult === 'MANUAL_CLOSE' && hitProtLadder) {
-        const atBreakeven = Math.abs(closePrice - (trade.entry as number)) / (trade.entry as number) < 0.0005;
-        closeMsg   = `【🛡 利潤保護出場】${sym}\n${dir} 曾達 +0.5R 後回落，${atBreakeven ? '保本' : '鎖 +0.3R'}出場（規格 §2.2 利潤階梯）\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
-        pushTitle  = `🛡 利潤保護 ${sym}`;
-      } else if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
-        closeMsg   = `【⏱ 時間止損】${sym}\n${dir} 8 根 K 線停滯於 ±0.3R，平價出場釋放倉位（規格 §2.1）\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
+      if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
+        closeMsg   = `【⏱ 時間止損】${sym}\n${dir} 8 根 K 線停滯於 ±0.3R 未達 TP1，平價出場釋放倉位\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle  = `⏱ 時間止損 ${sym}`;
       } else if (closeResult === 'MANUAL_CLOSE') {
         closeMsg   = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;

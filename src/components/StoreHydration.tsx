@@ -241,14 +241,15 @@ async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> 
     useStore.getState().setSyncWarning(null);
 
     const { statuses } = await res.json() as {
-      statuses: Record<string, { status: string | null; signalPrice: number | null }>
+      statuses: Record<string, { status: string | null; signalPrice: number | null; currentStop?: number | null }>
     };
 
     useStore.setState(s => ({
       trades: s.trades.map(t => {
-        if (t.result) return t;
+        // Adopt current_stop even for closed-result trades that are still tp1-watching
+        // (result=WIN_TP1, no closedAt) so the position card can show the live stop.
         const srv = statuses[t.id];
-        // null status = legacy record before status column existed; keep local state unchanged
+        if (t.result && !(t.status === 'tp1_hit' && !t.closedAt)) return t;
         if (!srv || srv.status == null) return t;
         const newStatus = srv.status as 'waiting' | 'active' | 'tp1_hit';
         if (newStatus === 'active') confirmedActive.add(t.id);
@@ -256,6 +257,7 @@ async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> 
           ...t,
           status: newStatus,
           ...(srv.signalPrice != null ? { signalPrice: srv.signalPrice } : {}),
+          ...(srv.currentStop != null ? { currentStop: srv.currentStop } : {}),
         };
       }),
     }));

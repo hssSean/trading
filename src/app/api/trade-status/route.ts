@@ -32,15 +32,26 @@ export async function POST(req: NextRequest) {
   try {
     const { createClient } = await import('@supabase/supabase-js');
     const admin = createClient(url, key);
-    const { data } = await admin
-      .from('trades')
-      .select('id, status, signal_price')
-      .in('id', ids);
+    // current_stop = live trailing stop (only meaningful after TP1). Selected via
+    // service role since the authenticated role can't read it. Falls back if the
+    // column isn't migrated (42703) so status/signal_price still return.
+    let data: Record<string, unknown>[] | null = null;
+    const full = await admin.from('trades').select('id, status, signal_price, current_stop').in('id', ids);
+    if (full.error) {
+      const base = await admin.from('trades').select('id, status, signal_price').in('id', ids);
+      data = (base.data as Record<string, unknown>[]) ?? null;
+    } else {
+      data = (full.data as Record<string, unknown>[]) ?? null;
+    }
 
-    const statuses: Record<string, { status: string | null; signalPrice: number | null }> = {};
+    const statuses: Record<string, { status: string | null; signalPrice: number | null; currentStop: number | null }> = {};
     if (data) {
-      (data as { id: string; status: string | null; signal_price: number | null }[]).forEach(r => {
-        statuses[r.id] = { status: r.status, signalPrice: r.signal_price };
+      data.forEach(r => {
+        statuses[r.id as string] = {
+          status: (r.status as string | null) ?? null,
+          signalPrice: (r.signal_price as number | null) ?? null,
+          currentStop: (r.current_stop as number | null) ?? null,
+        };
       });
     }
     return NextResponse.json({ statuses });

@@ -183,6 +183,7 @@ export interface TradeRecord {
   signalPrice?: number;           // market price when signal was generated
   tier?: 'A' | 'B';               // v2.1 signal tier (B = half-risk light position)
   scoreBreakdown?: ScoreBreakdown; // per-group contributions for attribution
+  currentStop?: number;           // live trailing stop level (set after TP1)
 }
 
 export interface AnalysisResult {
