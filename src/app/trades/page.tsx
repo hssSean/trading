@@ -4,6 +4,7 @@ import { useStore } from '@/store/useStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
 import { fetchCurrentPrice } from '@/api/binance';
 import { calcPositionPlan } from '@/lib/position';
+import { isFinallyClosed } from '@/lib/tradeSync';
 import { TradeResult } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
@@ -139,10 +140,8 @@ export default function TradesPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  // 「真正結束」= 已有平倉時間（closedAt）。TP1 達標但仍在等 TP2 的單（result=WIN_TP1、
-  // status=tp1_hit、尚無 closedAt）不算結束 —— 要等它碰移動止損或 TP2 才結束。
-  const isFinallyClosed = (t: (typeof trades)[number]) =>
-    !!t.closedAt || (!!t.result && t.status !== 'tp1_hit');
+  // 「真正結束」的判準（closedAt 或非 tp1-watching 的 result）抽到 @/lib/tradeSync 共用，
+  // 與同步層 finalize 邏輯用同一套規則（見 tests/tradeSync.test.ts）。
 
   // Memoize derived arrays: prevents filtered from recomputing on every store update (coins poll).
   const waiting       = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);

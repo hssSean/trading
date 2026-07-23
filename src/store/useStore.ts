@@ -78,6 +78,10 @@ interface StoreState {
   addTrade: (signal: TradingSignal) => void;
   addManualTrade: (params: { symbol: string; direction: 'LONG' | 'SHORT'; entry: number; stopLoss: number; tp1: number; tp2: number; timeframe?: Timeframe; score?: number }) => void;
   closeTrade: (id: string, result: TradeResult, exitPrice: number) => void;
+  // 伺服器同步用：TP1 達標但仍等 TP2（不關單，維持持倉中）
+  markTp1Watching: (id: string, exitPrice: number, pnlPercent: number) => void;
+  // 伺服器同步用：採用伺服器權威的 closed_at 讓單真正結束（可覆蓋 tp1-watching 的 result）
+  finalizeFromServer: (id: string, result: TradeResult, exitPrice: number, pnlPercent: number, closedAt: number) => void;
   deleteTrade: (id: string) => void;
   hasActiveTrade: (symbol: string) => boolean;
   // Auto-close alerts
@@ -247,6 +251,27 @@ export const useStore = create<StoreState>()(
           }),
         }));
       },
+
+      // TP1 達標、仍在等 TP2：記 result=WIN_TP1、status=tp1_hit，但「不」設 closedAt
+      // （closedAt 才是「真正結束」的判準）。已結束或已標記過的單跳過。
+      markTp1Watching: (id, exitPrice, pnlPercent) =>
+        set((s) => ({
+          trades: s.trades.map((t) =>
+            t.id !== id || t.closedAt || t.result === 'WIN_TP1' || t.result === 'WIN_TP2'
+              ? t
+              : { ...t, result: 'WIN_TP1', status: 'tp1_hit', exitPrice, pnlPercent },
+          ),
+        })),
+
+      // 採用伺服器權威的 closed_at 讓單真正結束。刻意「不」沿用 closeTrade 的
+      // `t.result` 早退守衛 —— tp1-watching 的單本來就有 result=WIN_TP1，必須能被覆蓋
+      // 成最終 result（含升級 WIN_TP2）並補上 closedAt。已 finalize 過的單（有 closedAt）跳過。
+      finalizeFromServer: (id, result, exitPrice, pnlPercent, closedAt) =>
+        set((s) => ({
+          trades: s.trades.map((t) =>
+            t.id !== id || t.closedAt ? t : { ...t, result, exitPrice, pnlPercent, closedAt },
+          ),
+        })),
 
       deleteTrade: (id) =>
         set((s) => ({ trades: s.trades.filter((t) => t.id !== id) })),

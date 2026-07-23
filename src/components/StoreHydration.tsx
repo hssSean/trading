@@ -4,7 +4,8 @@ import { useRouter, usePathname } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
 import { fetchCandles } from '@/api/binance';
-import { TradeRecord, TradingSignal } from '@/types';
+import { TradeRecord, TradeResult, TradingSignal } from '@/types';
+import { resolveServerOutcome, deriveTp1Status } from '@/lib/tradeSync';
 
 // Tracks IDs deleted in this session so loadFromSupabase won't re-add them.
 // Module-level so it persists across re-renders and periodic syncs.
@@ -48,12 +49,41 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     result:      (r.result as TradeRecord['result']) ?? undefined,
     exitPrice:   (r.exit_price as number | null) ?? undefined,
     pnlPercent:  (r.pnl_percent as number | null) ?? undefined,
-    status:      ((r.status as string | null) as 'waiting' | 'active' | 'tp1_hit' | undefined) ?? 'active',
+    // status 欄位對 authenticated role 不可讀（會退回 'active'）；但 result=WIN_TP1 且
+    // 無 closed_at 唯一對應 tp1-watching，據此還原 status 才不會被誤判成「結束」。
+    status:      deriveTp1Status(
+                   (r.result as TradeRecord['result']) ?? undefined,
+                   (r.closed_at as number | null) ?? undefined,
+                   ((r.status as string | null) as 'waiting' | 'active' | 'tp1_hit' | undefined) ?? 'active',
+                 ),
     signalPrice: (r.signal_price as number | null) ?? undefined,
     filledAt:    (r.filled_at as number | null) ?? undefined,
     tier:        ((r.tier as string | null) as 'A' | 'B' | undefined) ?? undefined,
     scoreBreakdown: (r.score_breakdown as TradeRecord['scoreBreakdown'] | null) ?? undefined,
   };
+}
+
+// Apply the server row's authoritative terminal state to a locally-known trade.
+// The server owns closing (monitor writes closed_at); the client only reads
+// result / closed_at / exit_price / pnl_percent (status is unreadable here).
+// Returns true if it recorded a TP1-watching mark or a finalize, so callers can
+// skip the open-trade ID-adoption branch.
+function applyServerOutcome(targetId: string, local: TradeRecord, r: Record<string, unknown>): boolean {
+  const action = resolveServerOutcome(local, {
+    result:     (r.result as TradeResult | null) ?? null,
+    closedAt:   (r.closed_at as number | null) ?? null,
+    exitPrice:  (r.exit_price as number | null) ?? null,
+    pnlPercent: (r.pnl_percent as number | null) ?? null,
+  });
+  if (action.kind === 'finalize') {
+    useStore.getState().finalizeFromServer(targetId, action.result, action.exitPrice, action.pnlPercent, action.closedAt);
+    return true;
+  }
+  if (action.kind === 'markTp1') {
+    useStore.getState().markTp1Watching(targetId, action.exitPrice, action.pnlPercent);
+    return true;
+  }
+  return false;
 }
 
 // ── Additive sync (used by periodic background sync) ──────────────
@@ -97,21 +127,18 @@ export async function loadFromSupabase(userId: string) {
         if (sessionDeletedIds.has(r.id as string)) continue;
 
         if (existingMap.has(r.id as string)) {
-          // Same ID — only propagate result; status transitions handled by reconcileFromServer()
-          // because the 'status' column is not accessible to the authenticated role (42703 error),
-          // so r.status always defaults to 'active' — we must NOT overwrite local 'waiting' with it.
-          const local = existingMap.get(r.id as string)!;
-          if (r.result && !local.result) {
-            useStore.getState().closeTrade(r.id as string, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
-          }
+          // Same ID — adopt the server's authoritative terminal state. TP1-watching
+          // (result=WIN_TP1, no closed_at) marks WITHOUT closing; a server closed_at
+          // (trailing stop / TP2 / SL) finalizes even when the local copy already had
+          // result=WIN_TP1 — the old `!local.result` guard left those stuck in 持倉中.
+          // status transitions still come from reconcileFromServer() (status unreadable here).
+          applyServerOutcome(r.id as string, existingMap.get(r.id as string)!, r);
         } else {
           const srvSignalId = (r.signal_id as string) ?? '';
           const localBySig  = srvSignalId ? existingBySignal.get(srvSignalId) : undefined;
           if (localBySig) {
-            if (r.result && !localBySig.result) {
-              // Server closed the trade — propagate result to the local (possibly client-ID) copy.
-              useStore.getState().closeTrade(localBySig.id, r.result as TradeRecord['result'] & string, (r.exit_price as number) ?? 0);
-            } else if (!r.result && !existingMap.has(r.id as string)) {
+            const handled = applyServerOutcome(localBySig.id, localBySig, r);
+            if (!handled && !r.result && !existingMap.has(r.id as string)) {
               // Open trade: signalId matches a local trade but IDs differ (client-ID vs server-ID
               // mismatch from the pre-fix era). Add the server-ID row to incoming so local state
               // adopts the correct DB-backed ID in this same load cycle. The orphan purge below
@@ -221,7 +248,9 @@ export async function loadFromSupabase(userId: string) {
 async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> {
   const confirmedActive = new Set<string>();
   const store = useStore.getState();
-  const openTrades = store.trades.filter(t => !t.result);
+  // Include TP1-watching trades (result=WIN_TP1, still open) so the server can return
+  // their live current_stop for the position card and confirm status='tp1_hit'.
+  const openTrades = store.trades.filter(t => !t.result || (t.status === 'tp1_hit' && !t.closedAt));
   if (openTrades.length === 0) return confirmedActive;
 
   try {
@@ -505,38 +534,54 @@ export async function saveToSupabase(userId: string) {
   // 'status' and 'signal_price' are intentionally omitted: the server owns these columns
   // via service role. Including them in client upserts causes the whole row to fail if
   // column-level grants for the authenticated role are missing (42703/42501 errors).
-  const tradeRows = s.trades
-    .filter(t => t.status !== 'waiting')
-    .map(t => ({
-      id:           t.id,
-      user_id:      userId,
-      signal_id:    t.signalId,
-      symbol:       t.symbol,
-      direction:    t.direction,
-      timeframe:    t.timeframe,
-      strength:     t.strength,
-      score:        t.score,
-      entry:        t.entry,
-      stop_loss:    t.stopLoss,
-      tp1:          t.tp1,
-      tp2:          t.tp2,
-      reasons:      t.reasons,
-      entry_notes:  t.entryNotes ?? '',
-      opened_at:    t.openedAt,
-      closed_at:    t.closedAt ?? null,
-      result:       t.result ?? null,
-      exit_price:   t.exitPrice ?? null,
-      pnl_percent:  t.pnlPercent ?? null,
-    }));
-  if (tradeRows.length > 0) {
-    const { error: upsertErr } = await supabase.from('trades').upsert(tradeRows, { onConflict: 'id' });
-    if (upsertErr && upsertErr.code !== '23505') {
+  //
+  // CRITICAL: the SERVER owns closing (the monitor writes closed_at/result). For trades the
+  // client still considers OPEN (no local closedAt — incl. TP1-watching, which carries
+  // result=WIN_TP1 but no closedAt), we must NOT send closed_at/result: a stale save racing a
+  // server close would write closed_at=null and wipe the just-set trailing-stop close, leaving
+  // the trade stuck in 持倉中 forever. So we split into two upserts with disjoint column sets
+  // (a single bulk upsert would union keys and re-introduce the null-clobber):
+  //   • open rows      → base columns only; server keeps ownership of result/closed_at
+  //   • finalized rows → include closed_at/result/exit/pnl (client-authoritative, e.g. manual close)
+  const baseRow = (t: TradeRecord) => ({
+    id:           t.id,
+    user_id:      userId,
+    signal_id:    t.signalId,
+    symbol:       t.symbol,
+    direction:    t.direction,
+    timeframe:    t.timeframe,
+    strength:     t.strength,
+    score:        t.score,
+    entry:        t.entry,
+    stop_loss:    t.stopLoss,
+    tp1:          t.tp1,
+    tp2:          t.tp2,
+    reasons:      t.reasons,
+    entry_notes:  t.entryNotes ?? '',
+    opened_at:    t.openedAt,
+  });
+  const nonWaiting   = s.trades.filter(t => t.status !== 'waiting');
+  const openRows      = nonWaiting.filter(t => !t.closedAt).map(baseRow);
+  const finalizedRows = nonWaiting.filter(t => !!t.closedAt).map(t => ({
+    ...baseRow(t),
+    closed_at:   t.closedAt ?? null,
+    result:      t.result ?? null,
+    exit_price:  t.exitPrice ?? null,
+    pnl_percent: t.pnlPercent ?? null,
+  }));
+
+  const upsertTrades = async (rows: Record<string, unknown>[]) => {
+    if (rows.length === 0) return;
+    const { error } = await supabase.from('trades').upsert(rows, { onConflict: 'id' });
+    if (error && error.code !== '23505') {
       // 23505 = partial unique index blocked a duplicate open trade; the client's
       // local trade ID doesn't match the server's — loadFromSupabase will reconcile.
       // Any other error is unexpected and worth logging.
-      console.error('[saveToSupabase] upsert error:', upsertErr.code, upsertErr.message);
+      console.error('[saveToSupabase] upsert error:', error.code, error.message);
     }
-  }
+  };
+  await upsertTrades(openRows);
+  await upsertTrades(finalizedRows);
 }
 
 // ── Pending signal pickup (runs on any page, not just home) ───────
