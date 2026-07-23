@@ -726,12 +726,16 @@ export function generateMeanReversionSignals(
     }
   }
 
-  // ── SHORT: BB upper touch + RSI crosses below 65 ────────────
+  // ── SHORT: BB upper touch + RSI crosses below 65 + volume ───
   // v2.1 §1.6: RSI threshold 70→65; band touch by candle HIGH (not close)
   const rsiCrossBelow65 = prevInd.rsi > 65 && ind.rsi <= 65;
   const atBBUpper       = cur.high >= bb.upper * 0.998;
+  // 2026-07-24 HARD volume gate for mean-reversion SHORTs: shorting a BB-upper touch
+  // without volume confirmation gets run over in trends (week review: the score-14
+  // no-volume shorts — SOL/PEPE — were the instant stop-outs). LONG side unchanged.
+  const volConfirmedShort = volRatio >= 1.3;
 
-  if (rsiCrossBelow65 && atBBUpper) {
+  if (rsiCrossBelow65 && atBBUpper && volConfirmedShort) {
     const entry = price;
     const tp1   = bb.middle;
 

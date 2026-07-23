@@ -520,11 +520,11 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
     // Pre-loop: initialize trailing stop for existing tp1_hit trades that pre-date the columns.
     // When isTp1Hit=true but no current_stop is stored (columns newly migrated or first run),
-    // seed from TP1 price so the ratchet loop has a valid anchor rather than an arbitrary close.
+    // seed from TP1 price (floored at breakeven) so the ratchet loop has a valid anchor.
     if (isTp1Hit && tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
       trailingStop = isLong
-        ? Math.max((trade.tp1 as number) - 2 * atr1h, (trade.stop_loss as number))
-        : Math.min((trade.tp1 as number) + 2 * atr1h, (trade.stop_loss as number));
+        ? Math.max((trade.tp1 as number) - 2 * atr1h, (trade.entry as number))
+        : Math.min((trade.tp1 as number) + 2 * atr1h, (trade.entry as number));
       trailingStopUpdated = true;
     }
 
@@ -552,8 +552,10 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
           localTp1Hit = true; justHitTp1 = true;
           // Initialize trailing stop 2×ATR below TP1 level (Strategy A only)
           if (tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
-            // Clamp to SL so trailing stop never gives a worse exit than original SL
-            trailingStop = Math.max((trade.tp1 as number) - 2 * atr1h, (trade.stop_loss as number));
+            // Floor at breakeven (entry): after TP1 the exit is never worse than 0R.
+            // (2026-07-24: was clamped to the original SL, which let a TP1-tagged trade
+            // give back all the way to −1R when 2×ATR exceeded the entry→TP1 distance.)
+            trailingStop = Math.max((trade.tp1 as number) - 2 * atr1h, (trade.entry as number));
             trailingStopUpdated = true;
             justInitializedTrailing = true;
           }
@@ -581,8 +583,8 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
           localTp1Hit = true; justHitTp1 = true;
           if (tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
-            // Clamp to SL so trailing stop never gives a worse exit than original SL
-            trailingStop = Math.min((trade.tp1 as number) + 2 * atr1h, (trade.stop_loss as number));
+            // Floor at breakeven (entry) — SHORT mirror; never worse than 0R after TP1.
+            trailingStop = Math.min((trade.tp1 as number) + 2 * atr1h, (trade.entry as number));
             trailingStopUpdated = true;
             justInitializedTrailing = true;
           }
@@ -1740,15 +1742,20 @@ export async function GET(req: NextRequest) {
         const isLargeCap = symbol === 'BTCUSDT' || symbol === 'ETHUSDT';
 
         // §2.3 BTC regime filter (altcoins only)
-        if (!isLargeCap && entrySignal.strategy === 'A') {
+        if (!isLargeCap) {
+          // Directional hard-block applies to BOTH strategies — A (trend) and B
+          // (mean-reversion). 2026-07-24: strategy B previously bypassed this, so
+          // mean-reversion shorts fired into BTC-bullish runs and got instantly
+          // stopped out (SOL/PEPE). Fighting the market leader's CLEAR direction is
+          // the #1 loss source (shadow data: 逆 BTC 方向 net −1R = correctly blocked).
           if (btcState.regime === 'bullish' && entrySignal.direction === 'SHORT')
-            { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏多 — 跳過山寨做空趨勢單 (${symbol})`; }
+            { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏多 — 跳過山寨做空 (${symbol})`; }
           else if (btcState.regime === 'bearish' && entrySignal.direction === 'LONG')
-            { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏空 — 跳過山寨做多趨勢單 (${symbol})`; }
-          else if (btcState.regime === 'chaotic') {
-            // v2.1 §1.3: chaos downgrades instead of blocking — tier B,
-            // risk 0.5%, confidence -10, leverage ≤5x. Counter-trend vs a
-            // CLEAR BTC direction (branches above) is still hard-blocked.
+            { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏空 — 跳過山寨做多 (${symbol})`; }
+          else if (btcState.regime === 'chaotic' && entrySignal.strategy === 'A') {
+            // v2.1 §1.3: chaos downgrades instead of blocking — tier B, risk 0.5%,
+            // confidence -10, leverage ≤5x. Strategy B is already tier B, so the
+            // downgrade only meaningfully applies to A.
             entrySignal.tier               = 'B';
             entrySignal.suggestedRiskPct   = 0.5;
             entrySignal.suggestedLeverage  = Math.min(entrySignal.suggestedLeverage ?? 5, 5);
