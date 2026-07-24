@@ -11,7 +11,7 @@ interface Props {
   pendingCount: number;
 }
 
-const col  = (v: number | null) => (v == null ? '#EAEDF2' : v >= 0 ? '#0ECB81' : '#F6465D');
+const col  = (v: number | null) => (v == null ? '#E8ECF1' : v >= 0 ? '#0ECB81' : '#F6465D');
 const sign = (v: number) => (v >= 0 ? '+' : '');
 
 function Spark({ data }: { data: number[] }) {
@@ -19,7 +19,7 @@ function Spark({ data }: { data: number[] }) {
   const min = Math.min(0, ...data);
   const max = Math.max(0, ...data);
   const range = max - min || 1;
-  const W = 84, H = 30;
+  const W = 84, H = 28;
   const pts = data
     .map((v, i) => {
       const x = (i / (data.length - 1)) * W;
@@ -30,17 +30,16 @@ function Spark({ data }: { data: number[] }) {
   const up = (data[data.length - 1] ?? 0) >= 0;
   return (
     <svg width={W} height={H} className="shrink-0" aria-hidden="true">
-      <polyline points={pts} fill="none" stroke={up ? '#0ECB81' : '#F6465D'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <polyline points={pts} fill="none" stroke={up ? '#0ECB81' : '#F6465D'} strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
 
-function Cell({ label, value, color, align }: { label: string; value: string; color: string; align: 'left' | 'center' | 'right' }) {
-  const a = align === 'left' ? 'items-start' : align === 'right' ? 'items-end' : 'items-center';
+function Cell({ label, value, color, border }: { label: string; value: string; color: string; border?: boolean }) {
   return (
-    <div className={`flex-1 flex flex-col ${a}`}>
-      <span className="text-[#59616E] text-[11px]">{label}</span>
-      <span className="text-[15px] font-medium num mt-0.5" style={{ color }}>{value}</span>
+    <div className={`flex-1 px-3 ${border ? 'border-l border-[#1B222B]' : ''}`}>
+      <div className="tlabel">{label}</div>
+      <div className="text-[15px] font-medium num mt-1" style={{ color }}>{value}</div>
     </div>
   );
 }
@@ -48,28 +47,28 @@ function Cell({ label, value, color, align }: { label: string; value: string; co
 export function StatsHero({ totalR, avgR, weekR, winRate, expectedValue, equity, closedCount, pendingCount }: Props) {
   const ev = expectedValue == null ? null : parseFloat(expectedValue);
   return (
-    <div className="bg-[#12161C] border border-[#222A35] rounded-xl p-4 mb-3">
+    <div className="bg-[#0F141A] border border-[#1B222B] rounded-md px-3.5 py-3 mb-2.5">
       <div className="flex items-center">
-        <span className="text-[#97A2B0] text-xs">累積績效</span>
+        <span className="tlabel">累積績效</span>
         <span className="flex-1" />
-        <span className="text-[#59616E] text-[11px] num">{closedCount} 結束 · {pendingCount} 持倉</span>
+        <span className="text-[#565E6B] text-[10px] num">{closedCount} 結束 · {pendingCount} 持倉</span>
       </div>
 
       <div className="flex items-end gap-3 mt-2">
-        <span className="text-[30px] font-medium leading-none num" style={{ color: col(totalR) }}>
+        <span className="text-[29px] font-medium leading-none num" style={{ color: col(totalR) }}>
           {totalR == null ? '—' : `${sign(totalR)}${totalR.toFixed(1)}R`}
         </span>
         {avgR != null && (
-          <span className="text-[13px] num pb-0.5" style={{ color: col(avgR) }}>每筆 {sign(avgR)}{avgR.toFixed(2)}R</span>
+          <span className="text-[12px] num pb-0.5 text-[#8A94A2]">每筆 {sign(avgR)}{avgR.toFixed(2)}R</span>
         )}
         <span className="flex-1" />
         <Spark data={equity} />
       </div>
 
-      <div className="flex mt-3.5 pt-3 border-t border-[#1B2129]">
-        <Cell label="近 7 日" value={weekR == null ? '—' : `${sign(weekR)}${weekR.toFixed(1)}R`} color={col(weekR)} align="left" />
-        <Cell label="勝率" value={winRate == null ? '—' : `${winRate}%`} color="#EAEDF2" align="center" />
-        <Cell label="每筆期望" value={ev == null ? '—' : `${ev >= 0 ? '+' : ''}${expectedValue}%`} color={ev == null ? '#EAEDF2' : ev >= 0 ? '#0ECB81' : '#F6465D'} align="right" />
+      <div className="flex mt-3 pt-3 border-t border-[#1B222B] -mx-3.5">
+        <Cell label="近 7 日" value={weekR == null ? '—' : `${sign(weekR)}${weekR.toFixed(1)}R`} color={col(weekR)} />
+        <Cell label="勝率" value={winRate == null ? '—' : `${winRate}%`} color="#E8ECF1" border />
+        <Cell label="每筆期望" value={ev == null ? '—' : `${ev >= 0 ? '+' : ''}${expectedValue}%`} color={ev == null ? '#E8ECF1' : ev >= 0 ? '#0ECB81' : '#F6465D'} border />
       </div>
     </div>
   );

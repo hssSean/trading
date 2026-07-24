@@ -18,7 +18,7 @@ export function BottomNav() {
   const pendingTrades = useStore((s) => s.trades.filter((t) => !t.result).length);
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-[#12161C] border-t border-[#222A35] flex safe-bottom z-50">
+    <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-[#0C1116] border-t border-[#1B222B] flex safe-bottom z-50">
       {NAV.map(({ href, label, Icon }) => {
         const active   = href === '/' ? pathname === '/' || pathname.startsWith('/analysis') : pathname.startsWith(href);
         const badge    = href === '/signals' ? unread : href === '/trades' ? pendingTrades : 0;

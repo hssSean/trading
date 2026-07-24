@@ -299,22 +299,23 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 pt-14 pb-3 safe-top border-b border-[#1E1E2E]">
+      <div className="flex items-center px-3 pt-14 pb-2.5 safe-top border-b border-[#1B222B]">
         <div>
-          <h1 className="text-[#EAEAF4] text-xl font-extrabold tracking-tight">Crypto Trader</h1>
-          <p className="text-[#606080] text-xs mt-0.5">
-            {coins.length} 個幣種 · {coins.filter((c) => c.signals.length > 0).length} 個有信號
+          <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">幣種監控</h1>
+          <p className="text-[#565E6B] text-[10px] mt-0.5 num">
+            {coins.length} 監控 · {coins.filter((c) => c.signals.length > 0).length} 訊號
           </p>
         </div>
-        <div className="flex gap-2">
+        <span className="flex-1" />
+        <div className="flex gap-1.5">
           <button
             onClick={() => loadTopCoins(false)}
             disabled={autoLoading || refreshing}
-            className="text-blue-400 text-xs font-semibold px-3 py-1.5 border border-blue-400/30 rounded-full disabled:opacity-40 active:opacity-70"
+            className="text-[#8A94A2] text-[11px] px-2.5 py-1 border border-[#232B35] rounded disabled:opacity-40 active:bg-[#141A21]"
           >
             {autoLoading ? (
               <span className="flex items-center gap-1">
-                <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin inline-block" />
+                <span className="w-2.5 h-2.5 border-[1.5px] border-[#8A94A2] border-t-transparent rounded-full animate-spin inline-block" />
                 載入
               </span>
             ) : '熱門'}
@@ -322,22 +323,25 @@ export default function HomePage() {
           <button
             onClick={analyzeAll}
             disabled={refreshing || autoLoading}
-            className="text-[#2DD4BF] text-xs font-semibold px-3 py-1.5 border border-[#2DD4BF]/40 rounded-full disabled:opacity-40 active:opacity-70"
+            className="text-[#2DD4BF] text-[11px] px-2.5 py-1 border border-[#2DD4BF]/40 rounded disabled:opacity-40 active:bg-[#141A21]"
           >
             {refreshing ? (
               <span className="flex items-center gap-1">
-                <span className="w-3 h-3 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin inline-block" />
-                分析中
+                <span className="w-2.5 h-2.5 border-[1.5px] border-[#2DD4BF] border-t-transparent rounded-full animate-spin inline-block" />
+                掃描中
               </span>
-            ) : '重新分析'}
+            ) : '掃描'}
           </button>
-          <button onClick={() => setShowAdd(true)} className="btn-primary text-xs">
-            + 新增
+          <button onClick={() => setShowAdd(true)} className="bg-[#2DD4BF] text-[#0A0D11] text-[11px] font-medium px-2.5 py-1 rounded active:opacity-80">
+            +
           </button>
         </div>
       </div>
 
-      <div className="px-4 space-y-2">
+      {/* Edge-to-edge market status strip */}
+      <BtcStatusBar />
+
+      <div className="px-3 pt-2 space-y-2">
         {autoLoading && (
           <div className="mt-3 px-4 py-2.5 bg-blue-500/10 border border-blue-500/30 rounded-2xl flex items-center gap-2">
             <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
@@ -370,9 +374,6 @@ export default function HomePage() {
           </div>
         ))}
 
-        {/* Glanceable BTC / market state — answers "why no signals" at a glance */}
-        <BtcStatusBar />
-
         {/* Server scan status — why each coin was / wasn't signalled */}
         <ScanStatusPanel />
 
@@ -404,11 +405,19 @@ export default function HomePage() {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 pt-3 scroll-container">
+      <div className="flex-1 overflow-y-auto pt-2 scroll-container">
         {sortedCoins.length === 0 && !autoLoading ? (
-          <EmptyState onAuto={() => loadTopCoins(false)} onManual={() => setShowAdd(true)} autoLoading={autoLoading} />
+          <div className="px-4"><EmptyState onAuto={() => loadTopCoins(false)} onManual={() => setShowAdd(true)} autoLoading={autoLoading} /></div>
         ) : (
-          sortedCoins.map((coin) => <CoinCard key={coin.symbol} coin={coin} />)
+          <>
+            {/* Column header — terminal table */}
+            <div className="flex items-center px-3 py-1.5 border-y border-[#1B222B] bg-[#0C1116]">
+              <span className="w-[96px] tlabel">幣種</span>
+              <span className="flex-1 text-right tlabel">最新價 / 24H</span>
+              <span className="w-[76px] text-right tlabel">訊號</span>
+            </div>
+            {sortedCoins.map((coin) => <CoinCard key={coin.symbol} coin={coin} />)}
+          </>
         )}
         <div className="h-4" />
       </div>

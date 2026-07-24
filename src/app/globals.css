@@ -3,12 +3,13 @@
 @tailwind utilities;
 
 :root {
-  /* Surfaces (deep → elevated) */
-  --bg: #0B0E12;
-  --surface: #12161C;
-  --surface-2: #1A2029;
-  --hair: #222A35;
+  /* Surfaces (deep → elevated) — terminal: darker base, tighter contrast */
+  --bg: #0A0D11;
+  --surface: #0F141A;
+  --surface-2: #141A21;
+  --hair: #1B222B;
   --hair-strong: #2A323D;
+  --hair-faint: #141A21;
   /* Text scale */
   --t1: #EAEDF2;
   --t2: #97A2B0;
@@ -54,32 +55,37 @@ html, body {
 .safe-top { padding-top: env(safe-area-inset-top, 0px); }
 
 @layer utilities {
+  /* Terminal panel — flat, sharp, hairline. */
   .card {
-    @apply bg-[#12161C] border border-[#222A35] rounded-xl p-4;
+    @apply bg-[#0F141A] border border-[#1B222B] rounded-md p-3.5;
   }
   .card-hover {
-    @apply card active:scale-[0.99] transition-transform cursor-pointer;
+    @apply card active:bg-[#141A21] transition-colors cursor-pointer;
   }
-  /* Direction badges — hairline outline, no glow tint */
+  /* Direction tags — sharp, outline, no glow tint */
   .badge-long {
-    @apply text-[#0ECB81] border border-[#0ECB81]/35 px-2 py-0.5 rounded-md text-xs font-medium;
+    @apply text-[#0ECB81] border border-[#0ECB81]/35 px-1.5 py-0.5 rounded text-[11px] font-medium;
   }
   .badge-short {
-    @apply text-[#F6465D] border border-[#F6465D]/35 px-2 py-0.5 rounded-md text-xs font-medium;
+    @apply text-[#F6465D] border border-[#F6465D]/35 px-1.5 py-0.5 rounded text-[11px] font-medium;
   }
   .badge-tf {
-    @apply text-[#59616E] text-xs;
+    @apply text-[#565E6B] text-[11px];
   }
   .btn-primary {
-    @apply bg-[#2DD4BF] text-[#08110F] font-medium rounded-lg px-4 py-2 active:opacity-80 transition-opacity;
+    @apply bg-[#2DD4BF] text-[#08110F] font-medium rounded px-4 py-2 active:opacity-80 transition-opacity;
   }
   .chip {
-    @apply bg-[#12161C] border border-[#222A35] rounded-full px-3 py-1.5 text-sm text-[#97A2B0] cursor-pointer;
+    @apply bg-[#0F141A] border border-[#1B222B] rounded px-3 py-1.5 text-sm text-[#97A2B0] cursor-pointer;
   }
   .chip-active {
     @apply border-[#2DD4BF] text-[#2DD4BF] font-medium;
   }
   .input-field {
-    @apply w-full bg-[#12161C] text-[#EAEDF2] rounded-lg px-4 py-3 text-sm border border-[#222A35] focus:border-[#2DD4BF] outline-none placeholder:text-[#59616E] transition-colors;
+    @apply w-full bg-[#0F141A] text-[#E8ECF1] rounded px-4 py-3 text-sm border border-[#1B222B] focus:border-[#2DD4BF] outline-none placeholder:text-[#565E6B] transition-colors;
+  }
+  /* Terminal uppercase micro-label */
+  .tlabel {
+    @apply text-[#565E6B] text-[10px] tracking-[0.08em];
   }
 }
