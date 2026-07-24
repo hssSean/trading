@@ -3,9 +3,21 @@
 @tailwind utilities;
 
 :root {
-  --accent: #F0B90B;
-  --green: #00C087;
-  --red: #FF4B6E;
+  /* Surfaces (deep → elevated) */
+  --bg: #0B0E12;
+  --surface: #12161C;
+  --surface-2: #1A2029;
+  --hair: #222A35;
+  --hair-strong: #2A323D;
+  /* Text scale */
+  --t1: #EAEDF2;
+  --t2: #97A2B0;
+  --t3: #59616E;
+  /* Single accent (mint) — functional only, never for P&L */
+  --accent: #2DD4BF;
+  /* P&L / direction semantics */
+  --up: #0ECB81;
+  --down: #F6465D;
 }
 
 * {
@@ -14,10 +26,16 @@
 }
 
 html, body {
-  background-color: #0A0A0F;
-  color: #EAEAF4;
+  background-color: var(--bg);
+  color: var(--t1);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   overscroll-behavior: none;
+}
+
+/* Tabular monospace numbers — the trading-terminal feel. Apply to any price/R/%/count. */
+.num {
+  font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Mobile-app scroll feel */
@@ -29,7 +47,7 @@ html, body {
 /* Hide scrollbar on mobile */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #2A2A3E; border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: var(--hair-strong); border-radius: 2px; }
 
 /* Safe area for iPhone notch / home bar */
 .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 16px); }
@@ -37,30 +55,31 @@ html, body {
 
 @layer utilities {
   .card {
-    @apply bg-[#12121A] border border-[#1E1E2E] rounded-2xl p-4;
+    @apply bg-[#12161C] border border-[#222A35] rounded-xl p-4;
   }
   .card-hover {
-    @apply card active:scale-[0.98] transition-transform cursor-pointer;
+    @apply card active:scale-[0.99] transition-transform cursor-pointer;
   }
+  /* Direction badges — hairline outline, no glow tint */
   .badge-long {
-    @apply bg-green-500/10 text-green-400 px-2 py-1 rounded-lg text-xs font-bold;
+    @apply text-[#0ECB81] border border-[#0ECB81]/35 px-2 py-0.5 rounded-md text-xs font-medium;
   }
   .badge-short {
-    @apply bg-red-500/10 text-red-400 px-2 py-1 rounded-lg text-xs font-bold;
+    @apply text-[#F6465D] border border-[#F6465D]/35 px-2 py-0.5 rounded-md text-xs font-medium;
   }
   .badge-tf {
-    @apply bg-[#1A1A26] text-[#606080] px-2 py-0.5 rounded text-xs;
+    @apply text-[#59616E] text-xs;
   }
   .btn-primary {
-    @apply bg-[#F0B90B] text-[#0A0A0F] font-bold rounded-full px-4 py-2 active:opacity-80 transition-opacity;
+    @apply bg-[#2DD4BF] text-[#08110F] font-medium rounded-lg px-4 py-2 active:opacity-80 transition-opacity;
   }
   .chip {
-    @apply bg-[#1A1A26] border border-[#1E1E2E] rounded-full px-3 py-1.5 text-sm text-[#A0A0C0] cursor-pointer;
+    @apply bg-[#12161C] border border-[#222A35] rounded-full px-3 py-1.5 text-sm text-[#97A2B0] cursor-pointer;
   }
   .chip-active {
-    @apply bg-yellow-400/10 border-[#F0B90B] text-[#F0B90B] font-semibold;
+    @apply border-[#2DD4BF] text-[#2DD4BF] font-medium;
   }
   .input-field {
-    @apply w-full bg-[#1A1A26] text-[#EAEAF4] rounded-xl px-4 py-3 text-sm border border-[#1E1E2E] focus:border-[#F0B90B] outline-none placeholder:text-[#404060] transition-colors;
+    @apply w-full bg-[#12161C] text-[#EAEDF2] rounded-lg px-4 py-3 text-sm border border-[#222A35] focus:border-[#2DD4BF] outline-none placeholder:text-[#59616E] transition-colors;
   }
 }

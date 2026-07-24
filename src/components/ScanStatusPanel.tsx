@@ -66,7 +66,7 @@ interface FunnelStats {
 const BTC_REGIME_LABEL: Record<string, { text: string; cls: string }> = {
   bullish: { text: 'BTC 偏多', cls: 'text-green-400' },
   bearish: { text: 'BTC 偏空', cls: 'text-red-400' },
-  chaotic: { text: 'BTC 混沌', cls: 'text-[#F0B90B]' },
+  chaotic: { text: 'BTC 混沌', cls: 'text-[#2DD4BF]' },
 };
 
 function timeAgo(ts: number): string {
@@ -164,7 +164,7 @@ export function ScanStatusPanel() {
               return (
                 <div key={c.symbol} className="flex items-center gap-2 text-[10px] leading-4">
                   <span className="text-[#EAEAF4] font-bold w-16 shrink-0 truncate">{c.symbol.replace('USDT', '')}</span>
-                  <span className={`w-10 shrink-0 font-bold ${c.topScore >= 65 ? 'text-[#F0B90B]' : 'text-[#404060]'}`}>
+                  <span className={`w-10 shrink-0 font-bold ${c.topScore >= 65 ? 'text-[#2DD4BF]' : 'text-[#404060]'}`}>
                     {c.topScore > 0 ? `${c.topScore}分`
                       : (c.rawTopScore ?? 0) > 0 ? `${c.rawTopScore}未達` : '—'}
                   </span>

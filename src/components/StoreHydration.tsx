@@ -722,7 +722,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
   if (!mounted || !hasHydrated) {
     return (
       <div className="min-h-dvh bg-[#0A0A0F] flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-[#F0B90B] border-t-transparent rounded-full animate-spin" />
+        <div className="w-8 h-8 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
@@ -731,7 +731,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
   if (!authReady) {
     return (
       <div className="min-h-dvh bg-[#0A0A0F] flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-[#F0B90B] border-t-transparent rounded-full animate-spin" />
+        <div className="w-8 h-8 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }

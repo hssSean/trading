@@ -45,7 +45,7 @@ export default function LoginPage() {
             {(['login', 'signup'] as const).map(m => (
               <button key={m} onClick={() => { setMode(m); setErr(''); }}
                 className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${
-                  mode === m ? 'bg-[#F0B90B] text-[#0A0A0F]' : 'bg-[#1A1A26] text-[#606080]'
+                  mode === m ? 'bg-[#2DD4BF] text-[#0A0A0F]' : 'bg-[#1A1A26] text-[#606080]'
                 }`}>
                 {m === 'login' ? '登入' : '註冊'}
               </button>

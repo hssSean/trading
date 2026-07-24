@@ -39,7 +39,7 @@ export default function SignalsPage() {
             {unread > 0 && (
               <button
                 onClick={markAllRead}
-                className="text-[#F0B90B] text-xs font-semibold border border-[#F0B90B]/30 rounded-full px-3 py-1.5"
+                className="text-[#2DD4BF] text-xs font-semibold border border-[#2DD4BF]/30 rounded-full px-3 py-1.5"
               >
                 全部已讀
               </button>

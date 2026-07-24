@@ -5,6 +5,7 @@ import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromS
 import { fetchCurrentPrice } from '@/api/binance';
 import { calcPositionPlan } from '@/lib/position';
 import { isFinallyClosed } from '@/lib/tradeSync';
+import { StatsHero } from '@/components/StatsHero';
 import { TradeResult } from '@/types';
 
 const RESULT_LABEL: Record<string, string> = {
@@ -15,10 +16,10 @@ const RESULT_LABEL: Record<string, string> = {
 };
 
 const RESULT_COLOR: Record<string, string> = {
-  WIN_TP1:      '#00C851',
+  WIN_TP1:      '#0ECB81',
   WIN_TP2:      '#00A040',
-  LOSS:         '#FF4444',
-  MANUAL_CLOSE: '#F0B90B',
+  LOSS:         '#F6465D',
+  MANUAL_CLOSE: '#2DD4BF',
 };
 
 function fmtPrice(p: number) {
@@ -170,12 +171,8 @@ export default function TradesPage() {
   const totalWin  = wins.reduce((a, t) => a + Math.max(t.pnlPercent ?? 0, 0), 0);
   const totalLoss = Math.abs(losses.reduce((a, t) => a + Math.min(t.pnlPercent ?? 0, 0), 0));
   const profitFactor = totalLoss > 0 ? (totalWin / totalLoss).toFixed(2) : null;
-  const totalReturn  = closed.length > 0
-    ? closed.reduce((a, t) => a + (t.pnlPercent ?? 0), 0)
-    : null;
-
   // ── R-multiple stats (risk-normalized; the honest scorecard) ──
-  const { totalR, accountReturn, avgR } = useMemo(() => {
+  const { totalR, avgR } = useMemo(() => {
     let rSum = 0, acctSum = 0, n = 0;
     closed.forEach(t => {
       const r = calcRMultiple(t);
@@ -260,6 +257,27 @@ export default function TradesPage() {
       .filter(t => t.closedAt)
       .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
       .map(t => { cum += t.pnlPercent ?? 0; return parseFloat(cum.toFixed(2)); });
+  }, [closed]);
+
+  // 近 7 日累積 R（戰績卡用）
+  const weekR = useMemo(() => {
+    const since = Date.now() - 7 * 86_400_000;
+    let r = 0, n = 0;
+    closed.forEach(t => {
+      if ((t.closedAt ?? 0) < since) return;
+      const v = calcRMultiple(t);
+      if (v !== null) { r += v; n++; }
+    });
+    return n > 0 ? r : null;
+  }, [closed]);
+
+  // 資金曲線 R 化（sparkline 用）：以 R 累積，去掉原始 % 的量級誤導
+  const equityR = useMemo(() => {
+    let cum = 0;
+    return [...closed]
+      .filter(t => t.closedAt)
+      .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
+      .map(t => { cum += calcRMultiple(t) ?? 0; return parseFloat(cum.toFixed(2)); });
   }, [closed]);
 
   // 最大回撤（從高峰到谷底的最大下跌）
@@ -542,7 +560,7 @@ export default function TradesPage() {
             <button onClick={() => setShowManual(true)} className="btn-primary text-xs px-3 py-1.5">
               + 新增
             </button>
-            <button onClick={exportCsv} className="text-[#F0B90B] text-xs font-semibold px-3 py-1.5 border border-[#F0B90B]/40 rounded-full active:opacity-70">
+            <button onClick={exportCsv} className="text-[#2DD4BF] text-xs font-semibold px-3 py-1.5 border border-[#2DD4BF]/40 rounded-full active:opacity-70">
               匯出
             </button>
             <button
@@ -563,32 +581,17 @@ export default function TradesPage() {
           </div>
         )}
 
-        {/* Stats */}
-        <div className="grid grid-cols-4 gap-1.5 mb-2">
-          <StatCard label="總交易" value={String(closed.length)} sub={`${pending.length} 持倉`} />
-          <StatCard
-            label="勝率"
-            value={winRate !== null ? `${winRate}%` : '—'}
-            sub={`${wins.length}W ${closed.length - wins.length}L`}
-            color={winRate !== null ? (winRate >= 50 ? '#00C851' : '#FF4444') : undefined}
-          />
-          <StatCard
-            label="累積損益 (R)"
-            value={totalR !== null ? `${totalR >= 0 ? '+' : ''}${totalR.toFixed(1)}R` : '—'}
-            sub={accountReturn !== null && totalReturn !== null
-              ? `帳戶 ${accountReturn >= 0 ? '+' : ''}${accountReturn.toFixed(1)}% · 價格 ${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(1)}%`
-              : '依建議倉位換算'}
-            color={totalR !== null ? (totalR >= 0 ? '#00C851' : '#FF4444') : undefined}
-          />
-          <StatCard
-            label="賺賠比"
-            value={avgWin !== null ? `+${parseFloat(avgWin).toFixed(1)}%` : '—'}
-            color={avgWin !== null ? '#00C851' : undefined}
-            value2={avgLoss !== null ? `${parseFloat(avgLoss).toFixed(1)}%` : undefined}
-            color2={avgLoss !== null ? '#FF4444' : undefined}
-            sub={avgWin !== null || avgLoss !== null ? '平均賺 vs 平均賠' : '尚無結束交易'}
-          />
-        </div>
+        {/* 戰績卡 — 累積 R / 每筆均 R / 近7日 / 勝率 / 每筆期望 + 資金曲線縮圖 */}
+        <StatsHero
+          totalR={totalR}
+          avgR={avgR}
+          weekR={weekR}
+          winRate={winRate}
+          expectedValue={expectedValue}
+          equity={equityR}
+          closedCount={closed.length}
+          pendingCount={pending.length}
+        />
 
         {/* Expandable detail stats */}
         {closed.length > 0 && (
@@ -607,15 +610,15 @@ export default function TradesPage() {
                   <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1.5">多/空勝率</p>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="bg-[#0A1A10] rounded-lg px-3 py-2">
-                      <p className="text-[#00C851] text-[9px] font-bold mb-0.5">▲ 做多 ({longClosed.length}筆)</p>
-                      <p className={`text-base font-extrabold ${longWinRate !== null && longWinRate >= 50 ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+                      <p className="text-[#0ECB81] text-[9px] font-bold mb-0.5">▲ 做多 ({longClosed.length}筆)</p>
+                      <p className={`text-base font-extrabold ${longWinRate !== null && longWinRate >= 50 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                         {longWinRate !== null ? `${longWinRate}%` : '—'}
                       </p>
                       <p className="text-[#404060] text-[9px]">{longWins.length}W {longClosed.length - longWins.length}L</p>
                     </div>
                     <div className="bg-[#1A0A0A] rounded-lg px-3 py-2">
-                      <p className="text-[#FF4444] text-[9px] font-bold mb-0.5">▼ 做空 ({shortClosed.length}筆)</p>
-                      <p className={`text-base font-extrabold ${shortWinRate !== null && shortWinRate >= 50 ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+                      <p className="text-[#F6465D] text-[9px] font-bold mb-0.5">▼ 做空 ({shortClosed.length}筆)</p>
+                      <p className={`text-base font-extrabold ${shortWinRate !== null && shortWinRate >= 50 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                         {shortWinRate !== null ? `${shortWinRate}%` : '—'}
                       </p>
                       <p className="text-[#404060] text-[9px]">{shortWins.length}W {shortClosed.length - shortWins.length}L</p>
@@ -629,11 +632,11 @@ export default function TradesPage() {
                   <div className="grid grid-cols-4 gap-1.5">
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
                       <p className="text-[#404060] text-[8px]">平均獲利</p>
-                      <p className="text-[#00C851] text-xs font-bold">{avgWin ? `+${avgWin}%` : '—'}</p>
+                      <p className="text-[#0ECB81] text-xs font-bold">{avgWin ? `+${avgWin}%` : '—'}</p>
                     </div>
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
                       <p className="text-[#404060] text-[8px]">平均虧損</p>
-                      <p className="text-[#FF4444] text-xs font-bold">{avgLoss ? `${avgLoss}%` : '—'}</p>
+                      <p className="text-[#F6465D] text-xs font-bold">{avgLoss ? `${avgLoss}%` : '—'}</p>
                     </div>
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
                       <p className="text-[#404060] text-[8px]">最大連虧</p>
@@ -656,11 +659,11 @@ export default function TradesPage() {
                     </div>
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
                       <p className="text-[#404060] text-[8px]">實際達成 RR</p>
-                      <p className={`text-xs font-bold ${avgActualRR ? 'text-[#00C851]' : 'text-[#404060]'}`}>{avgActualRR ? `1:${avgActualRR}` : '—'}</p>
+                      <p className={`text-xs font-bold ${avgActualRR ? 'text-[#0ECB81]' : 'text-[#404060]'}`}>{avgActualRR ? `1:${avgActualRR}` : '—'}</p>
                     </div>
                     <div className="bg-[#12121A] rounded-lg px-2 py-1.5 text-center">
                       <p className="text-[#404060] text-[8px]">每筆期望值</p>
-                      <p className={`text-xs font-bold ${expectedValue ? (parseFloat(expectedValue) >= 0 ? 'text-[#00C851]' : 'text-red-400') : 'text-[#404060]'}`}>
+                      <p className={`text-xs font-bold ${expectedValue ? (parseFloat(expectedValue) >= 0 ? 'text-[#0ECB81]' : 'text-red-400') : 'text-[#404060]'}`}>
                         {expectedValue ? `${parseFloat(expectedValue) >= 0 ? '+' : ''}${expectedValue}%` : '—'}
                       </p>
                     </div>
@@ -674,7 +677,7 @@ export default function TradesPage() {
                       <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest">資產曲線</p>
                       <div className="flex gap-3 text-[9px]">
                         <span className="text-[#606080]">
-                          累積 <span className={parseFloat((equityCurve[equityCurve.length - 1] ?? 0).toString()) >= 0 ? 'text-[#00C851] font-bold' : 'text-red-400 font-bold'}>
+                          累積 <span className={parseFloat((equityCurve[equityCurve.length - 1] ?? 0).toString()) >= 0 ? 'text-[#0ECB81] font-bold' : 'text-red-400 font-bold'}>
                             {(equityCurve[equityCurve.length - 1] ?? 0) >= 0 ? '+' : ''}{equityCurve[equityCurve.length - 1]}%
                           </span>
                         </span>
@@ -697,7 +700,7 @@ export default function TradesPage() {
                       {monthlyPnl.map(m => (
                         <div key={m.key} className={`rounded-lg px-1.5 py-2 text-center border ${m.pnl >= 0 ? 'bg-green-400/5 border-green-400/20' : 'bg-red-400/5 border-red-400/20'}`}>
                           <p className="text-[#404060] text-[8px] mb-0.5">{m.key.slice(5)}</p>
-                          <p className={`text-xs font-bold ${m.pnl >= 0 ? 'text-[#00C851]' : 'text-red-400'}`}>{m.pnl >= 0 ? '+' : ''}{m.pnl}%</p>
+                          <p className={`text-xs font-bold ${m.pnl >= 0 ? 'text-[#0ECB81]' : 'text-red-400'}`}>{m.pnl >= 0 ? '+' : ''}{m.pnl}%</p>
                           <p className="text-[#404060] text-[7px] mt-0.5">{m.wins}W/{m.total - m.wins}L</p>
                         </div>
                       ))}
@@ -714,11 +717,11 @@ export default function TradesPage() {
                         <div key={r.tf} className="flex items-center gap-2">
                           <span className="text-[#EAEAF4] text-[10px] font-mono w-8 shrink-0">{r.tf}</span>
                           <div className="flex-1 h-3 bg-[#1A1A26] rounded-full overflow-hidden">
-                            <div className="h-full rounded-full" style={{ width: `${r.wr}%`, background: r.wr >= 60 ? '#00C851' : r.wr >= 45 ? '#F0B90B' : '#FF4444' }} />
+                            <div className="h-full rounded-full" style={{ width: `${r.wr}%`, background: r.wr >= 60 ? '#0ECB81' : r.wr >= 45 ? '#2DD4BF' : '#F6465D' }} />
                           </div>
-                          <span className="text-[10px] font-bold w-8 text-right shrink-0" style={{ color: r.wr >= 60 ? '#00C851' : r.wr >= 45 ? '#F0B90B' : '#FF4444' }}>{r.wr}%</span>
+                          <span className="text-[10px] font-bold w-8 text-right shrink-0" style={{ color: r.wr >= 60 ? '#0ECB81' : r.wr >= 45 ? '#2DD4BF' : '#F6465D' }}>{r.wr}%</span>
                           <span className="text-[#404060] text-[9px] w-8 text-right shrink-0">{r.total}筆</span>
-                          <span className={`text-[9px] w-10 text-right shrink-0 ${r.avgPnl >= 0 ? 'text-[#00C851]' : 'text-red-400'}`}>{r.avgPnl >= 0 ? '+' : ''}{r.avgPnl}%</span>
+                          <span className={`text-[9px] w-10 text-right shrink-0 ${r.avgPnl >= 0 ? 'text-[#0ECB81]' : 'text-red-400'}`}>{r.avgPnl >= 0 ? '+' : ''}{r.avgPnl}%</span>
                         </div>
                       ))}
                     </div>
@@ -732,14 +735,14 @@ export default function TradesPage() {
                     <div className="space-y-1">
                       {scoreRanges.map(r => (
                         <div key={r.label} className="flex items-center gap-2">
-                          <span className="text-[#F0B90B] text-[10px] font-mono w-12 shrink-0">{r.label}分</span>
+                          <span className="text-[#2DD4BF] text-[10px] font-mono w-12 shrink-0">{r.label}分</span>
                           <div className="flex-1 h-3 bg-[#1A1A26] rounded-full overflow-hidden">
-                            <div className="h-full rounded-full" style={{ width: `${r.wr ?? 0}%`, background: (r.wr ?? 0) >= 60 ? '#00C851' : (r.wr ?? 0) >= 45 ? '#F0B90B' : '#FF4444' }} />
+                            <div className="h-full rounded-full" style={{ width: `${r.wr ?? 0}%`, background: (r.wr ?? 0) >= 60 ? '#0ECB81' : (r.wr ?? 0) >= 45 ? '#2DD4BF' : '#F6465D' }} />
                           </div>
-                          <span className="text-[10px] font-bold w-8 text-right shrink-0" style={{ color: (r.wr ?? 0) >= 60 ? '#00C851' : (r.wr ?? 0) >= 45 ? '#F0B90B' : '#FF4444' }}>{r.wr ?? '—'}%</span>
+                          <span className="text-[10px] font-bold w-8 text-right shrink-0" style={{ color: (r.wr ?? 0) >= 60 ? '#0ECB81' : (r.wr ?? 0) >= 45 ? '#2DD4BF' : '#F6465D' }}>{r.wr ?? '—'}%</span>
                           <span className="text-[#404060] text-[9px] w-8 text-right shrink-0">{r.total}筆</span>
                           {r.avgPnl !== null && (
-                            <span className={`text-[9px] w-10 text-right shrink-0 ${r.avgPnl >= 0 ? 'text-[#00C851]' : 'text-red-400'}`}>{r.avgPnl >= 0 ? '+' : ''}{r.avgPnl}%</span>
+                            <span className={`text-[9px] w-10 text-right shrink-0 ${r.avgPnl >= 0 ? 'text-[#0ECB81]' : 'text-red-400'}`}>{r.avgPnl >= 0 ? '+' : ''}{r.avgPnl}%</span>
                           )}
                         </div>
                       ))}
@@ -756,9 +759,9 @@ export default function TradesPage() {
                         <div key={r.label} className="flex items-center gap-2">
                           <span className="text-[#A0A0C0] text-[9px] flex-1 truncate">{r.label}</span>
                           <div className="w-20 h-2.5 bg-[#1A1A26] rounded-full overflow-hidden shrink-0">
-                            <div className="h-full rounded-full" style={{ width: `${r.wr}%`, background: r.wr >= 65 ? '#00C851' : r.wr >= 50 ? '#F0B90B' : '#FF4444' }} />
+                            <div className="h-full rounded-full" style={{ width: `${r.wr}%`, background: r.wr >= 65 ? '#0ECB81' : r.wr >= 50 ? '#2DD4BF' : '#F6465D' }} />
                           </div>
-                          <span className="text-[10px] font-bold w-7 text-right shrink-0" style={{ color: r.wr >= 65 ? '#00C851' : r.wr >= 50 ? '#F0B90B' : '#FF4444' }}>{r.wr}%</span>
+                          <span className="text-[10px] font-bold w-7 text-right shrink-0" style={{ color: r.wr >= 65 ? '#0ECB81' : r.wr >= 50 ? '#2DD4BF' : '#F6465D' }}>{r.wr}%</span>
                           <span className="text-[#404060] text-[9px] w-6 text-right shrink-0">{r.total}</span>
                         </div>
                       ))}
@@ -775,14 +778,14 @@ export default function TradesPage() {
                         <div className="bg-[#0A1A10] rounded-lg px-3 py-2">
                           <p className="text-[#404060] text-[8px] mb-0.5">最佳幣種</p>
                           <p className="text-[#EAEAF4] text-xs font-bold">{bestCoin.symbol.replace('USDT', '')}</p>
-                          <p className="text-[#00C851] text-xs">{bestCoin.avg >= 0 ? '+' : ''}{bestCoin.avg}%</p>
+                          <p className="text-[#0ECB81] text-xs">{bestCoin.avg >= 0 ? '+' : ''}{bestCoin.avg}%</p>
                         </div>
                       )}
                       {worstCoin && worstCoin.symbol !== bestCoin?.symbol && (
                         <div className="bg-[#1A0A0A] rounded-lg px-3 py-2">
                           <p className="text-[#404060] text-[8px] mb-0.5">最差幣種</p>
                           <p className="text-[#EAEAF4] text-xs font-bold">{worstCoin.symbol.replace('USDT', '')}</p>
-                          <p className="text-[#FF4444] text-xs">{worstCoin.avg >= 0 ? '+' : ''}{worstCoin.avg}%</p>
+                          <p className="text-[#F6465D] text-xs">{worstCoin.avg >= 0 ? '+' : ''}{worstCoin.avg}%</p>
                         </div>
                       )}
                     </div>
@@ -835,7 +838,7 @@ export default function TradesPage() {
                   ? f === 'PROFIT'    ? 'bg-green-500 border-green-500 text-white'
                   : f === 'LOSS_LIVE' ? 'bg-red-500 border-red-500 text-white'
                   : f === 'WAITING'   ? 'bg-yellow-500 border-yellow-500 text-black'
-                  : 'bg-[#F0B90B] border-[#F0B90B] text-[#0A0A0F]'
+                  : 'bg-[#2DD4BF] border-[#2DD4BF] text-[#0A0A0F]'
                   : f === 'PROFIT'    ? 'border-green-500/30 text-green-500/70'
                   : f === 'LOSS_LIVE' ? 'border-red-500/30 text-red-400/70'
                   : f === 'WAITING'   ? 'border-yellow-500/30 text-yellow-400/70'
@@ -859,7 +862,7 @@ export default function TradesPage() {
                   resultFilter === f
                     ? f === 'WIN'  ? 'bg-green-500 border-green-500 text-white'
                     : f === 'LOSS' ? 'bg-red-500 border-red-500 text-white'
-                    : 'bg-[#F0B90B] border-[#F0B90B] text-[#0A0A0F]'
+                    : 'bg-[#2DD4BF] border-[#2DD4BF] text-[#0A0A0F]'
                     : f === 'WIN'  ? 'border-green-500/30 text-green-500/70'
                     : f === 'LOSS' ? 'border-red-500/30 text-red-400/70'
                     : 'border-[#1E1E2E] text-[#606080]'
@@ -878,7 +881,7 @@ export default function TradesPage() {
               className={`text-xs px-2.5 py-1.5 rounded-full font-semibold border transition-colors ${dirFilter === d
                 ? d === 'LONG'  ? 'bg-green-500/20 border-green-500/50 text-green-400'
                 : d === 'SHORT' ? 'bg-red-500/20 border-red-500/50 text-red-400'
-                :                 'bg-[#F0B90B]/20 border-[#F0B90B]/50 text-[#F0B90B]'
+                :                 'bg-[#2DD4BF]/20 border-[#2DD4BF]/50 text-[#2DD4BF]'
                 : 'border-[#1E1E2E] text-[#404060]'}`}>
               {d === 'ALL' ? '多/空' : d === 'LONG' ? '▲ 多' : '▼ 空'}
             </button>
@@ -933,7 +936,7 @@ export default function TradesPage() {
               </p>
               <button
                 onClick={() => { setFilter('ALL'); setResultFilter('ALL'); setDirFilter('ALL'); setDateFilter('all'); }}
-                className="mt-1 text-xs px-4 py-2 rounded-full bg-[#F0B90B]/15 border border-[#F0B90B]/40 text-[#F0B90B] font-semibold active:opacity-70"
+                className="mt-1 text-xs px-4 py-2 rounded-full bg-[#2DD4BF]/15 border border-[#2DD4BF]/40 text-[#2DD4BF] font-semibold active:opacity-70"
               >
                 顯示全部紀錄
               </button>
@@ -985,7 +988,7 @@ export default function TradesPage() {
                 onClick={selectMode ? () => toggleSelect(trade.id) : undefined}
                 className={`relative rounded-2xl p-4 mb-3 border${selectMode ? ' cursor-pointer select-none' : ''} ${
                   selectMode && selectedIds.has(trade.id)
-                    ? 'border-[#F0B90B]/50 bg-[#F0B90B]/5'
+                    ? 'border-[#2DD4BF]/50 bg-[#2DD4BF]/5'
                     : isWaiting      ? 'bg-[#0D0D16] border-yellow-500/30 border-dashed'
                     : isPending && nearSL ? 'bg-[#12121A] border-red-500/50'
                     : 'bg-[#12121A] border-[#1E1E2E]'
@@ -994,7 +997,7 @@ export default function TradesPage() {
                 {selectMode && (
                   <div
                     className="absolute top-4 right-4 w-5 h-5 rounded-full border-2 flex items-center justify-center"
-                    style={{ borderColor: selectedIds.has(trade.id) ? '#F0B90B' : '#3A3A50', background: selectedIds.has(trade.id) ? '#F0B90B' : 'transparent' }}
+                    style={{ borderColor: selectedIds.has(trade.id) ? '#2DD4BF' : '#3A3A50', background: selectedIds.has(trade.id) ? '#2DD4BF' : 'transparent' }}
                   >
                     {selectedIds.has(trade.id) && <span className="text-[#0A0A0F] text-[9px] font-extrabold leading-none">✓</span>}
                   </div>
@@ -1002,7 +1005,7 @@ export default function TradesPage() {
                 {/* Top row */}
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className={`text-sm font-extrabold ${trade.direction === 'LONG' ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+                    <span className={`text-sm font-extrabold ${trade.direction === 'LONG' ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                       {trade.direction === 'LONG' ? '▲ 做多' : '▼ 做空'}
                     </span>
                     <span className={`font-bold ${isWaiting ? 'text-[#A0A0C0]' : 'text-[#EAEAF4]'}`}>
@@ -1031,7 +1034,7 @@ export default function TradesPage() {
                         {isTp1Hit ? (
                           <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-semibold border border-green-500/40">✅ TP1·等TP2</span>
                         ) : (
-                          <span className="text-xs bg-[#F0B90B]/20 text-[#F0B90B] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
+                          <span className="text-xs bg-[#2DD4BF]/20 text-[#2DD4BF] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
                         )}
                       </>
                     ) : isWatchingTp2 ? (
@@ -1041,7 +1044,7 @@ export default function TradesPage() {
                       // profitable one reads as a win, not the neutral yellow default.
                       const isManual = trade.result === 'MANUAL_CLOSE';
                       const color = isManual
-                        ? (isWin ? '#00C851' : isLossTrade(trade) ? '#FF4444' : '#F0B90B')
+                        ? (isWin ? '#0ECB81' : isLossTrade(trade) ? '#F6465D' : '#2DD4BF')
                         : RESULT_COLOR[trade.result!];
                       return (
                         <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
@@ -1050,16 +1053,16 @@ export default function TradesPage() {
                         </span>
                       );
                     })()}
-                    <span className="text-[#F0B90B] text-xs font-bold">{trade.score}分</span>
+                    <span className="text-[#2DD4BF] text-xs font-bold">{trade.score}分</span>
                   </div>
                 </div>
 
                 {/* Price grid */}
                 <div className="grid grid-cols-4 gap-1 mb-2">
                   <PriceCell label="進場" value={`$${fmtPrice(trade.entry)}`} />
-                  <PriceCell label="TP1"  value={`$${fmtPrice(trade.tp1)}`}      color="#00C851" />
+                  <PriceCell label="TP1"  value={`$${fmtPrice(trade.tp1)}`}      color="#0ECB81" />
                   <PriceCell label="TP2"  value={`$${fmtPrice(trade.tp2)}`}      color="#00A040" />
-                  <PriceCell label="止損" value={`$${fmtPrice(trade.stopLoss)}`} color="#FF4444" />
+                  <PriceCell label="止損" value={`$${fmtPrice(trade.stopLoss)}`} color="#F6465D" />
                 </div>
 
                 {/* Waiting: distance to entry */}
@@ -1093,7 +1096,7 @@ export default function TradesPage() {
                     ) : (
                       <div className={`rounded-xl p-2 text-center ${distTP1 > 0 ? 'bg-green-400/5' : 'bg-green-400/15'}`}>
                         <p className="text-[#606080] text-[9px]">距 TP1</p>
-                        <p className={`text-xs font-bold ${distTP1 > 0 ? 'text-green-400' : 'text-[#00C851]'}`}>
+                        <p className={`text-xs font-bold ${distTP1 > 0 ? 'text-green-400' : 'text-[#0ECB81]'}`}>
                           {distTP1 > 0 ? `還差 ${distTP1.toFixed(2)}%` : `超過 ${Math.abs(distTP1).toFixed(2)}%`}
                         </p>
                       </div>
@@ -1150,7 +1153,7 @@ export default function TradesPage() {
                   if (!plan) return null;
                   const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
                   return (
-                    <div className="mb-2 bg-[#0D1020] border border-[#F0B90B]/15 rounded-xl px-3 py-2">
+                    <div className="mb-2 bg-[#0D1020] border border-[#2DD4BF]/15 rounded-xl px-3 py-2">
                       <p className="text-[#6B5A20] text-[9px] font-bold uppercase tracking-widest mb-1.5">倉位計算（{effRisk}% 風險）</p>
                       <div className="grid grid-cols-4 gap-1">
                         <div className="text-center">
@@ -1159,7 +1162,7 @@ export default function TradesPage() {
                         </div>
                         <div className="text-center">
                           <p className="text-[#404060] text-[8px]">本金×槓桿</p>
-                          <p className="text-[#F0B90B] text-xs font-bold">{plan.marginUSDT}U×{plan.leverage}</p>
+                          <p className="text-[#2DD4BF] text-xs font-bold">{plan.marginUSDT}U×{plan.leverage}</p>
                         </div>
                         <div className="text-center">
                           <p className="text-[#404060] text-[8px]">止損虧損</p>
@@ -1213,7 +1216,7 @@ export default function TradesPage() {
                     />
                     <div className="flex gap-2">
                       <button onClick={() => { updateTrade(trade.id, { entryNotes: noteText }); setEditingNote(null); }}
-                        className="flex-1 py-1.5 rounded-lg bg-[#F0B90B] text-[#0A0A0F] text-xs font-bold">儲存</button>
+                        className="flex-1 py-1.5 rounded-lg bg-[#2DD4BF] text-[#0A0A0F] text-xs font-bold">儲存</button>
                       <button onClick={() => setEditingNote(null)}
                         className="px-3 py-1.5 rounded-lg bg-[#1A1A26] text-[#606080] text-xs">取消</button>
                     </div>
@@ -1242,7 +1245,7 @@ export default function TradesPage() {
                     <div className="flex items-center justify-between mt-1 pt-2 border-t border-[#1E1E2E]">
                       <span className="text-[#606080] text-xs">出場 ${fmtPrice(trade.exitPrice)}</span>
                       <span className="text-right">
-                        <span className={`text-sm font-extrabold ${isWin ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+                        <span className={`text-sm font-extrabold ${isWin ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                           {trade.pnlPercent !== undefined ? `${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent}%` : '—'}
                         </span>
                         {r !== null && (
@@ -1441,7 +1444,7 @@ export default function TradesPage() {
             </div>
 
             {/* Actual entry correction — for limit orders that filled at a different price */}
-            <div className="bg-[#0D1020] border border-[#F0B90B]/15 rounded-xl px-3 py-2.5 mb-3">
+            <div className="bg-[#0D1020] border border-[#2DD4BF]/15 rounded-xl px-3 py-2.5 mb-3">
               <p className="text-[#6B5A20] text-[9px] font-bold uppercase tracking-widest mb-1">實際成交進場價（限價單修正）</p>
               <p className="text-[#404060] text-[10px] mb-2">
                 掛單設定價：<span className="text-[#EAEAF4] font-semibold">${closeModal ? fmtPrice(closeModal.entry) : ''}</span>
@@ -1488,7 +1491,7 @@ function EquityCurve({ data }: { data: number[] }) {
   const path = data.map((v, i) => `${i === 0 ? 'M' : 'L'}${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(' ');
   const area = `${path} L${sx(data.length - 1).toFixed(1)},${zero} L${P},${zero}Z`;
   const last = data[data.length - 1];
-  const col  = last >= 0 ? '#00C851' : '#FF4444';
+  const col  = last >= 0 ? '#0ECB81' : '#F6465D';
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 72 }}>
       <line x1={P} y1={zero} x2={W - P} y2={zero} stroke="#252535" strokeWidth="1" strokeDasharray="4,3" />
@@ -1496,22 +1499,6 @@ function EquityCurve({ data }: { data: number[] }) {
       <path d={path} stroke={col} strokeWidth="2" fill="none" strokeLinejoin="round" />
       <circle cx={sx(data.length - 1)} cy={sy(last)} r="3.5" fill={col} />
     </svg>
-  );
-}
-
-function StatCard({ label, value, sub, color, value2, color2 }: {
-  label: string; value: string; sub: string; color?: string;
-  value2?: string; color2?: string;
-}) {
-  return (
-    <div className="bg-[#12121A] border border-[#1E1E2E] rounded-2xl p-2.5 text-center">
-      <p className="text-[#606080] text-[9px] mb-0.5">{label}</p>
-      <p className={`font-extrabold ${value2 !== undefined ? 'text-sm leading-tight' : 'text-base'}`} style={{ color: color ?? '#EAEAF4' }}>{value}</p>
-      {value2 !== undefined && (
-        <p className="font-extrabold text-sm leading-tight" style={{ color: color2 ?? '#EAEAF4' }}>{value2}</p>
-      )}
-      <p className="text-[#404060] text-[9px]">{sub}</p>
-    </div>
   );
 }
 

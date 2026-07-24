@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
 import { CoinCard } from '@/components/CoinCard';
+import { BtcStatusBar } from '@/components/BtcStatusBar';
 import { ScanStatusPanel } from '@/components/ScanStatusPanel';
 import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, searchSymbols } from '@/api/binance';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
@@ -321,11 +322,11 @@ export default function HomePage() {
           <button
             onClick={analyzeAll}
             disabled={refreshing || autoLoading}
-            className="text-[#F0B90B] text-xs font-semibold px-3 py-1.5 border border-[#F0B90B]/40 rounded-full disabled:opacity-40 active:opacity-70"
+            className="text-[#2DD4BF] text-xs font-semibold px-3 py-1.5 border border-[#2DD4BF]/40 rounded-full disabled:opacity-40 active:opacity-70"
           >
             {refreshing ? (
               <span className="flex items-center gap-1">
-                <span className="w-3 h-3 border-2 border-[#F0B90B] border-t-transparent rounded-full animate-spin inline-block" />
+                <span className="w-3 h-3 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin inline-block" />
                 分析中
               </span>
             ) : '重新分析'}
@@ -369,6 +370,9 @@ export default function HomePage() {
           </div>
         ))}
 
+        {/* Glanceable BTC / market state — answers "why no signals" at a glance */}
+        <BtcStatusBar />
+
         {/* Server scan status — why each coin was / wasn't signalled */}
         <ScanStatusPanel />
 
@@ -393,9 +397,9 @@ export default function HomePage() {
         )}
 
         {unread > 0 && (
-          <div className="mt-2 px-4 py-2.5 bg-yellow-400/10 border border-[#F0B90B]/30 rounded-2xl flex items-center gap-2">
-            <span className="text-[#F0B90B]">🔔</span>
-            <p className="text-[#F0B90B] text-xs font-semibold">{unread} 個未讀交易信號</p>
+          <div className="mt-2 px-4 py-2.5 bg-yellow-400/10 border border-[#2DD4BF]/30 rounded-2xl flex items-center gap-2">
+            <span className="text-[#2DD4BF]">🔔</span>
+            <p className="text-[#2DD4BF] text-xs font-semibold">{unread} 個未讀交易信號</p>
           </div>
         )}
       </div>

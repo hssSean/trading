@@ -1,14 +1,15 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { Home, Radar, ClipboardList, Activity, Settings } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 
 const NAV = [
-  { href: '/', label: '首頁', icon: '🏠' },
-  { href: '/signals', label: '信號', icon: '📊' },
-  { href: '/trades', label: '紀錄', icon: '📋' },
-  { href: '/health-check', label: '體檢', icon: '🩺' },
-  { href: '/settings', label: '設定', icon: '⚙️' },
+  { href: '/', label: '首頁', Icon: Home },
+  { href: '/signals', label: '信號', Icon: Radar },
+  { href: '/trades', label: '紀錄', Icon: ClipboardList },
+  { href: '/health-check', label: '體檢', Icon: Activity },
+  { href: '/settings', label: '設定', Icon: Settings },
 ];
 
 export function BottomNav() {
@@ -17,29 +18,26 @@ export function BottomNav() {
   const pendingTrades = useStore((s) => s.trades.filter((t) => !t.result).length);
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-[#12121A] border-t border-[#1E1E2E] flex safe-bottom z-50">
-      {NAV.map(({ href, label, icon }) => {
-        const active = href === '/' ? pathname === '/' || pathname.startsWith('/analysis') : pathname.startsWith(href);
+    <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-[#12161C] border-t border-[#222A35] flex safe-bottom z-50">
+      {NAV.map(({ href, label, Icon }) => {
+        const active   = href === '/' ? pathname === '/' || pathname.startsWith('/analysis') : pathname.startsWith(href);
+        const badge    = href === '/signals' ? unread : href === '/trades' ? pendingTrades : 0;
+        const badgeCls = href === '/signals' ? 'bg-[#F6465D] text-white' : 'bg-[#2DD4BF] text-[#08110F]';
         return (
           <Link
             key={href}
             href={href}
-            className={`flex-1 flex flex-col items-center justify-center pt-3 pb-1 gap-1 transition-opacity ${active ? 'opacity-100' : 'opacity-40'}`}
+            className="flex-1 flex flex-col items-center justify-center pt-2.5 pb-1 gap-1"
           >
-            <span className="text-xl relative">
-              {icon}
-              {href === '/signals' && unread > 0 && (
-                <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[9px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-[3px]">
-                  {unread > 99 ? '99+' : unread}
-                </span>
-              )}
-              {href === '/trades' && pendingTrades > 0 && (
-                <span className="absolute -top-1 -right-2 bg-[#F0B90B] text-[#0A0A0F] text-[9px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-[3px]">
-                  {pendingTrades}
+            <span className="relative">
+              <Icon size={21} strokeWidth={1.75} color={active ? '#2DD4BF' : '#59616E'} />
+              {badge > 0 && (
+                <span className={`absolute -top-1.5 -right-2.5 ${badgeCls} text-[9px] font-medium rounded-full min-w-[15px] h-[15px] flex items-center justify-center px-[3px] num`}>
+                  {badge > 99 ? '99+' : badge}
                 </span>
               )}
             </span>
-            <span className={`text-[10px] font-semibold ${active ? 'text-[#F0B90B]' : 'text-[#606080]'}`}>
+            <span className={`text-[11px] ${active ? 'text-[#2DD4BF] font-medium' : 'text-[#59616E]'}`}>
               {label}
             </span>
           </Link>

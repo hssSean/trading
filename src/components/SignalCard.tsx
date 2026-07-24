@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { TrendingUp, TrendingDown, Check, Plus } from 'lucide-react';
 import { TradingSignal } from '@/types';
 import { useStore } from '@/store/useStore';
 import { calcPositionPlan } from '@/lib/position';
@@ -16,9 +17,9 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   const isLong    = signal.direction === 'LONG';
   const tp1       = signal.takeProfits?.[0];
   const tp2       = signal.takeProfits?.[1];
-  const addTrade   = useStore((s) => s.addTrade);
-  const hasTrade   = useStore((s) => s.trades.some((t) => t.symbol === signal.symbol && !t.result));
-  const justAdded  = useStore((s) => s.trades.some((t) => t.signalId === signal.id));
+  const addTrade    = useStore((s) => s.addTrade);
+  const hasTrade    = useStore((s) => s.trades.some((t) => t.symbol === signal.symbol && !t.result));
+  const justAdded   = useStore((s) => s.trades.some((t) => t.signalId === signal.id));
   const accountSize = useStore((s) => s.settings.accountSize);
   const riskPct     = useStore((s) => s.settings.riskPctPerTrade ?? 1);
   const [flash, setFlash] = useState(false);
@@ -26,10 +27,10 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   // Position sizing: user risk% (tier B halved, leverage ≤5x)
   const effRisk = riskPct * (signal.tier === 'B' ? 0.5 : 1);
   const plan    = calcPositionPlan(accountSize, effRisk, signal.entry, signal.stopLoss, signal.tier === 'B' ? 5 : 10);
-  const isHighVol     = signal.reasons.some((r) => r.startsWith('⚠ 高波動'));
-  const sp            = signal.signalPrice ?? 0;
-  const isLimit       = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
-  const isIntraday    = signal.timeframe === '5m' || signal.timeframe === '15m';
+  const isHighVol  = signal.reasons.some((r) => r.startsWith('⚠ 高波動'));
+  const sp         = signal.signalPrice ?? 0;
+  const isLimit    = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
+  const isIntraday = signal.timeframe === '5m' || signal.timeframe === '15m';
 
   const handleAddTrade = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -39,16 +40,6 @@ export function SignalCard({ signal, onClick, compact }: Props) {
     setTimeout(() => setFlash(false), 2000);
   };
 
-  const strengthColor =
-    signal.strength === 'STRONG'
-      ? 'text-green-400'
-      : signal.strength === 'MODERATE'
-      ? 'text-yellow-400'
-      : 'text-[#606080]';
-
-  const strengthLabel =
-    signal.strength === 'STRONG' ? '強 ★★★' : signal.strength === 'MODERATE' ? '中 ★★' : '弱 ★';
-
   let timeAgo = '';
   try {
     timeAgo = formatDistanceToNow(signal.timestamp, { locale: zhTW, addSuffix: true });
@@ -56,152 +47,107 @@ export function SignalCard({ signal, onClick, compact }: Props) {
     timeAgo = new Date(signal.timestamp).toLocaleString('zh-TW');
   }
 
+  const tp1Pct = tp1 != null ? (Math.abs(tp1 - signal.entry) / signal.entry * 100) : null;
+  const slPct  = Math.abs(signal.stopLoss - signal.entry) / signal.entry * 100;
+
   return (
     <div
       onClick={onClick}
-      className={`card mb-3 ${onClick ? 'cursor-pointer active:scale-[0.98] transition-transform' : ''} ${!signal.isRead ? 'border-[#F0B90B]' : ''}`}
+      className={`card mb-2.5 ${onClick ? 'cursor-pointer active:scale-[0.99] transition-transform' : ''} ${!signal.isRead ? 'border-[#2DD4BF]/50' : ''}`}
     >
-      {/* ── Header row ── */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={isLong ? 'badge-long' : 'badge-short'}>
-            {isLong ? '做多 ▲' : '做空 ▼'}
-          </span>
-          <span className="text-[#EAEAF4] font-bold text-sm">
-            {signal.symbol.replace('USDT', '/USDT')}
-          </span>
-          <span className="badge-tf">{signal.timeframe}</span>
-          {isIntraday && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30 font-semibold">日內</span>}
-          {isLimit    && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 border border-yellow-500/30 font-semibold">限價</span>}
-          {!signal.isRead && (
-            <span className="w-2 h-2 rounded-full bg-[#F0B90B] animate-pulse" />
-          )}
-        </div>
-        <div className="text-right shrink-0 ml-2">
-          <p className={`text-xs font-semibold ${strengthColor}`}>{strengthLabel}</p>
-          <p className="text-[#606080] text-[10px] mt-0.5">{timeAgo}</p>
-        </div>
+      {/* ── Header ── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[#EAEDF2] font-medium text-[15px]">
+          {signal.symbol.replace('USDT', '')}<span className="text-[#59616E]">/USDT</span>
+        </span>
+        <span className={`${isLong ? 'badge-long' : 'badge-short'} inline-flex items-center gap-1`}>
+          {isLong ? <TrendingUp size={13} /> : <TrendingDown size={13} />}{isLong ? '做多' : '做空'}
+        </span>
+        <span className="badge-tf num">{signal.timeframe}</span>
+        {isIntraday && <span className="text-[10px] px-1.5 py-0.5 rounded-md border border-[#2DD4BF]/30 text-[#2DD4BF]">日內</span>}
+        {isLimit    && <span className="text-[10px] px-1.5 py-0.5 rounded-md border border-[#222A35] text-[#97A2B0]">限價</span>}
+        {isHighVol  && <span className="text-[10px] px-1.5 py-0.5 rounded-md border border-[#2A323D] text-[#97A2B0]">高波動</span>}
+        <span className="flex-1" />
+        <span className="text-[#59616E] text-[11px]">評分</span>
+        <span className="text-[#2DD4BF] text-[15px] font-medium num">{signal.score}</span>
       </div>
 
-      {/* ── Price grid ── */}
-      <div className="grid grid-cols-2 gap-2 mb-3">
-        <PriceBox label="📌 入場價" value={tp1 ? signal.entry : null} highlight={signal.entry} color="blue" />
-        <PriceBox label="🛑 止損 SL" value={signal.stopLoss} color="red" />
-        {tp1 && <PriceBox label="🎯 止盈 TP1" value={tp1} color="green" />}
-        {tp2 && <PriceBox label="🎯 止盈 TP2" value={tp2} color="green" dim />}
+      {/* ── Price grid 2×2 (hairline-divided, mono) ── */}
+      <div className="grid grid-cols-2 gap-px mt-3 bg-[#1B2129] border border-[#1B2129] rounded-lg overflow-hidden">
+        <PriceCell label="進場" value={signal.entry} color="#EAEDF2" />
+        <PriceCell label="止損" value={signal.stopLoss} color="#F6465D" />
+        {tp1 != null && <PriceCell label="TP1" value={tp1} color="#0ECB81" />}
+        {tp2 != null && <PriceCell label="TP2" value={tp2} color="#0ECB81" />}
       </div>
 
-      {/* ── Stats row ── */}
-      <div className="flex gap-2 mb-3">
-        <StatChip label="風報比" value={`${signal.riskReward}:1`} />
-        <StatChip label="得分" value={`${signal.score}pt`} />
-        {tp1 && (
-          <StatChip
-            label="TP1 幅度"
-            value={`+${(Math.abs(tp1 - signal.entry) / signal.entry * 100).toFixed(1)}%`}
-            color="#00C851"
-          />
-        )}
-        <StatChip
-          label="SL 距離"
-          value={`-${(Math.abs(signal.stopLoss - signal.entry) / signal.entry * 100).toFixed(1)}%`}
-          color="#FF4444"
-        />
+      {/* ── Stats line ── */}
+      <div className="flex items-center gap-2 mt-2.5 text-[12px] text-[#97A2B0]">
+        <span className="num">RR 1:{signal.riskReward}</span>
+        <span className="w-px h-3 bg-[#2A323D]" />
+        {tp1Pct != null && <span className="text-[#0ECB81] num">TP1 +{tp1Pct.toFixed(1)}%</span>}
+        <span className="text-[#F6465D] num">SL −{slPct.toFixed(1)}%</span>
+        <span className="flex-1" />
+        <span className="text-[#59616E] text-[11px]">{timeAgo}</span>
       </div>
 
-      {/* ── Position size + volatility ── */}
-      <div className="flex items-center gap-2 mb-2">
-        <div className="flex-1 bg-[#1A1A26] rounded-xl px-3 py-2">
-          <p className="text-[#606080] text-[9px]">建議倉位（{effRisk}% 風險）</p>
-          <p className="text-[#EAEAF4] font-bold text-xs mt-0.5">
-            {plan ? (
-              <>
-                {plan.positionUSDT} USDT
-                <span className="text-[#F0B90B] font-semibold ml-1">本金 {plan.marginUSDT}U ×{plan.leverage}倍</span>
-                <span className="text-[#404060] font-normal ml-1">虧損上限 {plan.riskUSDT}U</span>
-              </>
-            ) : '—'}
-          </p>
-          {plan?.belowMinNotional && (
-            <p className="text-orange-400/80 text-[9px] mt-0.5">⚠ 低於交易所最低下單額 5U，可能無法開單</p>
-          )}
-        </div>
-        {isHighVol && (
-          <span className="text-xs font-semibold px-2 py-1 rounded-xl bg-orange-500/20 text-orange-400 border border-orange-500/30 shrink-0">
-            高波動
-          </span>
+      {/* ── Position size ── */}
+      <div className="mt-2.5 bg-[#12161C] border border-[#222A35] rounded-lg px-3 py-2">
+        <p className="text-[#59616E] text-[11px]">建議倉位 · {effRisk}% 風險</p>
+        <p className="text-[#EAEDF2] text-[13px] mt-0.5 num">
+          {plan ? (
+            <>
+              {plan.positionUSDT} USDT
+              <span className="text-[#2DD4BF] ml-1.5">本金 {plan.marginUSDT}U ×{plan.leverage}</span>
+              <span className="text-[#59616E] ml-1.5">上限虧 {plan.riskUSDT}U</span>
+            </>
+          ) : '—'}
+        </p>
+        {plan?.belowMinNotional && (
+          <p className="text-[#F6465D] text-[11px] mt-1 opacity-80">低於交易所最低下單額 5U，可能無法開單</p>
         )}
       </div>
 
       {/* ── Reasons ── */}
       {!compact && signal.reasons.length > 0 && (
-        <div className="pt-2 border-t border-[#1E1E2E]">
-          <p className="text-[#606080] text-[10px] mb-1.5 font-semibold uppercase tracking-wide">分析依據</p>
+        <div className="mt-3 pt-3 border-t border-[#1B2129]">
+          <p className="text-[#59616E] text-[11px] mb-1.5">分析依據</p>
           <div className="space-y-1">
             {signal.reasons.slice(0, 5).map((r, i) => (
-              <p key={i} className="text-[#A0A0C0] text-xs">• {r}</p>
+              <p key={i} className="text-[#97A2B0] text-xs leading-relaxed">{r}</p>
             ))}
           </div>
         </div>
       )}
 
-      {/* ── Add to Journal button ── */}
+      {/* ── Add to journal ── */}
       {!compact && (
-        <div className="pt-2 mt-2 border-t border-[#1E1E2E]">
-          <button
-            onClick={handleAddTrade}
-            disabled={hasTrade || justAdded}
-            className={`w-full py-2 rounded-xl text-xs font-semibold transition-colors ${
-              flash
-                ? 'bg-green-400/20 text-green-400 border border-green-400/40'
-                : justAdded || hasTrade
-                ? 'bg-[#1A1A26] text-[#404060] border border-[#1E1E2E] cursor-not-allowed'
-                : 'bg-[#F0B90B]/10 text-[#F0B90B] border border-[#F0B90B]/30 active:opacity-70'
-            }`}
-          >
-            {flash ? '✓ 已加入交易紀錄' : justAdded ? '已在紀錄中' : hasTrade ? `${signal.symbol.replace('USDT', '')} 已有持倉中` : '+ 加入交易紀錄'}
-          </button>
-        </div>
+        <button
+          onClick={handleAddTrade}
+          disabled={hasTrade || justAdded}
+          className={`w-full mt-3 py-2 rounded-lg text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
+            flash
+              ? 'bg-[#0ECB81]/15 text-[#0ECB81] border border-[#0ECB81]/40'
+              : justAdded || hasTrade
+              ? 'bg-[#12161C] text-[#59616E] border border-[#222A35] cursor-not-allowed'
+              : 'bg-[#2DD4BF] text-[#08110F] active:opacity-80'
+          }`}
+        >
+          {flash
+            ? <><Check size={14} /> 已加入紀錄</>
+            : justAdded ? '已在紀錄中'
+            : hasTrade ? `${signal.symbol.replace('USDT', '')} 已持倉`
+            : <><Plus size={14} /> 加入交易紀錄</>}
+        </button>
       )}
     </div>
   );
 }
 
-function PriceBox({
-  label,
-  value,
-  highlight,
-  color,
-  dim,
-}: {
-  label: string;
-  value: number | null | undefined;
-  highlight?: number;
-  color: 'blue' | 'green' | 'red';
-  dim?: boolean;
-}) {
-  const colorClass = {
-    blue: 'text-blue-400',
-    green: dim ? 'text-green-400/60' : 'text-green-400',
-    red: 'text-red-400',
-  }[color];
-
-  const displayValue = value ?? highlight;
+function PriceCell({ label, value, color }: { label: string; value: number; color: string }) {
   return (
-    <div className="bg-[#1A1A26] rounded-xl p-3">
-      <p className="text-[#606080] text-[10px] mb-1">{label}</p>
-      <p className={`${colorClass} font-bold text-sm font-mono`}>
-        {displayValue != null ? `$${fmtPrice(displayValue)}` : '---'}
-      </p>
-    </div>
-  );
-}
-
-function StatChip({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="flex-1 bg-[#1A1A26] rounded-xl px-2 py-2 text-center min-w-0">
-      <p className="text-[#606080] text-[9px] truncate">{label}</p>
-      <p className="font-bold text-xs mt-0.5" style={{ color: color ?? '#F0B90B' }}>{value}</p>
+    <div className="bg-[#12161C] px-3 py-2">
+      <div className="text-[#59616E] text-[11px]">{label}</div>
+      <div className="text-[14px] mt-0.5 num" style={{ color }}>{fmtPrice(value)}</div>
     </div>
   );
 }

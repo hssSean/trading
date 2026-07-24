@@ -174,7 +174,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
       <div className="px-4 pt-14 pb-2 safe-top flex items-center gap-3 border-b border-[#1E1E2E]">
         <button
           onClick={() => router.back()}
-          className="w-9 h-9 rounded-full bg-[#1A1A26] flex items-center justify-center text-[#F0B90B] text-xl font-bold shrink-0"
+          className="w-9 h-9 rounded-full bg-[#1A1A26] flex items-center justify-center text-[#2DD4BF] text-xl font-bold shrink-0"
         >
           ‹
         </button>
@@ -206,7 +206,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           <button
             onClick={() => analyze(tf)}
             disabled={loading}
-            className="text-[#F0B90B] text-xs font-semibold border border-[#F0B90B]/40 rounded-full px-3 py-1.5 disabled:opacity-40 active:opacity-70"
+            className="text-[#2DD4BF] text-xs font-semibold border border-[#2DD4BF]/40 rounded-full px-3 py-1.5 disabled:opacity-40 active:opacity-70"
           >
             {loading ? '分析中…' : '重新整理'}
           </button>
@@ -221,7 +221,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             onClick={() => setTf(t)}
             className={`flex-1 py-2 rounded-xl text-sm font-semibold transition-all ${
               tf === t
-                ? 'bg-yellow-400/10 text-[#F0B90B] border border-[#F0B90B]/50'
+                ? 'bg-yellow-400/10 text-[#2DD4BF] border border-[#2DD4BF]/50'
                 : 'bg-[#1A1A26] text-[#606080] border border-transparent'
             }`}
           >
@@ -438,7 +438,7 @@ function Section({
       <h3 className="text-[#EAEAF4] font-bold text-sm mb-3">{title}</h3>
       {loading ? (
         <div className="h-20 flex items-center justify-center">
-          <div className="w-5 h-5 border-2 border-[#F0B90B] border-t-transparent rounded-full animate-spin" />
+          <div className="w-5 h-5 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
         </div>
       ) : (
         children

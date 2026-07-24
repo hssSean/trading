@@ -13,7 +13,7 @@ function strengthLabel(s: string): string {
 // ── LINE Flex Message bubble for a trading signal ──
 export function buildLineFlexMessage(signal: TradingSignal): object {
   const isLong       = signal.direction === 'LONG';
-  const accentColor  = isLong ? '#00C851' : '#FF4444';
+  const accentColor  = isLong ? '#0ECB81' : '#F6465D';
   const headerBg     = isLong ? '#0A1F0F' : '#1F0A0A';
   const dirLabel     = isLong ? '▲  做多  LONG' : '▼  做空  SHORT';
   const tp1          = signal.takeProfits[0];
@@ -57,8 +57,8 @@ export function buildLineFlexMessage(signal: TradingSignal): object {
         {
           type: 'box', layout: 'horizontal', margin: 'sm',
           contents: [
-            { type: 'text', text: `${signal.timeframe} · ${strengthLabel(signal.strength)} · ${signal.score}分`, size: 'xs', color: '#F0B90B' },
-            { type: 'text', text: orderTag, size: 'xs', color: isLimit ? '#F0B90B' : '#FF6666', align: 'end' },
+            { type: 'text', text: `${signal.timeframe} · ${strengthLabel(signal.strength)} · ${signal.score}分`, size: 'xs', color: '#2DD4BF' },
+            { type: 'text', text: orderTag, size: 'xs', color: isLimit ? '#2DD4BF' : '#FF6666', align: 'end' },
           ],
         },
         {
@@ -70,9 +70,9 @@ export function buildLineFlexMessage(signal: TradingSignal): object {
       type: 'box', layout: 'vertical', spacing: 'sm', backgroundColor: '#111111', paddingAll: '16px',
       contents: [
         priceRow('📌 入場價', `$${fmtPrice(signal.entry)}`, '#EAEAF4'),
-        priceRow('🎯 止盈 TP1', tp1Pct ? `$${fmtPrice(tp1)}  (+${tp1Pct}%)` : `$${fmtPrice(tp1)}`, '#00C851'),
+        priceRow('🎯 止盈 TP1', tp1Pct ? `$${fmtPrice(tp1)}  (+${tp1Pct}%)` : `$${fmtPrice(tp1)}`, '#0ECB81'),
         ...(tp2 ? [priceRow('🎯 止盈 TP2', tp2Pct ? `$${fmtPrice(tp2)}  (+${tp2Pct}%)` : `$${fmtPrice(tp2)}`, '#00A040')] : []),
-        priceRow('🛑 止損 SL', `$${fmtPrice(signal.stopLoss)}  (-${slPct}%)`, '#FF4444'),
+        priceRow('🛑 止損 SL', `$${fmtPrice(signal.stopLoss)}  (-${slPct}%)`, '#F6465D'),
         { type: 'separator', margin: 'md', color: '#333333' },
         {
           type: 'box', layout: 'horizontal', margin: 'md', spacing: 'sm',
@@ -120,7 +120,7 @@ function priceRow(label: string, value: string, color: string): object {
   };
 }
 
-function statBox(label: string, value: string, color = '#F0B90B'): object {
+function statBox(label: string, value: string, color = '#2DD4BF'): object {
   return {
     type: 'box',
     layout: 'vertical',

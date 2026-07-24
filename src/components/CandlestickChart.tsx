@@ -64,11 +64,11 @@ export function CandlestickChart({
 
       // ── Candlestick series ────────────────────────────────────
       const cs = chart.addCandlestickSeries({
-        upColor:      '#00C851',
-        downColor:    '#FF4444',
+        upColor:      '#0ECB81',
+        downColor:    '#F6465D',
         borderVisible: false,
-        wickUpColor:   '#00C851',
-        wickDownColor: '#FF4444',
+        wickUpColor:   '#0ECB81',
+        wickDownColor: '#F6465D',
       });
       cs.setData(candles.map(c => ({
         time:  Math.floor(c.openTime / 1000) as any,
@@ -89,7 +89,7 @@ export function CandlestickChart({
           .map((c, i) => isNaN(vals[i]) ? null : { time: Math.floor(c.openTime / 1000) as any, value: vals[i] })
           .filter(Boolean) as any[];
 
-      chart.addLineSeries({ color: '#F0B90B55', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }).setData(toLine(e20));
+      chart.addLineSeries({ color: '#2DD4BF55', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }).setData(toLine(e20));
       chart.addLineSeries({ color: '#60A5FA55', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }).setData(toLine(e50));
       chart.addLineSeries({ color: '#A855F7',   lineWidth: 2, priceLineVisible: false, lastValueVisible: true,  crosshairMarkerVisible: false }).setData(toLine(e200));
 
@@ -97,7 +97,7 @@ export function CandlestickChart({
       srLevels.slice(0, 8).forEach(l => {
         cs.createPriceLine({
           price:            l.price,
-          color:            l.type === 'support' ? '#00C85175' : '#FF444475',
+          color:            l.type === 'support' ? '#0ECB8175' : '#F6465D75',
           lineWidth:        1,
           lineStyle:        LineStyle.Dotted,
           axisLabelVisible: true,
@@ -107,7 +107,7 @@ export function CandlestickChart({
 
       // ── Order block zone boundaries ───────────────────────────
       orderBlocks.slice(0, 4).forEach(ob => {
-        const col = ob.type === 'bullish' ? '#00C851' : '#FF4444';
+        const col = ob.type === 'bullish' ? '#0ECB81' : '#F6465D';
         cs.createPriceLine({ price: ob.high, color: `${col}55`, lineWidth: 1, lineStyle: LineStyle.Solid,  axisLabelVisible: false, title: ob.type === 'bullish' ? 'OB▲' : '' });
         cs.createPriceLine({ price: ob.low,  color: `${col}33`, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: ob.type === 'bearish' ? 'OB▼' : '' });
       });
@@ -118,8 +118,8 @@ export function CandlestickChart({
         const col = sig.direction === 'LONG' ? '#3B82F6' : '#C084FC';
 
         cs.createPriceLine({ price: sig.entry,   color: col,       lineWidth: 2, lineStyle: LineStyle.Solid,  axisLabelVisible: true, title: '入場' });
-        cs.createPriceLine({ price: sig.stopLoss, color: '#FF4444', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'SL'  });
-        if (sig.takeProfits[0]) cs.createPriceLine({ price: sig.takeProfits[0], color: '#00C851', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'TP1' });
+        cs.createPriceLine({ price: sig.stopLoss, color: '#F6465D', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'SL'  });
+        if (sig.takeProfits[0]) cs.createPriceLine({ price: sig.takeProfits[0], color: '#0ECB81', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'TP1' });
         if (sig.takeProfits[1]) cs.createPriceLine({ price: sig.takeProfits[1], color: '#00A040', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'TP2' });
 
         cs.setMarkers([{
@@ -159,13 +159,13 @@ export function CandlestickChart({
       {/* Legend */}
       <div className="flex flex-wrap gap-x-3 gap-y-0.5 pt-2 pb-1 px-3">
         {[
-          { color: '#F0B90B', label: 'EMA20' },
+          { color: '#2DD4BF', label: 'EMA20' },
           { color: '#60A5FA', label: 'EMA50' },
           { color: '#A855F7', label: 'EMA200' },
-          { color: '#00C851', label: '支撐', dot: true },
-          { color: '#FF4444', label: '阻力', dot: true },
+          { color: '#0ECB81', label: '支撐', dot: true },
+          { color: '#F6465D', label: '阻力', dot: true },
           { color: '#3B82F6', label: 'OB▲',  dot: true },
-          { color: '#FF4444', label: 'OB▼',  dot: true },
+          { color: '#F6465D', label: 'OB▼',  dot: true },
         ].map(({ color, label, dot }) => (
           <span key={label} className="flex items-center gap-1 text-[9px] text-[#404060]">
             {dot

@@ -198,7 +198,7 @@ export default function HealthCheckPage() {
               }}
               onClick={() => fileInputRef.current?.click()}
               className={`rounded-2xl border-2 border-dashed p-8 text-center cursor-pointer transition-colors ${
-                dragOver ? 'border-[#F0B90B] bg-[#F0B90B]/5' : 'border-[#1E1E2E] bg-[#12121A]'
+                dragOver ? 'border-[#2DD4BF] bg-[#2DD4BF]/5' : 'border-[#1E1E2E] bg-[#12121A]'
               }`}
             >
               <p className="text-4xl mb-2">📂</p>
@@ -273,7 +273,7 @@ export default function HealthCheckPage() {
             <div className="flex gap-2">
               <button
                 onClick={() => tryParse(fileText, format, fileName, usedEncoding, overrides)}
-                className="flex-1 py-2.5 rounded-2xl bg-[#F0B90B] text-[#0A0A0F] text-sm font-bold active:opacity-80"
+                className="flex-1 py-2.5 rounded-2xl bg-[#2DD4BF] text-[#0A0A0F] text-sm font-bold active:opacity-80"
               >
                 套用並重新解析
               </button>
@@ -347,7 +347,7 @@ export default function HealthCheckPage() {
             )}
 
             <div className="flex gap-2">
-              <button onClick={runAnalysis} className="flex-1 py-3 rounded-2xl bg-[#F0B90B] text-[#0A0A0F] text-sm font-extrabold active:opacity-80">
+              <button onClick={runAnalysis} className="flex-1 py-3 rounded-2xl bg-[#2DD4BF] text-[#0A0A0F] text-sm font-extrabold active:opacity-80">
                 開始統計體檢 →
               </button>
               <button
@@ -364,7 +364,7 @@ export default function HealthCheckPage() {
         {/* ══ 分析結果 ══ */}
         {step === 'result' && analyzing && (
           <div className="flex flex-col items-center justify-center py-20 gap-3">
-            <div className="w-8 h-8 border-2 border-[#F0B90B] border-t-transparent rounded-full animate-spin" />
+            <div className="w-8 h-8 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
             <p className="text-[#606080] text-xs">正在跑 t 檢定與 5000 次 Bootstrap 重抽…</p>
           </div>
         )}
@@ -396,14 +396,14 @@ export default function HealthCheckPage() {
 
               {/* 2. 核心指標卡 */}
               <div className="grid grid-cols-3 gap-1.5">
-                <MetricCard label="每筆期望值" value={signed(m.expectancy)} color={m.expectancy >= 0 ? '#00C851' : '#FF4444'} sub={`總損益 ${signed(m.totalPnl, 0)}`} />
+                <MetricCard label="每筆期望值" value={signed(m.expectancy)} color={m.expectancy >= 0 ? '#0ECB81' : '#F6465D'} sub={`總損益 ${signed(m.totalPnl, 0)}`} />
                 <MetricCard label="勝率" value={pct1(m.winRate)} sub={`${m.wins}勝 ${m.losses}敗`} />
                 <MetricCard label="盈虧比" value={fmtRatio(m.payoffRatio)} sub={`平均賺${m.avgWin.toFixed(0)} 賠${m.avgLoss.toFixed(0)}`} />
                 <MetricCard label="獲利因子" value={fmtRatio(m.profitFactor)} sub="總獲利÷總虧損" />
                 <MetricCard
                   label="最大回撤"
                   value={m.drawdownPctReliable ? pct1(m.maxDrawdownPct) : '無法計算'}
-                  color={m.drawdownPctReliable && m.maxDrawdownPct > 0.5 ? '#FF4444' : undefined}
+                  color={m.drawdownPctReliable && m.maxDrawdownPct > 0.5 ? '#F6465D' : undefined}
                   sub={`金額 ${m.maxDrawdown.toFixed(0)}`}
                 />
                 <MetricCard label="夏普 / 索提諾" value={`${fmtShort(m.sharpe)} / ${fmtShort(m.sortino)}`} sub="每筆口徑，非年化" />

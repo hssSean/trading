@@ -427,10 +427,10 @@ export default function SettingsPage() {
 
           {guideOpen && (
             <div className="bg-[#1A1A26] rounded-xl p-4 mb-3 space-y-3 text-xs text-[#A0A0C0] leading-relaxed">
-              <p><span className="text-[#F0B90B] font-bold">步驟 1</span> — 開啟 developers.line.biz → 建立 Provider → 建立 Messaging API channel</p>
-              <p><span className="text-[#F0B90B] font-bold">步驟 2</span> — 進入 Channel → 「Messaging API」分頁 → 滾到底 → 「Channel access token」→ Issue → 複製</p>
-              <p><span className="text-[#F0B90B] font-bold">步驟 3</span> — 「Basic settings」分頁 → 找「Your user ID」(格式 Uxxxxxx) → 複製</p>
-              <p><span className="text-[#F0B90B] font-bold">步驟 4</span> — 用手機掃 QR Code 加 Bot 好友（必做！）</p>
+              <p><span className="text-[#2DD4BF] font-bold">步驟 1</span> — 開啟 developers.line.biz → 建立 Provider → 建立 Messaging API channel</p>
+              <p><span className="text-[#2DD4BF] font-bold">步驟 2</span> — 進入 Channel → 「Messaging API」分頁 → 滾到底 → 「Channel access token」→ Issue → 複製</p>
+              <p><span className="text-[#2DD4BF] font-bold">步驟 3</span> — 「Basic settings」分頁 → 找「Your user ID」(格式 Uxxxxxx) → 複製</p>
+              <p><span className="text-[#2DD4BF] font-bold">步驟 4</span> — 用手機掃 QR Code 加 Bot 好友（必做！）</p>
             </div>
           )}
 
@@ -556,7 +556,7 @@ export default function SettingsPage() {
 
           <p className="text-[#606080] text-xs mb-2 leading-5">
             Vercel 每小時自動觸發。若需更高頻率，可將下方 URL 加到{' '}
-            <span className="text-[#F0B90B]">cron-job.org</span>（免費）：
+            <span className="text-[#2DD4BF]">cron-job.org</span>（免費）：
           </p>
           <div className="bg-[#1A1A26] rounded-xl p-3 mb-2">
             <p className="text-[#A0A0C0] text-xs font-mono break-all leading-5">{monitorUrl || '請先部署到 Vercel'}</p>
@@ -583,7 +583,7 @@ export default function SettingsPage() {
 
           {diagResult && (
             <div className="bg-[#1A1A26] rounded-xl p-3 text-xs space-y-2">
-              <p className="text-[#F0B90B] font-bold">
+              <p className="text-[#2DD4BF] font-bold">
                 {diagResult.ok ? '✅ 分析完成' : '❌ 分析失敗'} · LINE {diagResult.lineReady ? '✓ 已設定' : '✗ 未設定'}
               </p>
               <p className="text-[#A0A0C0]">已通知：{diagResult.notified?.join(', ') || '無'}</p>
@@ -620,7 +620,7 @@ export default function SettingsPage() {
           )}
 
           <div className="mt-3 bg-yellow-400/5 border border-yellow-400/20 rounded-xl px-4 py-3">
-            <p className="text-[#F0B90B] text-xs font-semibold mb-1">Vercel 環境變數</p>
+            <p className="text-[#2DD4BF] text-xs font-semibold mb-1">Vercel 環境變數</p>
             <p className="text-[#A0A0C0] text-xs font-mono leading-6">
               LINE_CHANNEL_TOKEN=你的token<br />
               LINE_USER_ID=你的userId<br />
@@ -641,7 +641,7 @@ export default function SettingsPage() {
         {/* Account Size + per-trade risk */}
         <Section title="💰 帳戶資金（倉位計算用）">
           <p className="text-[#606080] text-xs mb-2 leading-5">
-            設定後，每張信號會根據 <span className="text-[#F0B90B]">{settings.riskPctPerTrade ?? 1}% 風險原則</span> 自動計算建議倉位、本金與槓桿
+            設定後，每張信號會根據 <span className="text-[#2DD4BF]">{settings.riskPctPerTrade ?? 1}% 風險原則</span> 自動計算建議倉位、本金與槓桿
           </p>
           <div className="flex items-center gap-2">
             <input
@@ -669,7 +669,7 @@ export default function SettingsPage() {
                 className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition-colors ${
                   (settings.riskPctPerTrade ?? 1) === p
                     ? p >= 2 ? 'bg-orange-500/20 border-orange-500/50 text-orange-400'
-                    :          'bg-[#F0B90B]/20 border-[#F0B90B]/50 text-[#F0B90B]'
+                    :          'bg-[#2DD4BF]/20 border-[#2DD4BF]/50 text-[#2DD4BF]'
                     : 'border-[#1E1E2E] text-[#606080]'
                 }`}
               >
@@ -696,7 +696,7 @@ export default function SettingsPage() {
                 onClick={() => updateSettings({ minSignalStrength: value })}
                 className={`w-full text-left px-4 py-3 rounded-xl border transition-all ${
                   settings.minSignalStrength === value
-                    ? 'border-[#F0B90B] bg-yellow-400/10 text-[#F0B90B]'
+                    ? 'border-[#2DD4BF] bg-yellow-400/10 text-[#2DD4BF]'
                     : 'border-[#1E1E2E] bg-[#1A1A26] text-[#A0A0C0]'
                 }`}
               >
@@ -719,7 +719,7 @@ export default function SettingsPage() {
                 onClick={() => updateSettings({ analysisIntervalMinutes: v })}
                 className={`flex-1 py-2.5 rounded-xl text-sm font-semibold border transition-all ${
                   settings.analysisIntervalMinutes === v
-                    ? 'border-[#F0B90B] bg-yellow-400/10 text-[#F0B90B]'
+                    ? 'border-[#2DD4BF] bg-yellow-400/10 text-[#2DD4BF]'
                     : 'border-[#1E1E2E] bg-[#1A1A26] text-[#606080]'
                 }`}
               >

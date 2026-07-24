@@ -22,38 +22,36 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
     : null;
 
   return (
-    <Link href={`/analysis/${coin.symbol}`} className="block card-hover mb-3">
+    <Link href={`/analysis/${coin.symbol}`} className="block card-hover mb-2.5">
       {/* Top row */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-full bg-yellow-400/10 flex items-center justify-center">
-            <span className="text-[#F0B90B] text-xs font-bold">{coin.baseAsset.slice(0, 3)}</span>
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-full bg-[#1A2029] border border-[#222A35] flex items-center justify-center shrink-0">
+            <span className="text-[#97A2B0] text-[11px] font-medium num">{coin.baseAsset.slice(0, 3)}</span>
           </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-[#EAEAF4] font-bold text-base">{coin.displayName}</p>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <p className="text-[#EAEDF2] font-medium text-[15px]">{coin.displayName}</p>
               {activeTrade && (
-                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-[#F0B90B]/20 text-[#F0B90B]">持倉中</span>
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md border border-[#2DD4BF]/40 text-[#2DD4BF]">持倉中</span>
               )}
               {livePnl !== null && (
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
-                  livePnl >= 0 ? 'bg-green-400/15 text-green-400' : 'bg-red-400/15 text-red-400'
-                }`}>
+                <span className={`text-[10px] font-medium num ${livePnl >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                   {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
                 </span>
               )}
             </div>
-            <p className="text-[#606080] text-xs mt-0.5">{coin.timeframes.join(' · ')}</p>
+            <p className="text-[#59616E] text-xs mt-0.5">{coin.timeframes.join(' · ')}</p>
           </div>
         </div>
 
-        <div className="text-right">
+        <div className="text-right shrink-0">
           {coin.isLoading ? (
-            <div className="w-16 h-4 bg-[#1A1A26] rounded animate-pulse" />
+            <div className="w-16 h-4 bg-[#1A2029] rounded animate-pulse ml-auto" />
           ) : (
             <>
-              <p className="text-[#EAEAF4] font-semibold text-base">${fmtPrice(coin.currentPrice)}</p>
-              <p className={`text-sm font-medium mt-0.5 ${isUp ? 'text-green-400' : 'text-red-400'}`}>
+              <p className="text-[#EAEDF2] text-[15px] num">{fmtPrice(coin.currentPrice)}</p>
+              <p className={`text-sm mt-0.5 num ${isUp ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                 {isUp ? '+' : ''}{(coin.priceChangePercent24h ?? 0).toFixed(2)}%
               </p>
             </>
@@ -63,22 +61,22 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
 
       {/* Signal row */}
       {latest ? (
-        <div className="flex items-center gap-2 mt-3">
+        <div className="flex items-center gap-2 mt-3 pt-3 border-t border-[#1B2129]">
           <span className={latest.direction === 'LONG' ? 'badge-long' : 'badge-short'}>
-            {latest.direction === 'LONG' ? '做多 ▲' : '做空 ▼'}
+            {latest.direction === 'LONG' ? '做多' : '做空'}
           </span>
-          <span className="text-[#606080] text-xs flex-1 truncate">
-            入場 ${fmtPrice(latest.entry)} · {latest.timeframe} · RR {latest.riskReward}:1
+          <span className="text-[#59616E] text-xs flex-1 truncate num">
+            入場 {fmtPrice(latest.entry)} · {latest.timeframe} · RR {latest.riskReward}
           </span>
           {unread > 0 && (
-            <span className="bg-[#F0B90B] text-[#0A0A0F] text-[10px] font-bold rounded-full px-1.5 py-0.5">
+            <span className="bg-[#2DD4BF] text-[#08110F] text-[10px] font-medium rounded-full px-1.5 py-0.5 num">
               {unread}
             </span>
           )}
         </div>
       ) : (
         !coin.isLoading && (
-          <p className="text-[#606080] text-xs mt-3 text-center">暫無信號 — 點擊立即分析</p>
+          <p className="text-[#59616E] text-xs mt-3 pt-3 border-t border-[#1B2129] text-center">暫無信號 · 點擊分析</p>
         )
       )}
     </Link>
@@ -86,7 +84,7 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
 }
 
 function fmtPrice(p: number) {
-  if (!p) return '---';
+  if (!p) return '—';
   if (p >= 1000) return p.toFixed(2);
   if (p >= 1) return p.toFixed(4);
   return p.toFixed(6);

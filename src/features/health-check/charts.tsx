@@ -22,7 +22,7 @@ export function EquityCurveChart({ pnls }: EquityProps) {
   const path = cum.map((v, i) => `${i === 0 ? 'M' : 'L'}${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(' ');
   const zeroY = sy(0);
   const final = cum[cum.length - 1];
-  const color = final >= 0 ? '#00C851' : '#FF4444';
+  const color = final >= 0 ? '#0ECB81' : '#F6465D';
 
   return (
     <div className="bg-[#12121A] border border-[#1E1E2E] rounded-2xl p-3">
@@ -31,7 +31,7 @@ export function EquityCurveChart({ pnls }: EquityProps) {
         <line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#1E1E2E" strokeWidth="1" strokeDasharray="3 3" />
         <path d={path} fill="none" stroke={color} strokeWidth="1.5" />
       </svg>
-      <p className={`text-right text-xs font-bold ${final >= 0 ? 'text-[#00C851]' : 'text-[#FF4444]'}`}>
+      <p className={`text-right text-xs font-bold ${final >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
         最終 {final >= 0 ? '+' : ''}{final.toFixed(2)}
       </p>
     </div>
@@ -75,7 +75,7 @@ export function PnlHistogram({ pnls }: EquityProps) {
               width={Math.max(bw - 2, 1)}
               height={h}
               rx="2"
-              fill={isWin ? '#00C851' : '#FF4444'}
+              fill={isWin ? '#0ECB81' : '#F6465D'}
               opacity={c === 0 ? 0.12 : 0.75}
             />
           );
