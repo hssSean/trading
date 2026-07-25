@@ -534,39 +534,40 @@ export default function TradesPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1B222B] shrink-0">
-        <div className="flex items-center justify-between mb-3">
+      <div className="px-3 pt-14 pb-2.5 safe-top border-b border-[#1B222B] shrink-0">
+        <div className="flex items-center mb-2.5">
           <div>
-            <h1 className="text-[#E8ECF1] text-xl font-extrabold tracking-tight">交易紀錄</h1>
-            <p className="text-[#565E6B] text-xs mt-0.5">
+            <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">交易紀錄</h1>
+            <p className="text-[#565E6B] text-[10px] mt-0.5 num">
               {closed.length} 已結束 · {pending.length} 持倉
-              {watchingTp2.length > 0 && <span className="text-green-400"> · {watchingTp2.length} 追蹤TP2</span>}
-              {waiting.length > 0 && <span className="text-yellow-400"> · {waiting.length} 掛單中</span>}
+              {watchingTp2.length > 0 && <span className="text-[#0ECB81]"> · {watchingTp2.length} 追蹤TP2</span>}
+              {waiting.length > 0 && <span className="text-[#C99A2E]"> · {waiting.length} 掛單中</span>}
             </p>
           </div>
-          <div className="flex gap-2 items-center">
+          <span className="flex-1" />
+          <div className="flex gap-1.5 items-center flex-wrap justify-end">
             <button
               onClick={handleSync}
               disabled={syncing}
-              className="text-blue-400 text-xs font-semibold px-3 py-1.5 border border-blue-400/40 rounded-full disabled:opacity-40 active:opacity-70"
+              className="text-[#2DD4BF] text-[11px] px-2.5 py-1 border border-[#2DD4BF]/40 rounded disabled:opacity-40 active:bg-[#141A21]"
             >
               {syncing ? (
                 <span className="flex items-center gap-1">
-                  <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin inline-block" />
+                  <span className="w-2.5 h-2.5 border-[1.5px] border-[#2DD4BF] border-t-transparent rounded-full animate-spin inline-block" />
                   同步中
                 </span>
               ) : '同步紀錄'}
             </button>
-            <button onClick={() => setShowManual(true)} className="btn-primary text-xs px-3 py-1.5">
+            <button onClick={() => setShowManual(true)} className="bg-[#2DD4BF] text-[#0A0D11] text-[11px] font-medium px-2.5 py-1 rounded active:opacity-80">
               + 新增
             </button>
-            <button onClick={exportCsv} className="text-[#2DD4BF] text-xs font-semibold px-3 py-1.5 border border-[#2DD4BF]/40 rounded-full active:opacity-70">
+            <button onClick={exportCsv} className="text-[#8A94A2] text-[11px] px-2.5 py-1 border border-[#232B35] rounded active:bg-[#141A21]">
               匯出
             </button>
             <button
               onClick={() => { setSelectMode(v => !v); setSelectedIds(new Set()); setEditingNote(null); }}
-              className={`text-xs font-semibold px-3 py-1.5 border rounded-full active:opacity-70 ${
-                selectMode ? 'text-red-400 border-red-400/40' : 'text-[#565E6B] border-[#1B222B]'
+              className={`text-[11px] px-2.5 py-1 border rounded active:bg-[#141A21] ${
+                selectMode ? 'text-[#F6465D] border-[#F6465D]/40' : 'text-[#565E6B] border-[#1B222B]'
               }`}
             >
               {selectMode ? '取消' : '選取'}
@@ -574,8 +575,8 @@ export default function TradesPage() {
           </div>
         </div>
         {syncMsg && (
-          <div className={`mb-2 px-3 py-2 rounded-xl text-xs font-semibold ${
-            syncMsg.includes('失敗') ? 'bg-red-500/10 text-red-400' : 'bg-blue-500/10 text-blue-400'
+          <div className={`mb-2 px-3 py-2 rounded text-xs border ${
+            syncMsg.includes('失敗') ? 'border-[#F6465D]/30 text-[#F6465D]' : 'border-[#2DD4BF]/30 text-[#2DD4BF]'
           }`}>
             {syncMsg}
           </div>
@@ -798,24 +799,24 @@ export default function TradesPage() {
 
         {/* Portfolio Heat */}
         {pending.length > 0 && (
-          <div className={`rounded-2xl px-4 py-2.5 mb-3 border flex items-center justify-between ${
-            pending.length >= 5 ? 'border-red-500/40 bg-red-500/5'
-            : pending.length >= 3 ? 'border-yellow-500/40 bg-yellow-500/5'
-            : 'border-[#1B222B] bg-[#0F141A]'
+          <div className={`rounded-md px-3.5 py-2.5 mb-3 border flex items-center justify-between ${
+            pending.length >= 5 ? 'border-[#F6465D]/40'
+            : pending.length >= 3 ? 'border-[#C99A2E]/40'
+            : 'border-[#1B222B]'
           }`}>
             <div>
-              <p className="text-[#565E6B] text-[9px]">帳戶總曝險</p>
-              <p className={`font-extrabold text-base ${
-                pending.length >= 5 ? 'text-red-400'
-                : pending.length >= 3 ? 'text-yellow-400' : 'text-[#E8ECF1]'
+              <div className="tlabel">帳戶總曝險</div>
+              <p className={`text-[15px] num mt-0.5 ${
+                pending.length >= 5 ? 'text-[#F6465D]'
+                : pending.length >= 3 ? 'text-[#C99A2E]' : 'text-[#E8ECF1]'
               }`}>{pending.length}%</p>
             </div>
             <div className="text-right">
-              <p className="text-[#565E6B] text-[9px]">{pending.length} 筆持倉 × 1% 風險</p>
+              <p className="text-[#565E6B] text-[10px] num">{pending.length} 筆持倉 × 1% 風險</p>
               {pending.length >= 5
-                ? <p className="text-red-400 text-[9px]">⚠ 高風險，建議暫停開新倉</p>
+                ? <p className="text-[#F6465D] text-[10px]">高風險，建議暫停開新倉</p>
                 : pending.length >= 3
-                ? <p className="text-yellow-400 text-[9px]">注意：總曝險偏高</p>
+                ? <p className="text-[#C99A2E] text-[10px]">注意：總曝險偏高</p>
                 : <p className="text-[#3A424E] text-[9px]">風險在控制範圍內</p>
               }
             </div>
@@ -833,15 +834,15 @@ export default function TradesPage() {
             ['LOSS_LIVE', liveCounts.down > 0 ? `浮虧 (${liveCounts.down})` : '浮虧'],
           ] as const).map(([f, label]) => (
             <button key={f} onClick={() => { setFilter(f); if (f !== 'CLOSED') setResultFilter('ALL'); }}
-              className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition-colors ${
+              className={`text-[11px] px-2.5 py-1 rounded border transition-colors ${
                 filter === f
-                  ? f === 'PROFIT'    ? 'bg-green-500 border-green-500 text-white'
-                  : f === 'LOSS_LIVE' ? 'bg-red-500 border-red-500 text-white'
-                  : f === 'WAITING'   ? 'bg-yellow-500 border-yellow-500 text-black'
+                  ? f === 'PROFIT'    ? 'border-[#0ECB81] text-[#0ECB81]'
+                  : f === 'LOSS_LIVE' ? 'border-[#F6465D] text-[#F6465D]'
+                  : f === 'WAITING'   ? 'border-[#C99A2E] text-[#C99A2E]'
                   : 'bg-[#2DD4BF] border-[#2DD4BF] text-[#0A0D11]'
-                  : f === 'PROFIT'    ? 'border-green-500/30 text-green-500/70'
-                  : f === 'LOSS_LIVE' ? 'border-red-500/30 text-red-400/70'
-                  : f === 'WAITING'   ? 'border-yellow-500/30 text-yellow-400/70'
+                  : f === 'PROFIT'    ? 'border-[#0ECB81]/25 text-[#0ECB81]/70'
+                  : f === 'LOSS_LIVE' ? 'border-[#F6465D]/25 text-[#F6465D]/70'
+                  : f === 'WAITING'   ? 'border-[#3A2F14] text-[#C99A2E]/70'
                   : 'border-[#1B222B] text-[#565E6B]'
               }`}>
               {label}
@@ -858,13 +859,13 @@ export default function TradesPage() {
               ['LOSS', `止損 (${losses.length})`],
             ] as const).map(([f, label]) => (
               <button key={f} onClick={() => setResultFilter(f)}
-                className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition-colors ${
+                className={`text-[11px] px-2.5 py-1 rounded border transition-colors ${
                   resultFilter === f
-                    ? f === 'WIN'  ? 'bg-green-500 border-green-500 text-white'
-                    : f === 'LOSS' ? 'bg-red-500 border-red-500 text-white'
+                    ? f === 'WIN'  ? 'border-[#0ECB81] text-[#0ECB81]'
+                    : f === 'LOSS' ? 'border-[#F6465D] text-[#F6465D]'
                     : 'bg-[#2DD4BF] border-[#2DD4BF] text-[#0A0D11]'
-                    : f === 'WIN'  ? 'border-green-500/30 text-green-500/70'
-                    : f === 'LOSS' ? 'border-red-500/30 text-red-400/70'
+                    : f === 'WIN'  ? 'border-[#0ECB81]/25 text-[#0ECB81]/70'
+                    : f === 'LOSS' ? 'border-[#F6465D]/25 text-[#F6465D]/70'
                     : 'border-[#1B222B] text-[#565E6B]'
                 }`}>
                 {label}
@@ -878,19 +879,19 @@ export default function TradesPage() {
           {/* Direction */}
           {(['ALL', 'LONG', 'SHORT'] as const).map(d => (
             <button key={d} onClick={() => setDirFilter(d)}
-              className={`text-xs px-2.5 py-1.5 rounded-full font-semibold border transition-colors ${dirFilter === d
-                ? d === 'LONG'  ? 'bg-green-500/20 border-green-500/50 text-green-400'
-                : d === 'SHORT' ? 'bg-red-500/20 border-red-500/50 text-red-400'
-                :                 'bg-[#2DD4BF]/20 border-[#2DD4BF]/50 text-[#2DD4BF]'
+              className={`text-[11px] px-2 py-1 rounded border transition-colors ${dirFilter === d
+                ? d === 'LONG'  ? 'border-[#0ECB81]/50 text-[#0ECB81]'
+                : d === 'SHORT' ? 'border-[#F6465D]/50 text-[#F6465D]'
+                :                 'border-[#2DD4BF]/50 text-[#2DD4BF]'
                 : 'border-[#1B222B] text-[#3A424E]'}`}>
-              {d === 'ALL' ? '多/空' : d === 'LONG' ? '▲ 多' : '▼ 空'}
+              {d === 'ALL' ? '多/空' : d === 'LONG' ? 'LONG' : 'SHORT'}
             </button>
           ))}
           <div className="w-px h-4 bg-[#1B222B]" />
           {/* Date range */}
           {([['all', '全部'], ['week', '本週'], ['month', '本月']] as const).map(([d, label]) => (
             <button key={d} onClick={() => setDateFilter(d)}
-              className={`text-xs px-2.5 py-1.5 rounded-full font-semibold border transition-colors ${dateFilter === d ? 'bg-blue-500/20 border-blue-500/40 text-blue-400' : 'border-[#1B222B] text-[#3A424E]'}`}>
+              className={`text-[11px] px-2 py-1 rounded border transition-colors ${dateFilter === d ? 'border-[#2DD4BF]/50 text-[#2DD4BF]' : 'border-[#1B222B] text-[#3A424E]'}`}>
               {label}
             </button>
           ))}
@@ -902,15 +903,15 @@ export default function TradesPage() {
               else if (sortBy === 'pnl')   { setSortBy('score'); setSortDir('desc'); }
               else { setSortBy('time'); setSortDir('desc'); }
             }}
-            className="text-xs px-2.5 py-1 rounded-full border border-[#1B222B] text-[#3A424E] font-semibold"
+            className="text-[11px] px-2 py-1 rounded border border-[#1B222B] text-[#3A424E] num"
           >
-            {sortBy === 'time' ? '⏱ 時間' : sortBy === 'pnl' ? '📊 損益' : '⭐ 得分'}
+            {sortBy === 'time' ? '時間' : sortBy === 'pnl' ? '損益' : '得分'}
             {sortDir === 'desc' ? '↓' : '↑'}
           </button>
           {closed.length > 0 && (
             <button
               onClick={handleClearClosed}
-              className="ml-auto text-xs px-2.5 py-1 rounded-full border border-red-500/30 text-red-400/70 font-semibold active:opacity-70"
+              className="ml-auto text-[11px] px-2 py-1 rounded border border-[#F6465D]/25 text-[#F6465D]/70 active:opacity-70"
             >
               清除已結束
             </button>
@@ -919,24 +920,24 @@ export default function TradesPage() {
       </div>
 
       {/* Trade list */}
-      <div className="flex-1 overflow-y-auto px-4 pt-3 scroll-container">
+      <div className="flex-1 overflow-y-auto px-3 pt-3 scroll-container">
         {filtered.length === 0 ? (
           trades.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-48 gap-2 text-center">
-              <p className="text-5xl">📋</p>
-              <p className="text-[#8A94A2] font-semibold">還沒有交易紀錄</p>
+              <p className="text-[#2A323D] text-2xl num">[ ]</p>
+              <p className="text-[#8A94A2] font-medium">還沒有交易紀錄</p>
               <p className="text-[#565E6B] text-sm">伺服器每 5 分鐘自動分析，達到強訊號時自動建立並即時推播</p>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-48 gap-2 text-center">
-              <p className="text-5xl">🔍</p>
-              <p className="text-[#8A94A2] font-semibold">此分類目前沒有紀錄</p>
-              <p className="text-[#565E6B] text-sm">
+              <p className="text-[#2A323D] text-2xl num">?</p>
+              <p className="text-[#8A94A2] font-medium">此分類目前沒有紀錄</p>
+              <p className="text-[#565E6B] text-sm num">
                 目前共 {closed.length} 已結束 · {pending.length} 持倉 · {waiting.length} 掛單
               </p>
               <button
                 onClick={() => { setFilter('ALL'); setResultFilter('ALL'); setDirFilter('ALL'); setDateFilter('all'); }}
-                className="mt-1 text-xs px-4 py-2 rounded-full bg-[#2DD4BF]/15 border border-[#2DD4BF]/40 text-[#2DD4BF] font-semibold active:opacity-70"
+                className="mt-1 text-xs px-4 py-2 rounded border border-[#2DD4BF]/40 text-[#2DD4BF] active:opacity-70"
               >
                 顯示全部紀錄
               </button>
@@ -986,59 +987,59 @@ export default function TradesPage() {
               <div
                 key={trade.id}
                 onClick={selectMode ? () => toggleSelect(trade.id) : undefined}
-                className={`relative rounded-2xl p-4 mb-3 border${selectMode ? ' cursor-pointer select-none' : ''} ${
+                className={`relative rounded-md p-3.5 mb-2.5 border${selectMode ? ' cursor-pointer select-none' : ''} ${
                   selectMode && selectedIds.has(trade.id)
                     ? 'border-[#2DD4BF]/50 bg-[#2DD4BF]/5'
-                    : isWaiting      ? 'bg-[#0D0D16] border-yellow-500/30 border-dashed'
-                    : isPending && nearSL ? 'bg-[#0F141A] border-red-500/50'
+                    : isWaiting      ? 'bg-[#0F141A] border-[#3A2F14] border-dashed'
+                    : isPending && nearSL ? 'bg-[#0F141A] border-[#F6465D]/50'
                     : 'bg-[#0F141A] border-[#1B222B]'
                 }`}
               >
                 {selectMode && (
                   <div
-                    className="absolute top-4 right-4 w-5 h-5 rounded-full border-2 flex items-center justify-center"
-                    style={{ borderColor: selectedIds.has(trade.id) ? '#2DD4BF' : '#3A3A50', background: selectedIds.has(trade.id) ? '#2DD4BF' : 'transparent' }}
+                    className="absolute top-3.5 right-3.5 w-4 h-4 rounded-full border flex items-center justify-center"
+                    style={{ borderColor: selectedIds.has(trade.id) ? '#2DD4BF' : '#3A424E', background: selectedIds.has(trade.id) ? '#2DD4BF' : 'transparent' }}
                   >
-                    {selectedIds.has(trade.id) && <span className="text-[#0A0D11] text-[9px] font-extrabold leading-none">✓</span>}
+                    {selectedIds.has(trade.id) && <span className="text-[#0A0D11] text-[9px] leading-none">✓</span>}
                   </div>
                 )}
                 {/* Top row */}
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className={`text-sm font-extrabold ${trade.direction === 'LONG' ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
-                      {trade.direction === 'LONG' ? '▲ 做多' : '▼ 做空'}
+                    <span className={`text-[12px] ${trade.direction === 'LONG' ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+                      {trade.direction === 'LONG' ? 'LONG' : 'SHORT'}
                     </span>
-                    <span className={`font-bold ${isWaiting ? 'text-[#8A94A2]' : 'text-[#E8ECF1]'}`}>
-                      {trade.symbol.replace('USDT', '/USDT')}
+                    <span className={`num text-[13px] ${isWaiting ? 'text-[#8A94A2]' : 'text-[#E8ECF1]'}`}>
+                      {trade.symbol.replace('USDT', '')}
                     </span>
-                    <span className="text-[#565E6B] text-xs">{trade.timeframe}</span>
+                    <span className="text-[#565E6B] text-[11px] num">{trade.timeframe}</span>
                     {trade.tier === 'B' && (
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 border border-blue-500/30">🅱 輕倉 0.5%</span>
+                      <Tag text="B 輕倉 0.5%" />
                     )}
                     {(isPending || isWaiting) && (
-                      <span className="text-xs text-[#3A424E]">{fmtDuration(now - trade.openedAt)}</span>
+                      <span className="text-[11px] text-[#3A424E] num">{fmtDuration(now - trade.openedAt)}</span>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {isWaiting ? (
-                      <span className="text-xs bg-yellow-500/15 text-yellow-400 px-2 py-0.5 rounded-full font-semibold border border-yellow-500/30">
-                        ⏳ 等待進場
+                      <span className="text-[11px] text-[#8A94A2] border border-[#3A2F14] px-1.5 py-0.5 rounded">
+                        等待進場
                       </span>
                     ) : isPending ? (
                       <>
                         {livePx > 0 && (
-                          <span className={`text-xs font-bold ${livePnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          <span className={`text-[11px] num ${livePnl >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                             {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
                           </span>
                         )}
                         {isTp1Hit ? (
-                          <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-semibold border border-green-500/40">✅ TP1·等TP2</span>
+                          <span className="text-[11px] text-[#0ECB81] border border-[#0ECB81]/40 px-1.5 py-0.5 rounded">TP1·等TP2</span>
                         ) : (
-                          <span className="text-xs bg-[#2DD4BF]/20 text-[#2DD4BF] px-2 py-0.5 rounded-full font-semibold">持倉中</span>
+                          <span className="text-[11px] text-[#2DD4BF] border border-[#2DD4BF]/40 px-1.5 py-0.5 rounded">持倉中</span>
                         )}
                       </>
                     ) : isWatchingTp2 ? (
-                      <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-semibold border border-green-500/40">✅ TP1·等TP2</span>
+                      <span className="text-[11px] text-[#0ECB81] border border-[#0ECB81]/40 px-1.5 py-0.5 rounded">TP1·等TP2</span>
                     ) : (() => {
                       // MANUAL_CLOSE (時間止損/到期平倉) colored by realized PnL so a
                       // profitable one reads as a win, not the neutral yellow default.
@@ -1047,38 +1048,35 @@ export default function TradesPage() {
                         ? (isWin ? '#0ECB81' : isLossTrade(trade) ? '#F6465D' : '#2DD4BF')
                         : RESULT_COLOR[trade.result!];
                       return (
-                        <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
-                          style={{ background: `${color}20`, color }}>
+                        <span className="text-[11px] px-1.5 py-0.5 rounded border" style={{ borderColor: `${color}55`, color }}>
                           {RESULT_LABEL[trade.result!]}
                         </span>
                       );
                     })()}
-                    <span className="text-[#2DD4BF] text-xs font-bold">{trade.score}分</span>
+                    <span className="text-[#2DD4BF] text-[12px] num">{trade.score}</span>
                   </div>
                 </div>
 
                 {/* Price grid */}
-                <div className="grid grid-cols-4 gap-1 mb-2">
-                  <PriceCell label="進場" value={`$${fmtPrice(trade.entry)}`} />
-                  <PriceCell label="TP1"  value={`$${fmtPrice(trade.tp1)}`}      color="#0ECB81" />
-                  <PriceCell label="TP2"  value={`$${fmtPrice(trade.tp2)}`}      color="#00A040" />
-                  <PriceCell label="止損" value={`$${fmtPrice(trade.stopLoss)}`} color="#F6465D" />
+                <div className="grid grid-cols-4 gap-px bg-[#1B222B] border border-[#1B222B] rounded mb-2 overflow-hidden">
+                  <PriceCell label="進場" value={fmtPrice(trade.entry)} />
+                  <PriceCell label="TP1"  value={fmtPrice(trade.tp1)}      color="#0ECB81" />
+                  <PriceCell label="TP2"  value={fmtPrice(trade.tp2)}      color="#0ECB81" />
+                  <PriceCell label="止損" value={fmtPrice(trade.stopLoss)} color="#F6465D" />
                 </div>
 
                 {/* Waiting: distance to entry */}
                 {isWaiting && livePx > 0 && (
                   <div className="grid grid-cols-2 gap-1.5 mb-2">
-                    <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-xl p-2 text-center">
-                      <p className="text-[#565E6B] text-[9px]">距進場位</p>
-                      <p className={`text-xs font-bold ${distToEntry > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
-                        {distToEntry > 0
-                          ? `還差 ${distToEntry.toFixed(2)}%`
-                          : `已達進場 等待確認`}
-                      </p>
+                    <div className="border border-[#3A2F14] rounded p-2 text-center">
+                      <div className="tlabel">距進場位</div>
+                      <div className={`text-[12px] num mt-0.5 ${distToEntry > 0 ? 'text-[#C99A2E]' : 'text-[#0ECB81]'}`}>
+                        {distToEntry > 0 ? `還差 ${distToEntry.toFixed(2)}%` : '已達進場 等待確認'}
+                      </div>
                     </div>
-                    <div className="bg-[#0A0D11] rounded-xl p-2 text-center">
-                      <p className="text-[#565E6B] text-[9px]">現價</p>
-                      <p className="text-[#8A94A2] text-xs font-bold">${fmtPrice(livePx)}</p>
+                    <div className="border border-[#1B222B] rounded p-2 text-center">
+                      <div className="tlabel">現價</div>
+                      <div className="text-[#8A94A2] text-[12px] num mt-0.5">{fmtPrice(livePx)}</div>
                     </div>
                   </div>
                 )}
@@ -1087,25 +1085,25 @@ export default function TradesPage() {
                 {isPending && livePx > 0 && (
                   <div className="grid grid-cols-2 gap-1.5 mb-2">
                     {isTp1Hit ? (
-                      <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-2 text-center">
-                        <p className="text-green-400 text-[9px] font-semibold">✅ TP1 已達標</p>
-                        <p className="text-green-400 text-xs font-bold">
+                      <div className="border border-[#0ECB81]/25 rounded p-2 text-center">
+                        <div className="text-[#0ECB81] text-[10px]">TP1 已達標</div>
+                        <div className="text-[#0ECB81] text-[12px] num mt-0.5">
                           {distTP1 > 0 ? `距TP2 還差 ${distTP1.toFixed(2)}%` : `已超過 TP2 ${Math.abs(distTP1).toFixed(2)}%`}
-                        </p>
+                        </div>
                       </div>
                     ) : (
-                      <div className={`rounded-xl p-2 text-center ${distTP1 > 0 ? 'bg-green-400/5' : 'bg-green-400/15'}`}>
-                        <p className="text-[#565E6B] text-[9px]">距 TP1</p>
-                        <p className={`text-xs font-bold ${distTP1 > 0 ? 'text-green-400' : 'text-[#0ECB81]'}`}>
+                      <div className="border border-[#1B222B] rounded p-2 text-center">
+                        <div className="tlabel">距 TP1</div>
+                        <div className={`text-[12px] num mt-0.5 ${distTP1 > 0 ? 'text-[#0ECB81]/80' : 'text-[#0ECB81]'}`}>
                           {distTP1 > 0 ? `還差 ${distTP1.toFixed(2)}%` : `超過 ${Math.abs(distTP1).toFixed(2)}%`}
-                        </p>
+                        </div>
                       </div>
                     )}
-                    <div className={`rounded-xl p-2 text-center ${nearSL ? 'bg-red-500/15' : 'bg-red-400/5'}`}>
-                      <p className="text-[#565E6B] text-[9px]">{nearSL ? '⚠ 接近止損' : '距 SL'}</p>
-                      <p className={`text-xs font-bold ${nearSL ? 'text-red-400' : 'text-[#8A94A2]'}`}>
+                    <div className={`rounded p-2 text-center border ${nearSL ? 'border-[#F6465D]/40' : 'border-[#1B222B]'}`}>
+                      <div className={`text-[10px] ${nearSL ? 'text-[#F6465D]' : 'tlabel'}`}>{nearSL ? '接近止損' : '距 SL'}</div>
+                      <div className={`text-[12px] num mt-0.5 ${nearSL ? 'text-[#F6465D]' : 'text-[#8A94A2]'}`}>
                         {distSL >= 0 ? `緩衝 ${distSL.toFixed(2)}%` : `穿越 ${Math.abs(distSL).toFixed(2)}%`}
-                      </p>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1113,15 +1111,15 @@ export default function TradesPage() {
                 {/* TP2 distance bar for trades that hit TP1 and are watching for TP2 */}
                 {isWatchingTp2 && livePx > 0 && (
                   <div className="grid grid-cols-2 gap-1.5 mb-2">
-                    <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-2 text-center">
-                      <p className="text-green-400 text-[9px] font-semibold">✅ TP1 已鎖定 · 追蹤TP2</p>
-                      <p className="text-green-400 text-xs font-bold">
+                    <div className="border border-[#0ECB81]/25 rounded p-2 text-center">
+                      <div className="text-[#0ECB81] text-[10px]">TP1 已鎖定 · 追蹤TP2</div>
+                      <div className="text-[#0ECB81] text-[12px] num mt-0.5">
                         {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過TP2 ${Math.abs(distTP2).toFixed(2)}%`}
-                      </p>
+                      </div>
                     </div>
-                    <div className="bg-[#0A0D11] rounded-xl p-2 text-center">
-                      <p className="text-[#565E6B] text-[9px]">現價</p>
-                      <p className="text-[#8A94A2] text-xs font-bold">${fmtPrice(livePx)}</p>
+                    <div className="border border-[#1B222B] rounded p-2 text-center">
+                      <div className="tlabel">現價</div>
+                      <div className="text-[#8A94A2] text-[12px] num mt-0.5">{fmtPrice(livePx)}</div>
                     </div>
                   </div>
                 )}
@@ -1133,10 +1131,10 @@ export default function TradesPage() {
                     ? (trade.direction === 'LONG' ? stopLvl - trade.entry : trade.entry - stopLvl) / Math.abs(trade.entry - trade.stopLoss)
                     : 0;
                   return (
-                    <div className="mb-2 bg-blue-500/5 border border-blue-500/20 rounded-xl px-3 py-2 flex items-center justify-between">
+                    <div className="mb-2 border border-[#2DD4BF]/25 rounded px-3 py-2 flex items-center justify-between">
                       <div>
-                        <p className="text-blue-400/80 text-[9px] font-semibold uppercase tracking-wide">🛡 移動止損（請移到這）</p>
-                        <p className="text-blue-400 text-sm font-bold">${fmtPrice(stopLvl)}</p>
+                        <div className="tlabel">移動止損（請移到這）</div>
+                        <div className="text-[#2DD4BF] text-[14px] num mt-0.5">{fmtPrice(stopLvl)}</div>
                       </div>
                       <p className="text-[10px] text-right leading-4 text-[#565E6B]">
                         {lockedR >= 0.05 ? `已鎖 +${lockedR.toFixed(1)}R` : '保本（無虧損風險）'}<br/>
@@ -1153,28 +1151,28 @@ export default function TradesPage() {
                   if (!plan) return null;
                   const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
                   return (
-                    <div className="mb-2 bg-[#0D1020] border border-[#2DD4BF]/15 rounded-xl px-3 py-2">
-                      <p className="text-[#6B5A20] text-[9px] font-bold uppercase tracking-widest mb-1.5">倉位計算（{effRisk}% 風險）</p>
+                    <div className="mb-2 border border-[#1B222B] rounded px-3 py-2">
+                      <div className="tlabel mb-1.5">倉位計算（{effRisk}% 風險）</div>
                       <div className="grid grid-cols-4 gap-1">
                         <div className="text-center">
-                          <p className="text-[#3A424E] text-[8px]">建議倉位</p>
-                          <p className="text-[#E8ECF1] text-xs font-bold">{plan.positionUSDT}U</p>
+                          <div className="text-[#3A424E] text-[10px]">建議倉位</div>
+                          <div className="text-[#E8ECF1] text-[12px] num mt-0.5">{plan.positionUSDT}U</div>
                         </div>
                         <div className="text-center">
-                          <p className="text-[#3A424E] text-[8px]">本金×槓桿</p>
-                          <p className="text-[#2DD4BF] text-xs font-bold">{plan.marginUSDT}U×{plan.leverage}</p>
+                          <div className="text-[#3A424E] text-[10px]">本金×槓桿</div>
+                          <div className="text-[#2DD4BF] text-[12px] num mt-0.5">{plan.marginUSDT}U×{plan.leverage}</div>
                         </div>
                         <div className="text-center">
-                          <p className="text-[#3A424E] text-[8px]">止損虧損</p>
-                          <p className="text-[#8A94A2] text-xs font-bold">{plan.riskUSDT}U</p>
+                          <div className="text-[#3A424E] text-[10px]">止損虧損</div>
+                          <div className="text-[#8A94A2] text-[12px] num mt-0.5">{plan.riskUSDT}U</div>
                         </div>
                         <div className="text-center">
-                          <p className="text-[#3A424E] text-[8px]">止損幅度</p>
-                          <p className={`text-xs font-bold ${slPct > 5 ? 'text-red-400' : 'text-[#8A94A2]'}`}>{slPct.toFixed(2)}%</p>
+                          <div className="text-[#3A424E] text-[10px]">止損幅度</div>
+                          <div className={`text-[12px] num mt-0.5 ${slPct > 5 ? 'text-[#F6465D]' : 'text-[#8A94A2]'}`}>{slPct.toFixed(2)}%</div>
                         </div>
                       </div>
                       {plan.belowMinNotional && (
-                        <p className="text-orange-400/80 text-[9px] mt-1">⚠ 低於交易所最低下單額 5U</p>
+                        <p className="text-[#C99A2E] text-[10px] mt-1">低於交易所最低下單額 5U</p>
                       )}
                     </div>
                   );
@@ -1182,24 +1180,23 @@ export default function TradesPage() {
 
                 {/* TP1 hit: breakeven reminder */}
                 {isTp1Hit && (
-                  <div className="mb-2 bg-green-500/5 border border-green-500/20 rounded-xl px-3 py-2 flex items-center gap-2">
-                    <span className="text-green-400 text-xs">💡</span>
-                    <p className="text-green-400/80 text-xs">TP1 已達標，建議將止損移至成本 <span className="font-bold text-green-400">${fmtPrice(trade.entry)}</span>，繼續持有等待 TP2</p>
+                  <div className="mb-2 border border-[#0ECB81]/20 rounded px-3 py-2">
+                    <p className="text-[#0ECB81]/85 text-[11px]">TP1 已達標，建議將止損移至成本 <span className="num text-[#0ECB81]">{fmtPrice(trade.entry)}</span>，繼續持有等待 TP2</p>
                   </div>
                 )}
 
                 {/* Auto-generated entry reasons from signal analysis */}
                 {trade.reasons && trade.reasons.length > 0 && (
-                  <div className="mt-2 bg-[#0D1820] border border-blue-400/10 rounded-xl px-3 py-2">
-                    <p className="text-[#405060] text-[9px] mb-1 font-semibold uppercase tracking-wide">分析依據</p>
+                  <div className="mt-2 border-t border-[#1B222B] pt-2">
+                    <p className="tlabel mb-1">分析依據</p>
                     {trade.scoreBreakdown && (
-                      <p className="text-[#5A8090] text-[10px] leading-[1.5] mb-1">
+                      <p className="text-[#5A7A8A] text-[10px] leading-[1.5] mb-1 num">
                         評分：趨勢{trade.scoreBreakdown.trend} · 動能{trade.scoreBreakdown.momentum} · 結構{trade.scoreBreakdown.structure} · 量能{trade.scoreBreakdown.volume} · K線{trade.scoreBreakdown.priceAction}
                         {trade.scoreBreakdown.penalties < 0 ? ` · 扣分${trade.scoreBreakdown.penalties}` : ''}
                       </p>
                     )}
                     {trade.reasons.map((r, i) => (
-                      <p key={i} className="text-[#5A8090] text-[10px] leading-[1.5]">• {r}</p>
+                      <p key={i} className="text-[#5A7A8A] text-[10px] leading-[1.5]">› {r}</p>
                     ))}
                   </div>
                 )}
@@ -1212,27 +1209,27 @@ export default function TradesPage() {
                       onChange={e => setNoteText(e.target.value)}
                       placeholder="個人備註、市場觀察…"
                       rows={2}
-                      className="w-full bg-[#141A21] border border-[#1B222B] rounded-xl px-3 py-2 text-xs text-[#E8ECF1] resize-none outline-none mb-2"
+                      className="w-full bg-[#141A21] border border-[#1B222B] rounded px-3 py-2 text-xs text-[#E8ECF1] resize-none outline-none mb-2"
                     />
                     <div className="flex gap-2">
                       <button onClick={() => { updateTrade(trade.id, { entryNotes: noteText }); setEditingNote(null); }}
-                        className="flex-1 py-1.5 rounded-lg bg-[#2DD4BF] text-[#0A0D11] text-xs font-bold">儲存</button>
+                        className="flex-1 py-1.5 rounded bg-[#2DD4BF] text-[#0A0D11] text-xs font-medium">儲存</button>
                       <button onClick={() => setEditingNote(null)}
-                        className="px-3 py-1.5 rounded-lg bg-[#141A21] text-[#565E6B] text-xs">取消</button>
+                        className="px-3 py-1.5 rounded border border-[#232B35] text-[#565E6B] text-xs">取消</button>
                     </div>
                   </div>
                 ) : (
                   <div className="mt-1.5 flex items-start gap-2">
                     <div className="flex-1 min-w-0">
                       {trade.entryNotes
-                        ? <p className="text-[#8A94A2] text-xs leading-5 bg-[#141A21] rounded-xl px-3 py-2">{trade.entryNotes}</p>
+                        ? <p className="text-[#8A94A2] text-xs leading-5 border-l border-[#232B35] pl-2">{trade.entryNotes}</p>
                         : !selectMode && <button onClick={() => { setEditingNote(trade.id); setNoteText(''); }}
                             className="text-[#3A424E] text-xs">＋ 個人備註</button>
                       }
                     </div>
                     {trade.entryNotes && !selectMode && (
                       <button onClick={() => { setEditingNote(trade.id); setNoteText(trade.entryNotes ?? ''); }}
-                        className="text-[#3A424E] text-xs shrink-0">✏️</button>
+                        className="text-[#3A424E] text-[11px] shrink-0">編輯</button>
                     )}
                   </div>
                 )}
@@ -1243,13 +1240,13 @@ export default function TradesPage() {
                   const acct = accountPnlPct(trade);
                   return (
                     <div className="flex items-center justify-between mt-1 pt-2 border-t border-[#1B222B]">
-                      <span className="text-[#565E6B] text-xs">出場 ${fmtPrice(trade.exitPrice)}</span>
+                      <span className="text-[#565E6B] text-[11px] num">出場 {fmtPrice(trade.exitPrice)}</span>
                       <span className="text-right">
-                        <span className={`text-sm font-extrabold ${isWin ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+                        <span className={`text-[13px] num ${isWin ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
                           {trade.pnlPercent !== undefined ? `${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent}%` : '—'}
                         </span>
                         {r !== null && (
-                          <span className="block text-[10px] text-[#565E6B]">
+                          <span className="block text-[10px] text-[#565E6B] num">
                             {r >= 0 ? '+' : ''}{r.toFixed(1)}R{acct !== null ? ` · 帳戶 ${acct >= 0 ? '+' : ''}${acct.toFixed(2)}%` : ''}
                           </span>
                         )}
@@ -1260,13 +1257,13 @@ export default function TradesPage() {
 
                 {/* Timestamp + actions */}
                 <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#1B222B]">
-                  <span className="text-[#3A424E] text-xs">{fmtDate(trade.openedAt)}</span>
+                  <span className="text-[#3A424E] text-[11px] num">{fmtDate(trade.openedAt)}</span>
                   {!selectMode && <div className="flex gap-2 flex-wrap justify-end">
                     <a
                       href={`https://www.tradingview.com/chart/?symbol=BINANCE:${trade.symbol}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs px-2 py-1 rounded-xl text-blue-400 border border-blue-400/20 active:opacity-70"
+                      className="text-[11px] px-2 py-1 rounded text-[#2DD4BF] border border-[#2DD4BF]/25 active:opacity-70"
                     >
                       圖表
                     </a>
@@ -1274,13 +1271,13 @@ export default function TradesPage() {
                       <button
                         onClick={() => handleManualUnlock(trade.symbol)}
                         title="手動取消掛單並解鎖推播"
-                        className={`text-xs px-2 py-1 rounded-xl border transition-colors ${
+                        className={`text-[11px] px-2 py-1 rounded border transition-colors ${
                           unlockMsg[trade.symbol]
-                            ? 'bg-green-400/10 text-green-400 border-green-400/30'
-                            : 'text-yellow-400/70 border-yellow-500/30 active:opacity-70'
+                            ? 'text-[#0ECB81] border-[#0ECB81]/30'
+                            : 'text-[#C99A2E] border-[#3A2F14] active:opacity-70'
                         }`}
                       >
-                        {unlockMsg[trade.symbol] ? '✓ 已取消' : '取消掛單'}
+                        {unlockMsg[trade.symbol] ? '已取消' : '取消掛單'}
                       </button>
                     )}
                     {(isPending || isWatchingTp2) && (
@@ -1288,20 +1285,20 @@ export default function TradesPage() {
                         <button
                           onClick={() => handleManualUnlock(trade.symbol)}
                           title="解除 LINE 推播鎖定"
-                          className={`text-xs px-2 py-1 rounded-xl border transition-colors ${
+                          className={`text-[11px] px-2 py-1 rounded border transition-colors ${
                             unlockMsg[trade.symbol]
-                              ? 'bg-green-400/10 text-green-400 border-green-400/30'
+                              ? 'text-[#0ECB81] border-[#0ECB81]/30'
                               : 'text-[#3A424E] border-[#1B222B] active:opacity-70'
                           }`}
                         >
-                          {unlockMsg[trade.symbol] ? '✓ 已解鎖' : '解鎖推播'}
+                          {unlockMsg[trade.symbol] ? '已解鎖' : '解鎖推播'}
                         </button>
                         <button
                           onClick={() => setCloseModal({
                             id: trade.id, symbol: trade.symbol, direction: trade.direction,
                             entry: trade.entry, tp1: trade.tp1, tp2: trade.tp2, sl: trade.stopLoss,
                           })}
-                          className="text-xs px-3 py-1 rounded-xl bg-[#141A21] border border-[#1B222B] text-[#8A94A2] font-semibold active:opacity-70"
+                          className="text-[11px] px-3 py-1 rounded border border-[#1B222B] text-[#8A94A2] active:opacity-70"
                         >
                           手動記錄
                         </button>
@@ -1314,7 +1311,7 @@ export default function TradesPage() {
                           deleteTradePermanently(trade.id);
                         }
                       }}
-                      className="text-xs px-2 py-1 rounded-xl text-[#3A424E] active:opacity-70"
+                      className="text-[11px] px-2 py-1 rounded text-[#3A424E] active:opacity-70"
                     >
                       刪除
                     </button>
@@ -1329,9 +1326,9 @@ export default function TradesPage() {
 
       {/* Multi-select delete bar */}
       {selectMode && (
-        <div className="bg-[#0D0D16] border-t border-[#1B222B] px-4 py-3 flex items-center gap-3 shrink-0">
+        <div className="bg-[#0C1116] border-t border-[#1B222B] px-3 py-2.5 flex items-center gap-3 shrink-0">
           <span className="text-[#565E6B] text-sm">
-            已選 <span className="text-[#E8ECF1] font-bold">{selectedIds.size}</span> 筆
+            已選 <span className="text-[#E8ECF1] num">{selectedIds.size}</span> 筆
           </span>
           <div className="flex-1" />
           <button
@@ -1339,14 +1336,14 @@ export default function TradesPage() {
               const allIds = new Set(filtered.map(t => t.id));
               setSelectedIds(prev => prev.size === filtered.length ? new Set() : allIds);
             }}
-            className="text-xs px-3 py-1.5 rounded-full border border-[#1B222B] text-[#8A94A2] font-semibold active:opacity-70"
+            className="text-[11px] px-2.5 py-1 rounded border border-[#1B222B] text-[#8A94A2] active:opacity-70"
           >
             {selectedIds.size === filtered.length ? '取消全選' : '全選'}
           </button>
           <button
             onClick={handleBulkDelete}
             disabled={selectedIds.size === 0}
-            className="text-xs px-4 py-1.5 rounded-full bg-red-500/20 border border-red-500/40 text-red-400 font-semibold disabled:opacity-40 active:opacity-70"
+            className="text-[11px] px-3 py-1 rounded border border-[#F6465D]/40 text-[#F6465D] disabled:opacity-40 active:opacity-70"
           >
             刪除{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
           </button>
@@ -1356,9 +1353,9 @@ export default function TradesPage() {
       {/* Manual create trade modal */}
       {showManual && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-end" onClick={e => e.target === e.currentTarget && setShowManual(false)}>
-          <div className="w-full max-w-xl mx-auto bg-[#0F141A] rounded-t-3xl p-6 pb-10 border-t border-[#1B222B]">
+          <div className="w-full max-w-xl mx-auto bg-[#0F141A] rounded-t-md p-6 pb-10 border-t border-[#1B222B]">
             <div className="w-12 h-1 bg-[#1B222B] rounded-full mx-auto mb-5" />
-            <h2 className="text-[#E8ECF1] text-lg font-extrabold mb-1">手動新增交易</h2>
+            <h2 className="text-[#E8ECF1] text-base font-medium mb-1">手動新增交易</h2>
             <p className="text-[#565E6B] text-xs mb-4">依照 LINE 推播內容輸入，用於補錄遺漏的紀錄</p>
 
             <p className="text-[#565E6B] text-xs mb-1">幣種代號</p>
@@ -1419,14 +1416,14 @@ export default function TradesPage() {
         const livePxClose = coins.find(c => c.symbol === closeModal.symbol)?.currentPrice ?? 0;
         return (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-end" onClick={e => { if (e.target === e.currentTarget) { setCloseModal(null); setActualEntry(''); } }}>
-          <div className="w-full max-w-xl mx-auto bg-[#0F141A] rounded-t-3xl p-6 pb-10 border-t border-[#1B222B]">
+          <div className="w-full max-w-xl mx-auto bg-[#0F141A] rounded-t-md p-6 pb-10 border-t border-[#1B222B]">
             <div className="w-12 h-1 bg-[#1B222B] rounded-full mx-auto mb-5" />
             <div className="flex items-center justify-between mb-1">
-              <h2 className="text-[#E8ECF1] text-lg font-extrabold">手動記錄結果</h2>
+              <h2 className="text-[#E8ECF1] text-base font-medium">手動記錄結果</h2>
               {livePxClose > 0 && (
                 <div className="text-right">
                   <p className="text-[#565E6B] text-[10px]">即時價格</p>
-                  <p className="text-[#E8ECF1] font-bold text-sm font-mono">${fmtPrice(livePxClose)}</p>
+                  <p className="text-[#E8ECF1] text-sm num">{fmtPrice(livePxClose)}</p>
                 </div>
               )}
             </div>
@@ -1504,9 +1501,13 @@ function EquityCurve({ data }: { data: number[] }) {
 
 function PriceCell({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="bg-[#0A0D11] rounded-xl p-2 text-center">
-      <p className="text-[#565E6B] text-xs">{label}</p>
-      <p className="font-bold text-xs mt-0.5" style={{ color: color ?? '#E8ECF1' }}>{value}</p>
+    <div className="bg-[#0F141A] p-2 text-center">
+      <div className="tlabel">{label}</div>
+      <div className="text-[12px] num mt-0.5" style={{ color: color ?? '#E8ECF1' }}>{value}</div>
     </div>
   );
+}
+
+function Tag({ text }: { text: string }) {
+  return <span className="text-[10px] px-1.5 py-0.5 rounded border border-[#232B35] text-[#8A94A2]">{text}</span>;
 }
