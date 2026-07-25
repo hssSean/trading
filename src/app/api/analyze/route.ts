@@ -164,10 +164,13 @@ const COINS_TTL           = 60 * 60 * 1000;
 async function getDefaultCoins(): Promise<string[]> {
   if (Date.now() - cachedAt < COINS_TTL && cachedCoins.length > 0) return cachedCoins;
   try {
-    // Spec §2.1 = top 20 by volume. Was cut to 15 for CPU; the 2026-07-18
-    // indicator optimizations roughly halved per-coin cost, so restore 20 —
-    // more distinct coins directly reduces 持倉鎖定 collisions (41% of rejects).
-    cachedCoins = await fetchTopCoinsByVolume(20);
+    // Spec §2.1 = top 20 by volume. Was cut to 15 for CPU, restored to 20 after
+    // 2026-07-18 indicator optimizations. 2026-07-26: Vercel Fluid Active CPU
+    // exceeded the Hobby free quota (4h38s/4h) — external cron frequency (every
+    // 5min) isn't controllable from app code, so coin count is the lever. Cut
+    // back to 15 (user's explicit choice over trimming timeframes/cron interval/
+    // upgrading). Revisit if CPU headroom returns.
+    cachedCoins = await fetchTopCoinsByVolume(15);
     cachedAt    = Date.now();
     return cachedCoins;
   } catch {
