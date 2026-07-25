@@ -50,6 +50,12 @@ const REJECT_LABEL: Record<string, string> = {
   insert_failed:     'DB寫入失敗',
 };
 
+// Capacity gates block on portfolio-slot availability (correlated basket already
+// full), not signal quality — their shadow netR reflects the same handful of BTC
+// moves counted once per blocked symbol, not independent edge. The win/lose verdict
+// below is misleading for these; show the raw numbers without the judgment.
+const CAPACITY_GATES = new Set(['same_dir_cap', 'total_risk_cap', 'locked']);
+
 interface FunnelStats {
   total: number;
   sent: number;
@@ -195,9 +201,15 @@ export function ScanStatusPanel() {
                       <span className="text-[#565E6B] w-14 shrink-0 text-right num">{r.count} ({r.pctOfRejected}%)</span>
                     </div>
                     {sh && decided > 0 && (
-                      <p className={`pl-2 num ${sh.netR <= 0 ? 'text-[#0ECB81]/70' : 'text-[#C99A2E]/90'}`}>
-                        └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R {sh.netR <= 0 ? '（這關擋得對）' : '（擋掉了賺錢單）'}
-                      </p>
+                      CAPACITY_GATES.has(r.key) ? (
+                        <p className="pl-2 num text-[#565E6B]">
+                          └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R（容量關卡，非品質判斷，數字僅供參考）
+                        </p>
+                      ) : (
+                        <p className={`pl-2 num ${sh.netR <= 0 ? 'text-[#0ECB81]/70' : 'text-[#C99A2E]/90'}`}>
+                          └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R {sh.netR <= 0 ? '（這關擋得對）' : '（擋掉了賺錢單）'}
+                        </p>
+                      )
                     )}
                   </div>
                 );
