@@ -25,7 +25,7 @@ interface Scan {
 const REGIME_LABEL: Record<string, { text: string; cls: string }> = {
   trending:     { text: '趨勢', cls: 'text-green-400' },
   ranging:      { text: '震盪', cls: 'text-blue-400' },
-  transitional: { text: '過渡', cls: 'text-[#606080]' },
+  transitional: { text: '過渡', cls: 'text-[#565E6B]' },
 };
 
 // v2.1 §0: reject-funnel gate id → human label
@@ -117,26 +117,26 @@ export function ScanStatusPanel() {
 
   if (!scan) {
     return errMsg ? (
-      <div className="mt-2 px-3 py-2 bg-[#12121A] border border-[#1E1E2E] rounded-2xl">
-        <p className="text-[#606080] text-xs">📡 {errMsg}</p>
+      <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-2xl">
+        <p className="text-[#565E6B] text-xs">📡 {errMsg}</p>
       </div>
     ) : null;
   }
 
-  const btc = BTC_REGIME_LABEL[scan.btcRegime] ?? { text: scan.btcRegime, cls: 'text-[#606080]' };
+  const btc = BTC_REGIME_LABEL[scan.btcRegime] ?? { text: scan.btcRegime, cls: 'text-[#565E6B]' };
   const blockers = [
     scan.circuitBreaker ? '⛔ 熔斷中' : null,
     scan.eventFilter ? '📅 事件窗口' : null,
   ].filter(Boolean);
 
   return (
-    <div className="mt-2 bg-[#12121A] border border-[#1E1E2E] rounded-2xl overflow-hidden">
+    <div className="mt-2 bg-[#0F141A] border border-[#1B222B] rounded-2xl overflow-hidden">
       {/* Summary row — always visible */}
       <button onClick={() => { setExpanded(e => !e); if (!expanded) fetchStatus(); }}
         className="w-full px-3 py-2 flex items-center gap-2 text-left">
         <span className="text-xs shrink-0">📡</span>
-        <span className="text-[#A0A0C0] text-xs font-semibold shrink-0">伺服器掃描</span>
-        <span className="text-[#404060] text-[10px] shrink-0">{timeAgo(scan.at)}</span>
+        <span className="text-[#8A94A2] text-xs font-semibold shrink-0">伺服器掃描</span>
+        <span className="text-[#3A424E] text-[10px] shrink-0">{timeAgo(scan.at)}</span>
         <span className={`text-[10px] font-bold shrink-0 ${btc.cls}`}>{btc.text}</span>
         {blockers.length > 0 && (
           <span className="text-red-400 text-[10px] font-bold shrink-0">{blockers.join(' ')}</span>
@@ -145,12 +145,12 @@ export function ScanStatusPanel() {
         {scan.notified.length > 0 && (
           <span className="text-green-400 text-[10px] font-bold shrink-0">✉ {scan.notified.length} 訊號</span>
         )}
-        <span className="text-[#404060] text-xs shrink-0">{expanded ? '▲' : '▼'}</span>
+        <span className="text-[#3A424E] text-xs shrink-0">{expanded ? '▲' : '▼'}</span>
       </button>
 
       {/* Expanded: per-coin table */}
       {expanded && (
-        <div className="px-3 pb-2.5 border-t border-[#1E1E2E]">
+        <div className="px-3 pb-2.5 border-t border-[#1B222B]">
           {(scan.circuitBreaker || scan.eventFilter) && (
             <p className="text-red-400/80 text-[10px] mt-2">
               {typeof scan.circuitBreaker === 'string' ? `⛔ ${scan.circuitBreaker}` : ''}
@@ -159,18 +159,18 @@ export function ScanStatusPanel() {
           )}
           <div className="mt-2 space-y-1">
             {scan.coins.map(c => {
-              const reg = c.regime ? (REGIME_LABEL[c.regime] ?? { text: c.regime, cls: 'text-[#606080]' }) : null;
+              const reg = c.regime ? (REGIME_LABEL[c.regime] ?? { text: c.regime, cls: 'text-[#565E6B]' }) : null;
               const isNotified = scan.notified.includes(c.symbol);
               return (
                 <div key={c.symbol} className="flex items-center gap-2 text-[10px] leading-4">
-                  <span className="text-[#EAEAF4] font-bold w-16 shrink-0 truncate">{c.symbol.replace('USDT', '')}</span>
-                  <span className={`w-10 shrink-0 font-bold ${c.topScore >= 65 ? 'text-[#2DD4BF]' : 'text-[#404060]'}`}>
+                  <span className="text-[#E8ECF1] font-bold w-16 shrink-0 truncate">{c.symbol.replace('USDT', '')}</span>
+                  <span className={`w-10 shrink-0 font-bold ${c.topScore >= 65 ? 'text-[#2DD4BF]' : 'text-[#3A424E]'}`}>
                     {c.topScore > 0 ? `${c.topScore}分`
                       : (c.rawTopScore ?? 0) > 0 ? `${c.rawTopScore}未達` : '—'}
                   </span>
                   {reg && <span className={`w-7 shrink-0 ${reg.cls}`}>{reg.text}</span>}
-                  <span className="text-[#404060] w-14 shrink-0">ADX {c.adx4h ?? '?'}</span>
-                  <span className="flex-1 text-[#606080] truncate">
+                  <span className="text-[#3A424E] w-14 shrink-0">ADX {c.adx4h ?? '?'}</span>
+                  <span className="flex-1 text-[#565E6B] truncate">
                     {isNotified ? '✅ 已發訊號' : (c.note ?? '無合格訊號')}
                   </span>
                 </div>
@@ -179,8 +179,8 @@ export function ScanStatusPanel() {
           </div>
           {/* v2.1 §0: reject funnel — which gate kills the most candidates */}
           {funnel && funnel.total > 0 && (
-            <div className="mt-2.5 pt-2 border-t border-[#1E1E2E]">
-              <p className="text-[#404060] text-[9px] uppercase font-bold tracking-widest mb-1">
+            <div className="mt-2.5 pt-2 border-t border-[#1B222B]">
+              <p className="text-[#3A424E] text-[9px] uppercase font-bold tracking-widest mb-1">
                 近3天訊號漏斗 — 候選 {funnel.total} · 出單 <span className="text-green-400">{funnel.sent}</span>
               </p>
               {funnel.reasons.slice(0, 5).map(r => {
@@ -189,11 +189,11 @@ export function ScanStatusPanel() {
                 return (
                   <div key={r.key} className="text-[10px] leading-4 mb-0.5">
                     <div className="flex items-center gap-2">
-                      <span className="text-[#606080] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
-                      <div className="flex-1 h-1 bg-[#1A1A26] rounded-full overflow-hidden">
+                      <span className="text-[#565E6B] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
+                      <div className="flex-1 h-1 bg-[#141A21] rounded-full overflow-hidden">
                         <div className="h-full bg-red-400/50 rounded-full" style={{ width: `${r.pctOfRejected}%` }} />
                       </div>
-                      <span className="text-[#606080] w-14 shrink-0 text-right">{r.count} ({r.pctOfRejected}%)</span>
+                      <span className="text-[#565E6B] w-14 shrink-0 text-right">{r.count} ({r.pctOfRejected}%)</span>
                     </div>
                     {sh && decided > 0 && (
                       <p className={`pl-2 ${sh.netR <= 0 ? 'text-green-400/70' : 'text-orange-400/90'}`}>
@@ -204,11 +204,11 @@ export function ScanStatusPanel() {
                 );
               })}
               {funnel.reasons.length === 0 && (
-                <p className="text-[#404060] text-[10px]">尚無被拒紀錄</p>
+                <p className="text-[#3A424E] text-[10px]">尚無被拒紀錄</p>
               )}
             </div>
           )}
-          <p className="text-[#404060] text-[9px] mt-2">
+          <p className="text-[#3A424E] text-[9px] mt-2">
             總持倉風險 {scan.totalOpenRisk}% · 每 5 分鐘自動掃描 · 點擊標題可收合
           </p>
         </div>

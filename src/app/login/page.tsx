@@ -32,12 +32,12 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-dvh bg-[#0A0A0F] flex items-center justify-center px-6">
+    <div className="min-h-dvh bg-[#0A0D11] flex items-center justify-center px-6">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="text-4xl mb-3">📈</div>
-          <h1 className="text-[#EAEAF4] text-2xl font-extrabold">Crypto Trader</h1>
-          <p className="text-[#606080] text-sm mt-1">加密貨幣交易信號分析</p>
+          <h1 className="text-[#E8ECF1] text-2xl font-extrabold">Crypto Trader</h1>
+          <p className="text-[#565E6B] text-sm mt-1">加密貨幣交易信號分析</p>
         </div>
 
         <div className="card">
@@ -45,14 +45,14 @@ export default function LoginPage() {
             {(['login', 'signup'] as const).map(m => (
               <button key={m} onClick={() => { setMode(m); setErr(''); }}
                 className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${
-                  mode === m ? 'bg-[#2DD4BF] text-[#0A0A0F]' : 'bg-[#1A1A26] text-[#606080]'
+                  mode === m ? 'bg-[#2DD4BF] text-[#0A0D11]' : 'bg-[#141A21] text-[#565E6B]'
                 }`}>
                 {m === 'login' ? '登入' : '註冊'}
               </button>
             ))}
           </div>
 
-          <p className="text-[#606080] text-xs mb-1">Email</p>
+          <p className="text-[#565E6B] text-xs mb-1">Email</p>
           <input
             value={email}
             onChange={e => setEmail(e.target.value)}
@@ -62,7 +62,7 @@ export default function LoginPage() {
             onKeyDown={e => e.key === 'Enter' && handle()}
           />
 
-          <p className="text-[#606080] text-xs mb-1">密碼{mode === 'signup' ? '（至少 6 位）' : ''}</p>
+          <p className="text-[#565E6B] text-xs mb-1">密碼{mode === 'signup' ? '（至少 6 位）' : ''}</p>
           <input
             value={pass}
             onChange={e => setPass(e.target.value)}
@@ -81,14 +81,14 @@ export default function LoginPage() {
           >
             {loading ? (
               <span className="flex items-center justify-center gap-2">
-                <span className="w-4 h-4 border-2 border-[#0A0A0F] border-t-transparent rounded-full animate-spin" />
+                <span className="w-4 h-4 border-2 border-[#0A0D11] border-t-transparent rounded-full animate-spin" />
                 {mode === 'login' ? '登入中…' : '建立帳號…'}
               </span>
             ) : mode === 'login' ? '登入' : '建立帳號'}
           </button>
         </div>
 
-        <p className="text-[#404060] text-xs text-center mt-6 leading-5">
+        <p className="text-[#3A424E] text-xs text-center mt-6 leading-5">
           資料儲存於個人帳號，換裝置登入即可同步<br />
           <span className="text-red-400/60">本 App 僅供參考，不構成投資建議</span>
         </p>

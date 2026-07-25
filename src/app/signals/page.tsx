@@ -27,11 +27,11 @@ export default function SignalsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* ── Header ── */}
-      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1E1E2E]">
+      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1B222B]">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h1 className="text-[#EAEAF4] text-xl font-extrabold">交易信號</h1>
-            <p className="text-[#606080] text-xs mt-0.5">
+            <h1 className="text-[#E8ECF1] text-xl font-extrabold">交易信號</h1>
+            <p className="text-[#565E6B] text-xs mt-0.5">
               共 {allSignals.length} 筆{unread > 0 ? ` · ${unread} 個未讀` : ''}
             </p>
           </div>
@@ -88,10 +88,10 @@ export default function SignalsPage() {
           <div className="flex flex-col items-center justify-center h-64 gap-4 text-center">
             <span className="text-4xl">📊</span>
             <div>
-              <p className="text-[#A0A0C0] font-semibold">
+              <p className="text-[#8A94A2] font-semibold">
                 {allSignals.length === 0 ? '還沒有交易信號' : '沒有符合篩選條件的信號'}
               </p>
-              <p className="text-[#606080] text-sm mt-1">
+              <p className="text-[#565E6B] text-sm mt-1">
                 {allSignals.length === 0
                   ? '回到首頁點擊「重新分析」'
                   : '請調整篩選條件'}

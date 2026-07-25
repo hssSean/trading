@@ -69,7 +69,7 @@ export function buildLineFlexMessage(signal: TradingSignal): object {
     body: {
       type: 'box', layout: 'vertical', spacing: 'sm', backgroundColor: '#111111', paddingAll: '16px',
       contents: [
-        priceRow('📌 入場價', `$${fmtPrice(signal.entry)}`, '#EAEAF4'),
+        priceRow('📌 入場價', `$${fmtPrice(signal.entry)}`, '#E8ECF1'),
         priceRow('🎯 止盈 TP1', tp1Pct ? `$${fmtPrice(tp1)}  (+${tp1Pct}%)` : `$${fmtPrice(tp1)}`, '#0ECB81'),
         ...(tp2 ? [priceRow('🎯 止盈 TP2', tp2Pct ? `$${fmtPrice(tp2)}  (+${tp2Pct}%)` : `$${fmtPrice(tp2)}`, '#00A040')] : []),
         priceRow('🛑 止損 SL', `$${fmtPrice(signal.stopLoss)}  (-${slPct}%)`, '#F6465D'),

@@ -391,9 +391,9 @@ export default function SettingsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1E1E2E]">
-        <h1 className="text-[#EAEAF4] text-xl font-extrabold">設定</h1>
-        <p className="text-[#606080] text-xs mt-0.5">通知、分析週期、幣種管理</p>
+      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1B222B]">
+        <h1 className="text-[#E8ECF1] text-xl font-extrabold">設定</h1>
+        <p className="text-[#565E6B] text-xs mt-0.5">通知、分析週期、幣種管理</p>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pt-4 scroll-container space-y-4">
@@ -402,8 +402,8 @@ export default function SettingsPage() {
         <Section title="👤 帳號">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-[#EAEAF4] text-sm font-semibold">{userEmail || '載入中…'}</p>
-              <p className="text-[#606080] text-xs mt-0.5">已登入</p>
+              <p className="text-[#E8ECF1] text-sm font-semibold">{userEmail || '載入中…'}</p>
+              <p className="text-[#565E6B] text-xs mt-0.5">已登入</p>
             </div>
             <button
               onClick={handleLogout}
@@ -426,7 +426,7 @@ export default function SettingsPage() {
           </button>
 
           {guideOpen && (
-            <div className="bg-[#1A1A26] rounded-xl p-4 mb-3 space-y-3 text-xs text-[#A0A0C0] leading-relaxed">
+            <div className="bg-[#141A21] rounded-xl p-4 mb-3 space-y-3 text-xs text-[#8A94A2] leading-relaxed">
               <p><span className="text-[#2DD4BF] font-bold">步驟 1</span> — 開啟 developers.line.biz → 建立 Provider → 建立 Messaging API channel</p>
               <p><span className="text-[#2DD4BF] font-bold">步驟 2</span> — 進入 Channel → 「Messaging API」分頁 → 滾到底 → 「Channel access token」→ Issue → 複製</p>
               <p><span className="text-[#2DD4BF] font-bold">步驟 3</span> — 「Basic settings」分頁 → 找「Your user ID」(格式 Uxxxxxx) → 複製</p>
@@ -446,7 +446,7 @@ export default function SettingsPage() {
             <button
               onClick={testLine}
               disabled={!token.trim() || !userId.trim() || testStatus === 'sending'}
-              className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-[#1A1A26] text-[#A0A0C0] border border-[#1E1E2E] disabled:opacity-40"
+              className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-[#141A21] text-[#8A94A2] border border-[#1B222B] disabled:opacity-40"
             >
               {testStatus === 'sending' ? '發送中…' : testStatus === 'ok' ? '✅ 成功！' : testStatus === 'fail' ? '❌ 失敗' : '測試發送'}
             </button>
@@ -456,23 +456,23 @@ export default function SettingsPage() {
         {/* Web Push */}
         <Section title="🔔 手機推播（Web Push）">
           {pushStatus === 'unknown' && (
-            <p className="text-[#606080] text-xs">偵測中…</p>
+            <p className="text-[#565E6B] text-xs">偵測中…</p>
           )}
 
           {pushStatus === 'unsupported' && (
             <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">
               <p className="text-yellow-400 text-sm font-semibold">此瀏覽器不支援推播</p>
-              <p className="text-[#606080] text-xs mt-1">請使用 iOS 16.4+ Safari（已加入主畫面）或 Android Chrome</p>
+              <p className="text-[#565E6B] text-xs mt-1">請使用 iOS 16.4+ Safari（已加入主畫面）或 Android Chrome</p>
             </div>
           )}
 
           {pushStatus === 'ios-hint' && (
             <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-3 space-y-2">
               <p className="text-blue-400 text-sm font-bold">iOS 需先加入主畫面</p>
-              <p className="text-[#A0A0C0] text-xs leading-5">
+              <p className="text-[#8A94A2] text-xs leading-5">
                 iOS 16.4+ 才支援 Web Push，且必須以 Standalone App 模式開啟：
               </p>
-              <ol className="text-[#A0A0C0] text-xs leading-6 list-decimal list-inside space-y-1">
+              <ol className="text-[#8A94A2] text-xs leading-6 list-decimal list-inside space-y-1">
                 <li>點 Safari 底部的 <span className="text-blue-400 font-semibold">分享</span> 按鈕</li>
                 <li>選擇「<span className="text-blue-400 font-semibold">加入主畫面</span>」</li>
                 <li>從主畫面的 App 圖示重新開啟</li>
@@ -484,15 +484,15 @@ export default function SettingsPage() {
           {pushStatus === 'denied' && (
             <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3">
               <p className="text-red-400 text-sm font-semibold">推播權限已被封鎖</p>
-              <p className="text-[#606080] text-xs mt-1">請到瀏覽器設定 → 網站設定 → 通知 → 允許此網站</p>
+              <p className="text-[#565E6B] text-xs mt-1">請到瀏覽器設定 → 網站設定 → 通知 → 允許此網站</p>
             </div>
           )}
 
           {(pushStatus === 'disabled' || pushStatus === 'loading') && (
             <div className="space-y-3">
-              <div className="bg-[#1A1A26] rounded-xl px-4 py-3">
-                <p className="text-[#EAEAF4] text-sm font-semibold">狀態：<span className="text-[#606080]">未啟用</span></p>
-                <p className="text-[#606080] text-xs mt-1">啟用後，信號、成交、止盈/止損通知將直接推送到此裝置</p>
+              <div className="bg-[#141A21] rounded-xl px-4 py-3">
+                <p className="text-[#E8ECF1] text-sm font-semibold">狀態：<span className="text-[#565E6B]">未啟用</span></p>
+                <p className="text-[#565E6B] text-xs mt-1">啟用後，信號、成交、止盈/止損通知將直接推送到此裝置</p>
               </div>
               <button
                 onClick={enablePush}
@@ -513,7 +513,7 @@ export default function SettingsPage() {
             <div className="space-y-3">
               <div className="bg-green-500/10 border border-green-500/30 rounded-xl px-4 py-3">
                 <p className="text-green-400 text-sm font-bold">✓ 推播已啟用</p>
-                <p className="text-[#606080] text-xs mt-1 break-all">
+                <p className="text-[#565E6B] text-xs mt-1 break-all">
                   {pushSub?.endpoint.slice(0, 60)}…
                 </p>
               </div>
@@ -532,14 +532,14 @@ export default function SettingsPage() {
               )}
               <button
                 onClick={disablePush}
-                className="w-full py-2.5 rounded-xl bg-[#1A1A26] border border-[#2A2A3E] text-[#606080] text-sm font-semibold"
+                className="w-full py-2.5 rounded-xl bg-[#141A21] border border-[#232B35] text-[#565E6B] text-sm font-semibold"
               >
                 🔕 關閉推播
               </button>
             </div>
           )}
 
-          <p className="text-[#404060] text-xs mt-3 leading-5">
+          <p className="text-[#3A424E] text-xs mt-3 leading-5">
             推播從伺服器每小時自動掃描後觸發，LINE 與 Web Push 同時發送（二選一或並存皆可）
           </p>
         </Section>
@@ -547,22 +547,22 @@ export default function SettingsPage() {
         {/* Monitor URL + Diag */}
         <Section title="⏰ 自動監控設定">
           <div className="mb-3">
-            <p className="text-[#606080] text-xs mb-1.5 font-semibold">Webhook 密鑰（要和 Vercel 環境變數一致）</p>
+            <p className="text-[#565E6B] text-xs mb-1.5 font-semibold">Webhook 密鑰（要和 Vercel 環境變數一致）</p>
             <div className="flex gap-2">
               <input value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="WEBHOOK_SECRET" className="input-field flex-1" />
               <button onClick={saveLine} className="btn-primary px-4 rounded-xl text-sm shrink-0">存</button>
             </div>
           </div>
 
-          <p className="text-[#606080] text-xs mb-2 leading-5">
+          <p className="text-[#565E6B] text-xs mb-2 leading-5">
             Vercel 每小時自動觸發。若需更高頻率，可將下方 URL 加到{' '}
             <span className="text-[#2DD4BF]">cron-job.org</span>（免費）：
           </p>
-          <div className="bg-[#1A1A26] rounded-xl p-3 mb-2">
-            <p className="text-[#A0A0C0] text-xs font-mono break-all leading-5">{monitorUrl || '請先部署到 Vercel'}</p>
+          <div className="bg-[#141A21] rounded-xl p-3 mb-2">
+            <p className="text-[#8A94A2] text-xs font-mono break-all leading-5">{monitorUrl || '請先部署到 Vercel'}</p>
           </div>
           {appUrl && (
-            <button onClick={copyUrl} className="w-full py-2.5 rounded-xl bg-[#1A1A26] border border-[#1E1E2E] text-sm text-[#A0A0C0] font-semibold mb-3">
+            <button onClick={copyUrl} className="w-full py-2.5 rounded-xl bg-[#141A21] border border-[#1B222B] text-sm text-[#8A94A2] font-semibold mb-3">
               {copied ? '✅ 已複製！' : '複製 URL'}
             </button>
           )}
@@ -582,25 +582,25 @@ export default function SettingsPage() {
           </button>
 
           {diagResult && (
-            <div className="bg-[#1A1A26] rounded-xl p-3 text-xs space-y-2">
+            <div className="bg-[#141A21] rounded-xl p-3 text-xs space-y-2">
               <p className="text-[#2DD4BF] font-bold">
                 {diagResult.ok ? '✅ 分析完成' : '❌ 分析失敗'} · LINE {diagResult.lineReady ? '✓ 已設定' : '✗ 未設定'}
               </p>
-              <p className="text-[#A0A0C0]">已通知：{diagResult.notified?.join(', ') || '無'}</p>
+              <p className="text-[#8A94A2]">已通知：{diagResult.notified?.join(', ') || '無'}</p>
               {diagResult.results?.map((r) => (
                 <div key={r.symbol} className={`rounded-lg px-3 py-2 border ${
                   r.lineSent ? 'border-green-500/30 bg-green-500/5' :
                   r.locked   ? 'border-yellow-500/30 bg-yellow-500/5' :
-                  'border-[#2A2A3E] bg-[#12121A]'
+                  'border-[#232B35] bg-[#0F141A]'
                 }`}>
                   <div className="flex items-center justify-between">
-                    <span className="font-semibold text-[#EAEAF4]">{r.symbol.replace('USDT', '')}</span>
-                    <span className={r.lineSent ? 'text-green-400' : r.locked ? 'text-yellow-400' : 'text-[#606080]'}>
+                    <span className="font-semibold text-[#E8ECF1]">{r.symbol.replace('USDT', '')}</span>
+                    <span className={r.lineSent ? 'text-green-400' : r.locked ? 'text-yellow-400' : 'text-[#565E6B]'}>
                       {r.lineSent ? '✅ LINE 已發送' : r.locked ? '🔒 持倉鎖定' : '—'}
                     </span>
                   </div>
                   {r.topSignal && (
-                    <p className="text-[#A0A0C0] mt-1">
+                    <p className="text-[#8A94A2] mt-1">
                       {r.topSignal.direction === 'LONG' ? '▲ 做多' : '▼ 做空'} ·{' '}
                       <span className={r.topScore >= 16 ? 'text-green-400 font-bold' : 'text-yellow-400'}>{r.topScore}分</span>
                       {r.agreeTFs !== undefined && (
@@ -610,7 +610,7 @@ export default function SettingsPage() {
                       )}
                     </p>
                   )}
-                  {!r.topSignal && <p className="text-[#606080] mt-1">無信號（得分 {r.topScore}）</p>}
+                  {!r.topSignal && <p className="text-[#565E6B] mt-1">無信號（得分 {r.topScore}）</p>}
                   {r.note && <p className="text-yellow-400/80 mt-1">{r.note}</p>}
                   {r.lineError && <p className="text-red-400 mt-1">LINE 錯誤：{r.lineError}</p>}
                   {r.error && <p className="text-red-400 mt-1">錯誤：{r.error}</p>}
@@ -621,7 +621,7 @@ export default function SettingsPage() {
 
           <div className="mt-3 bg-yellow-400/5 border border-yellow-400/20 rounded-xl px-4 py-3">
             <p className="text-[#2DD4BF] text-xs font-semibold mb-1">Vercel 環境變數</p>
-            <p className="text-[#A0A0C0] text-xs font-mono leading-6">
+            <p className="text-[#8A94A2] text-xs font-mono leading-6">
               LINE_CHANNEL_TOKEN=你的token<br />
               LINE_USER_ID=你的userId<br />
               WEBHOOK_SECRET={secret || 'abc123'}<br />
@@ -634,13 +634,13 @@ export default function SettingsPage() {
               <span className="text-green-400">NEXT_PUBLIC_VAPID_PUBLIC_KEY=（見部署說明）</span><br />
               <span className="text-green-400">VAPID_PRIVATE_KEY=（見部署說明）</span>
             </p>
-            <p className="text-[#606080] text-[10px] mt-2">藍色為 Supabase 必填；綠色為 Web Push 必填</p>
+            <p className="text-[#565E6B] text-[10px] mt-2">藍色為 Supabase 必填；綠色為 Web Push 必填</p>
           </div>
         </Section>
 
         {/* Account Size + per-trade risk */}
         <Section title="💰 帳戶資金（倉位計算用）">
-          <p className="text-[#606080] text-xs mb-2 leading-5">
+          <p className="text-[#565E6B] text-xs mb-2 leading-5">
             設定後，每張信號會根據 <span className="text-[#2DD4BF]">{settings.riskPctPerTrade ?? 1}% 風險原則</span> 自動計算建議倉位、本金與槓桿
           </p>
           <div className="flex items-center gap-2">
@@ -657,10 +657,10 @@ export default function SettingsPage() {
               placeholder="1000"
               className="input-field flex-1"
             />
-            <span className="text-[#606080] text-sm shrink-0">USDT</span>
+            <span className="text-[#565E6B] text-sm shrink-0">USDT</span>
           </div>
 
-          <p className="text-[#606080] text-xs mt-3 mb-1.5">每筆風險比例（A 級單；B 級輕倉自動減半）</p>
+          <p className="text-[#565E6B] text-xs mt-3 mb-1.5">每筆風險比例（A 級單；B 級輕倉自動減半）</p>
           <div className="flex gap-1.5 flex-wrap">
             {[0.5, 1, 2, 3].map(p => (
               <button
@@ -670,7 +670,7 @@ export default function SettingsPage() {
                   (settings.riskPctPerTrade ?? 1) === p
                     ? p >= 2 ? 'bg-orange-500/20 border-orange-500/50 text-orange-400'
                     :          'bg-[#2DD4BF]/20 border-[#2DD4BF]/50 text-[#2DD4BF]'
-                    : 'border-[#1E1E2E] text-[#606080]'
+                    : 'border-[#1B222B] text-[#565E6B]'
                 }`}
               >
                 {p}%
@@ -682,7 +682,7 @@ export default function SettingsPage() {
               ⚠ 高風險模式：連續虧損時資金回撤會很快，小資金滾倉建議搭配嚴格停損紀律
             </p>
           )}
-          <p className="text-[#404060] text-xs mt-2">
+          <p className="text-[#3A424E] text-xs mt-2">
             每筆最大虧損 = {(settings.accountSize * (settings.riskPctPerTrade ?? 1) / 100).toFixed(2)} USDT（帳戶 {settings.riskPctPerTrade ?? 1}%）
           </p>
         </Section>
@@ -697,11 +697,11 @@ export default function SettingsPage() {
                 className={`w-full text-left px-4 py-3 rounded-xl border transition-all ${
                   settings.minSignalStrength === value
                     ? 'border-[#2DD4BF] bg-yellow-400/10 text-[#2DD4BF]'
-                    : 'border-[#1E1E2E] bg-[#1A1A26] text-[#A0A0C0]'
+                    : 'border-[#1B222B] bg-[#141A21] text-[#8A94A2]'
                 }`}
               >
                 <p className="font-semibold text-sm">{label}</p>
-                <p className={`text-xs mt-0.5 ${settings.minSignalStrength === value ? 'text-yellow-400/70' : 'text-[#606080]'}`}>{desc}</p>
+                <p className={`text-xs mt-0.5 ${settings.minSignalStrength === value ? 'text-yellow-400/70' : 'text-[#565E6B]'}`}>{desc}</p>
               </button>
             ))}
           </div>
@@ -709,7 +709,7 @@ export default function SettingsPage() {
 
         {/* Analysis interval */}
         <Section title="⏱ 本地信號分析間隔">
-          <p className="text-[#606080] text-xs mb-3 leading-5">
+          <p className="text-[#565E6B] text-xs mb-3 leading-5">
             客戶端每隔多久重新分析一次信號（價格更新仍每 30 秒一次）。伺服器每小時獨立掃描與推播，不受此設定影響。
           </p>
           <div className="flex gap-2">
@@ -720,7 +720,7 @@ export default function SettingsPage() {
                 className={`flex-1 py-2.5 rounded-xl text-sm font-semibold border transition-all ${
                   settings.analysisIntervalMinutes === v
                     ? 'border-[#2DD4BF] bg-yellow-400/10 text-[#2DD4BF]'
-                    : 'border-[#1E1E2E] bg-[#1A1A26] text-[#606080]'
+                    : 'border-[#1B222B] bg-[#141A21] text-[#565E6B]'
                 }`}
               >
                 {v}m
@@ -751,14 +751,14 @@ export default function SettingsPage() {
         {/* Coins */}
         <Section title="💼 監控幣種">
           {coins.length === 0 ? (
-            <p className="text-[#606080] text-sm text-center py-4">無監控幣種，請到首頁新增</p>
+            <p className="text-[#565E6B] text-sm text-center py-4">無監控幣種，請到首頁新增</p>
           ) : (
             <div className="space-y-2">
               {coins.map((coin) => (
-                <div key={coin.symbol} className="flex items-center justify-between bg-[#1A1A26] rounded-xl px-4 py-3">
+                <div key={coin.symbol} className="flex items-center justify-between bg-[#141A21] rounded-xl px-4 py-3">
                   <div>
-                    <p className="text-[#EAEAF4] font-semibold text-sm">{coin.displayName}</p>
-                    <p className="text-[#606080] text-xs mt-0.5">{coin.timeframes.join(' · ')}{coin.signals.length > 0 && ` · ${coin.signals.length} 個信號`}</p>
+                    <p className="text-[#E8ECF1] font-semibold text-sm">{coin.displayName}</p>
+                    <p className="text-[#565E6B] text-xs mt-0.5">{coin.timeframes.join(' · ')}{coin.signals.length > 0 && ` · ${coin.signals.length} 個信號`}</p>
                   </div>
                   <button
                     onClick={() => { if (confirm('確定移除 ' + coin.displayName + '？')) removeCoin(coin.symbol); }}
@@ -776,12 +776,12 @@ export default function SettingsPage() {
         <Section title="☁️ 雲端同步（Supabase）">
           <div className="bg-green-500/5 border border-green-500/20 rounded-xl px-4 py-3 mb-3">
             <p className="text-green-400 text-xs font-semibold mb-1">✓ 自動同步已啟用</p>
-            <p className="text-[#606080] text-xs leading-5">
+            <p className="text-[#565E6B] text-xs leading-5">
               交易紀錄、自選幣種、LINE 設定均自動同步至 Supabase。<br />
               任何裝置登入同一帳號，資料即時一致。
             </p>
           </div>
-          <p className="text-[#404060] text-xs leading-5">
+          <p className="text-[#3A424E] text-xs leading-5">
             同步時機：資料變動後 4 秒自動儲存，以及每 10 分鐘定期備份。<br />
             首次登入新裝置時自動從雲端載入所有紀錄。
           </p>
@@ -802,7 +802,7 @@ export default function SettingsPage() {
           >
             {resetting ? '重置中…' : '🔓 重置所有推播鎖定'}
           </button>
-          <p className="text-[#404060] text-xs mb-4 -mt-1">解除所有幣種的 24 小時推播鎖定，讓下次分析可以重新推播</p>
+          <p className="text-[#3A424E] text-xs mb-4 -mt-1">解除所有幣種的 24 小時推播鎖定，讓下次分析可以重新推播</p>
           <button
             onClick={() => { if (confirm('確定清除所有歷史信號？')) clearSignals(); }}
             className="w-full py-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm font-semibold"
@@ -811,7 +811,7 @@ export default function SettingsPage() {
           </button>
 
           {/* Full atomic reset */}
-          <div className="mt-5 pt-4 border-t border-[#1E1E2E]">
+          <div className="mt-5 pt-4 border-t border-[#1B222B]">
             {fullResetMsg && (
               <div className={`mb-3 px-3 py-2 rounded-xl text-xs font-semibold ${
                 fullResetMsg.includes('失敗') ? 'bg-red-500/10 text-red-400' : 'bg-green-500/10 text-green-400'
@@ -829,12 +829,12 @@ export default function SettingsPage() {
                 </span>
               ) : '🗑️ 清空所有紀錄並重置'}
             </button>
-            <p className="text-[#404060] text-xs mt-2 leading-5">
+            <p className="text-[#3A424E] text-xs mt-2 leading-5">
               永久刪除全部交易紀錄、推薦單與 Redis 鎖定，所有裝置同步清空，無法復原
             </p>
           </div>
 
-          <p className="text-[#606080] text-xs mt-4 text-center leading-6">
+          <p className="text-[#565E6B] text-xs mt-4 text-center leading-6">
             資料來源：Binance API（僅讀取，不交易）<br />
             分析引擎：SMC · SNR · RSI · MACD · EMA<br />
             <span className="text-red-400/70">本 App 僅供參考，不構成投資建議</span>
@@ -850,7 +850,7 @@ export default function SettingsPage() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="card">
-      <h2 className="text-[#EAEAF4] font-bold text-sm mb-4">{title}</h2>
+      <h2 className="text-[#E8ECF1] font-bold text-sm mb-4">{title}</h2>
       {children}
     </div>
   );

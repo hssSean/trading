@@ -171,17 +171,17 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
   return (
     <div className="flex flex-col h-full">
       {/* ── Header ── */}
-      <div className="px-4 pt-14 pb-2 safe-top flex items-center gap-3 border-b border-[#1E1E2E]">
+      <div className="px-4 pt-14 pb-2 safe-top flex items-center gap-3 border-b border-[#1B222B]">
         <button
           onClick={() => router.back()}
-          className="w-9 h-9 rounded-full bg-[#1A1A26] flex items-center justify-center text-[#2DD4BF] text-xl font-bold shrink-0"
+          className="w-9 h-9 rounded-full bg-[#141A21] flex items-center justify-center text-[#2DD4BF] text-xl font-bold shrink-0"
         >
           ‹
         </button>
         <div className="flex-1 min-w-0">
-          <p className="text-[#606080] text-xs">{symbol}</p>
+          <p className="text-[#565E6B] text-xs">{symbol}</p>
           <div className="flex items-baseline gap-2">
-            <span className="text-[#EAEAF4] text-2xl font-extrabold">
+            <span className="text-[#E8ECF1] text-2xl font-extrabold">
               ${fmtPrice(coin?.currentPrice ?? 0)}
             </span>
             {coin && (
@@ -197,7 +197,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             className={`text-xs font-semibold border rounded-full px-3 py-1.5 transition-colors active:opacity-70 ${
               unlockFlash
                 ? 'text-green-400 border-green-400/50 bg-green-400/10'
-                : 'text-[#606080] border-[#1E1E2E]'
+                : 'text-[#565E6B] border-[#1B222B]'
             }`}
             title="解除 LINE 推播鎖定，允許此幣種再次推薦新信號"
           >
@@ -222,7 +222,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
             className={`flex-1 py-2 rounded-xl text-sm font-semibold transition-all ${
               tf === t
                 ? 'bg-yellow-400/10 text-[#2DD4BF] border border-[#2DD4BF]/50'
-                : 'bg-[#1A1A26] text-[#606080] border border-transparent'
+                : 'bg-[#141A21] text-[#565E6B] border border-transparent'
             }`}
           >
             {t}
@@ -231,14 +231,14 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
       </div>
 
       {/* ── K線圖 ── */}
-      <div className="border-b border-[#1E1E2E]">
+      <div className="border-b border-[#1B222B]">
         {/* HTF bias badge */}
         {htfLabel && (
           <div className="px-4 pt-2 pb-0">
             <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
               htfBias === 'LONG'  ? 'text-green-400 bg-green-400/10 border-green-400/30' :
               htfBias === 'SHORT' ? 'text-red-400   bg-red-400/10   border-red-400/30'   :
-              'text-[#606080] bg-[#1A1A26] border-[#1E1E2E]'
+              'text-[#565E6B] bg-[#141A21] border-[#1B222B]'
             }`}>
               {htfLabel}
             </span>
@@ -345,15 +345,15 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
                   ? ((l.price - currentPrice) / currentPrice) * 100
                   : 0;
                 return (
-                  <div key={i} className="flex items-center justify-between bg-[#1A1A26] rounded-xl px-3 py-2">
+                  <div key={i} className="flex items-center justify-between bg-[#141A21] rounded-xl px-3 py-2">
                     <div className="flex items-center gap-2">
                       <span className={`w-2 h-2 rounded-full ${l.type === 'support' ? 'bg-green-400' : 'bg-red-400'}`} />
-                      <span className="text-[#EAEAF4] text-xs font-mono font-semibold">
+                      <span className="text-[#E8ECF1] text-xs font-mono font-semibold">
                         ${fmtPrice(l.price)}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-[#606080] text-[10px]">觸碰 {l.touchCount}×</span>
+                      <span className="text-[#565E6B] text-[10px]">觸碰 {l.touchCount}×</span>
                       <span className={`text-[10px] font-semibold ${dist > 0 ? 'text-red-400' : 'text-green-400'}`}>
                         {dist > 0 ? '+' : ''}{dist.toFixed(2)}%
                       </span>
@@ -375,11 +375,11 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
                     <p className={`text-xs font-semibold ${ob.type === 'bullish' ? 'text-green-400' : 'text-red-400'}`}>
                       {ob.type === 'bullish' ? '看漲 OB' : '看跌 OB'} · 強度 {ob.strength}/5
                     </p>
-                    <p className="text-[#606080] text-[10px] font-mono mt-0.5">
+                    <p className="text-[#565E6B] text-[10px] font-mono mt-0.5">
                       ${fmtPrice(ob.low)} — ${fmtPrice(ob.high)}
                     </p>
                   </div>
-                  <span className="text-[#606080] text-[10px]">
+                  <span className="text-[#565E6B] text-[10px]">
                     {new Date(ob.time).toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' })}
                   </span>
                 </div>
@@ -390,18 +390,18 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
 
         {/* ── Trading Signals ── */}
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-[#EAEAF4] font-bold text-sm">
+          <h3 className="text-[#E8ECF1] font-bold text-sm">
             交易信號 {coin?.signals.length ? `(${coin.signals.length})` : ''}
           </h3>
           {coin?.signals.length ? (
-            <span className="text-[#606080] text-xs">{tf} 週期</span>
+            <span className="text-[#565E6B] text-xs">{tf} 週期</span>
           ) : null}
         </div>
 
         {loading && !coin?.signals.length ? (
           <div className="space-y-3">
             {[1, 2].map((k) => (
-              <div key={k} className="card h-32 animate-pulse bg-[#12121A]" />
+              <div key={k} className="card h-32 animate-pulse bg-[#0F141A]" />
             ))}
           </div>
         ) : coin?.signals.length ? (
@@ -410,8 +410,8 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           !loading && (
             <div className="card text-center py-8">
               <p className="text-2xl mb-2">🔍</p>
-              <p className="text-[#A0A0C0] font-semibold text-sm">此時間週期暫無符合條件的信號</p>
-              <p className="text-[#606080] text-xs mt-1">需要：得分 ≥9 且風險回報比 ≥2.0:1</p>
+              <p className="text-[#8A94A2] font-semibold text-sm">此時間週期暫無符合條件的信號</p>
+              <p className="text-[#565E6B] text-xs mt-1">需要：得分 ≥9 且風險回報比 ≥2.0:1</p>
             </div>
           )
         )}
@@ -435,7 +435,7 @@ function Section({
 }) {
   return (
     <div className="card mb-4">
-      <h3 className="text-[#EAEAF4] font-bold text-sm mb-3">{title}</h3>
+      <h3 className="text-[#E8ECF1] font-bold text-sm mb-3">{title}</h3>
       {loading ? (
         <div className="h-20 flex items-center justify-center">
           <div className="w-5 h-5 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
@@ -451,7 +451,7 @@ type ColorType = 'green' | 'red' | 'neutral';
 const colorMap: Record<ColorType, string> = {
   green: 'text-green-400',
   red: 'text-red-400',
-  neutral: 'text-[#EAEAF4]',
+  neutral: 'text-[#E8ECF1]',
 };
 
 function IndBox({
@@ -466,8 +466,8 @@ function IndBox({
   tag?: string;
 }) {
   return (
-    <div className="bg-[#1A1A26] rounded-xl p-2.5">
-      <p className="text-[#606080] text-[9px] mb-1 truncate">{label}</p>
+    <div className="bg-[#141A21] rounded-xl p-2.5">
+      <p className="text-[#565E6B] text-[9px] mb-1 truncate">{label}</p>
       <p className={`${colorMap[color]} font-bold text-xs truncate`}>{value}</p>
       {tag && <p className={`${colorMap[color]} text-[9px] mt-0.5 opacity-75`}>{tag}</p>}
     </div>
@@ -488,10 +488,10 @@ function LevelRow({
   const c = color === 'green' ? 'text-green-400' : 'text-red-400';
   const bg = color === 'green' ? 'bg-green-400/10' : 'bg-red-400/10';
   return (
-    <div className="flex items-center justify-between py-2 border-b border-[#1E1E2E] last:border-0">
+    <div className="flex items-center justify-between py-2 border-b border-[#1B222B] last:border-0">
       <div>
         <p className={`${c} text-xs font-semibold`}>{label}</p>
-        <p className="text-[#EAEAF4] text-xs font-mono mt-0.5">{range}</p>
+        <p className="text-[#E8ECF1] text-xs font-mono mt-0.5">{range}</p>
       </div>
       <span className={`${bg} ${c} text-[10px] font-semibold px-2 py-0.5 rounded-full`}>
         {badge}

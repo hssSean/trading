@@ -25,10 +25,10 @@ export function EquityCurveChart({ pnls }: EquityProps) {
   const color = final >= 0 ? '#0ECB81' : '#F6465D';
 
   return (
-    <div className="bg-[#12121A] border border-[#1E1E2E] rounded-2xl p-3">
-      <p className="text-[#606080] text-[10px] font-bold uppercase tracking-widest mb-2">權益曲線（累計損益）</p>
+    <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-3">
+      <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-2">權益曲線（累計損益）</p>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
-        <line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#1E1E2E" strokeWidth="1" strokeDasharray="3 3" />
+        <line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#1B222B" strokeWidth="1" strokeDasharray="3 3" />
         <path d={path} fill="none" stroke={color} strokeWidth="1.5" />
       </svg>
       <p className={`text-right text-xs font-bold ${final >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
@@ -60,8 +60,8 @@ export function PnlHistogram({ pnls }: EquityProps) {
   const bw = (W - PAD * 2) / BINS;
 
   return (
-    <div className="bg-[#12121A] border border-[#1E1E2E] rounded-2xl p-3">
-      <p className="text-[#606080] text-[10px] font-bold uppercase tracking-widest mb-2">損益分布</p>
+    <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-3">
+      <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-2">損益分布</p>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
         {counts.map((c, b) => {
           const h = maxCount ? (c / maxCount) * (H - PAD * 2 - 10) : 0;
@@ -81,7 +81,7 @@ export function PnlHistogram({ pnls }: EquityProps) {
           );
         })}
       </svg>
-      <div className="flex justify-between text-[9px] text-[#404060]">
+      <div className="flex justify-between text-[9px] text-[#3A424E]">
         <span>{min.toFixed(0)}</span>
         <span>0</span>
         <span>{max.toFixed(0)}</span>

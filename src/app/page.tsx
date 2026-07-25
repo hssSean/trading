@@ -343,34 +343,32 @@ export default function HomePage() {
 
       <div className="px-3 pt-2 space-y-2">
         {autoLoading && (
-          <div className="mt-3 px-4 py-2.5 bg-blue-500/10 border border-blue-500/30 rounded-2xl flex items-center gap-2">
-            <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-            <p className="text-blue-400 text-xs font-semibold">正在從 Binance 抓取熱門幣種…</p>
+          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-md flex items-center gap-2">
+            <span className="w-3 h-3 border-[1.5px] border-[#2DD4BF] border-t-transparent rounded-full animate-spin shrink-0" />
+            <p className="text-[#8A94A2] text-xs">正在從 Binance 抓取熱門幣種…</p>
           </div>
         )}
         {autoMsg && !autoLoading && (
-          <div className="mt-3 px-4 py-2.5 bg-blue-500/10 border border-blue-500/30 rounded-2xl text-blue-400 text-xs font-semibold">
-            已完成：{autoMsg}
+          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-md text-[#8A94A2] text-xs">
+            {autoMsg}
           </div>
         )}
         {/* Auto-close alerts */}
         {autoCloseAlerts.map(alert => (
           <div key={alert.id}
-            className={`mt-2 px-4 py-2.5 rounded-2xl flex items-center justify-between border ${
-              alert.result === 'LOSS'
-                ? 'bg-red-500/10 border-red-500/30'
-                : 'bg-green-500/10 border-green-500/30'
+            className={`mt-2 px-3 py-2 rounded-md flex items-center justify-between border bg-[#0F141A] ${
+              alert.result === 'LOSS' ? 'border-[#F6465D]/30' : 'border-[#0ECB81]/30'
             }`}
           >
             <div className="flex items-center gap-2 min-w-0">
-              <span className="text-base shrink-0">{alert.result === 'LOSS' ? '🔴' : '🟢'}</span>
-              <p className={`text-xs font-semibold truncate ${alert.result === 'LOSS' ? 'text-red-400' : 'text-green-400'}`}>
-                {alert.symbol.replace('USDT', '/USDT')} 自動平倉 —{' '}
+              <span className={`text-[10px] shrink-0 ${alert.result === 'LOSS' ? 'text-[#F6465D]' : 'text-[#0ECB81]'}`}>●</span>
+              <p className={`text-xs truncate ${alert.result === 'LOSS' ? 'text-[#F6465D]' : 'text-[#0ECB81]'}`}>
+                {alert.symbol.replace('USDT', '/USDT')} 自動平倉 ·{' '}
                 {alert.result === 'WIN_TP2' ? 'TP2 達標' : alert.result === 'WIN_TP1' ? 'TP1 達標' : '止損出場'}{' '}
-                <span className="font-bold">{alert.pnlPercent >= 0 ? '+' : ''}{alert.pnlPercent}%</span>
+                <span className="num">{alert.pnlPercent >= 0 ? '+' : ''}{alert.pnlPercent}%</span>
               </p>
             </div>
-            <button onClick={() => dismissAutoClose(alert.id)} className="text-[#606080] text-sm ml-2 shrink-0">✕</button>
+            <button onClick={() => dismissAutoClose(alert.id)} className="text-[#565E6B] text-sm ml-2 shrink-0">✕</button>
           </div>
         ))}
 
@@ -379,28 +377,22 @@ export default function HomePage() {
 
         {/* Market sentiment bar */}
         {(sentiment.longs + sentiment.shorts) > 0 && (
-          <div className="mt-2 px-3 py-2 bg-[#12121A] border border-[#1E1E2E] rounded-2xl flex items-center gap-3">
-            <span className="text-green-400 text-xs font-bold shrink-0">▲ {sentiment.longs}</span>
-            <div className="flex-1 h-1.5 bg-[#1A1A26] rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-green-400 to-transparent"
-                style={{ width: `${Math.round(sentiment.longs / (sentiment.longs + sentiment.shorts) * 100)}%` }}
-              />
+          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-md flex items-center gap-3">
+            <span className="text-[#0ECB81] text-xs num shrink-0">▲ {sentiment.longs}</span>
+            <div className="flex-1 h-1 bg-[#141A21] overflow-hidden">
+              <div className="h-full bg-[#0ECB81]" style={{ width: `${Math.round(sentiment.longs / (sentiment.longs + sentiment.shorts) * 100)}%` }} />
             </div>
-            <div className="flex-1 h-1.5 bg-[#1A1A26] rounded-full overflow-hidden flex justify-end">
-              <div
-                className="h-full rounded-full bg-gradient-to-l from-red-400 to-transparent"
-                style={{ width: `${Math.round(sentiment.shorts / (sentiment.longs + sentiment.shorts) * 100)}%` }}
-              />
+            <div className="flex-1 h-1 bg-[#141A21] overflow-hidden flex justify-end">
+              <div className="h-full bg-[#F6465D]" style={{ width: `${Math.round(sentiment.shorts / (sentiment.longs + sentiment.shorts) * 100)}%` }} />
             </div>
-            <span className="text-red-400 text-xs font-bold shrink-0">{sentiment.shorts} ▼</span>
+            <span className="text-[#F6465D] text-xs num shrink-0">{sentiment.shorts} ▼</span>
           </div>
         )}
 
         {unread > 0 && (
-          <div className="mt-2 px-4 py-2.5 bg-yellow-400/10 border border-[#2DD4BF]/30 rounded-2xl flex items-center gap-2">
-            <span className="text-[#2DD4BF]">🔔</span>
-            <p className="text-[#2DD4BF] text-xs font-semibold">{unread} 個未讀交易信號</p>
+          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#2DD4BF]/30 rounded-md flex items-center gap-2">
+            <span className="text-[#2DD4BF] text-[10px]">●</span>
+            <p className="text-[#2DD4BF] text-xs"><span className="num">{unread}</span> 個未讀交易信號</p>
           </div>
         )}
       </div>
@@ -427,10 +419,10 @@ export default function HomePage() {
           className="fixed inset-0 bg-black/70 z-50 flex items-end"
           onClick={(e) => e.target === e.currentTarget && closeAdd()}
         >
-          <div className="w-full max-w-xl mx-auto bg-[#12121A] rounded-t-3xl p-6 pb-10 border-t border-[#1E1E2E]">
-            <div className="w-12 h-1 bg-[#1E1E2E] rounded-full mx-auto mb-5" />
-            <h2 className="text-[#EAEAF4] text-lg font-extrabold mb-1">新增監控幣種</h2>
-            <p className="text-[#606080] text-sm mb-4">輸入代號，輸入時自動搜尋</p>
+          <div className="w-full max-w-xl mx-auto bg-[#0F141A] rounded-t-3xl p-6 pb-10 border-t border-[#1B222B]">
+            <div className="w-12 h-1 bg-[#1B222B] rounded-full mx-auto mb-5" />
+            <h2 className="text-[#E8ECF1] text-lg font-extrabold mb-1">新增監控幣種</h2>
+            <p className="text-[#565E6B] text-sm mb-4">輸入代號，輸入時自動搜尋</p>
             <div className="flex gap-2 mb-4 flex-wrap">
               {['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','DOT','MATIC'].map((c) => (
                 <button key={c} onClick={() => setInput(c)} className="chip text-xs py-1">{c}</button>
@@ -445,12 +437,12 @@ export default function HomePage() {
               className="input-field mb-2"
             />
             {searchResults.length > 0 && (
-              <div className="bg-[#1A1A26] rounded-xl border border-[#1E1E2E] mb-2 overflow-hidden">
+              <div className="bg-[#141A21] rounded-xl border border-[#1B222B] mb-2 overflow-hidden">
                 {searchResults.map((s) => (
                   <button
                     key={s}
                     onClick={() => handleAdd(s)}
-                    className="w-full text-left px-4 py-2.5 text-sm text-[#EAEAF4] border-b border-[#1E1E2E] last:border-0 font-mono active:bg-[#252535]"
+                    className="w-full text-left px-4 py-2.5 text-sm text-[#E8ECF1] border-b border-[#1B222B] last:border-0 font-mono active:bg-[#252535]"
                   >
                     {s.replace('USDT', '/USDT')}
                   </button>
@@ -459,13 +451,13 @@ export default function HomePage() {
             )}
             {addError && <p className="text-red-400 text-xs mb-2">{addError}</p>}
             <div className="flex gap-3 mt-2">
-              <button onClick={closeAdd} className="flex-1 py-3 rounded-xl bg-[#1A1A26] text-[#A0A0C0] font-semibold border border-[#1E1E2E]">
+              <button onClick={closeAdd} className="flex-1 py-3 rounded-xl bg-[#141A21] text-[#8A94A2] font-semibold border border-[#1B222B]">
                 取消
               </button>
               <button onClick={() => handleAdd()} disabled={!input.trim() || adding} className="flex-1 py-3 rounded-xl btn-primary disabled:opacity-50">
                 {adding ? (
                   <span className="flex items-center justify-center gap-2">
-                    <span className="w-4 h-4 border-2 border-[#0A0A0F] border-t-transparent rounded-full animate-spin" />
+                    <span className="w-4 h-4 border-2 border-[#0A0D11] border-t-transparent rounded-full animate-spin" />
                     驗證中
                   </span>
                 ) : '新增'}
@@ -481,16 +473,16 @@ export default function HomePage() {
 function EmptyState({ onAuto, onManual, autoLoading }: { onAuto: () => void; onManual: () => void; autoLoading: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center h-64 gap-4 text-center px-8">
-      <div className="text-5xl">📈</div>
+      <div className="text-[#2A323D] text-3xl num">[ ]</div>
       <div>
-        <p className="text-[#A0A0C0] font-semibold text-base">還沒有監控幣種</p>
-        <p className="text-[#606080] text-sm mt-1">自動載入 Binance 熱門幣種，或手動新增</p>
+        <p className="text-[#8A94A2] font-medium text-base">還沒有監控幣種</p>
+        <p className="text-[#565E6B] text-sm mt-1">自動載入 Binance 熱門幣種，或手動新增</p>
       </div>
       <div className="flex gap-3">
-        <button onClick={onAuto} disabled={autoLoading} className="px-5 py-2.5 rounded-2xl bg-blue-500/10 border border-blue-500/30 text-blue-400 font-semibold text-sm disabled:opacity-40">
+        <button onClick={onAuto} disabled={autoLoading} className="px-5 py-2 rounded border border-[#232B35] text-[#8A94A2] text-sm disabled:opacity-40 active:bg-[#141A21]">
           {autoLoading ? '載入中…' : '自動載入熱門'}
         </button>
-        <button onClick={onManual} className="btn-primary px-5 py-2.5 rounded-2xl text-sm">
+        <button onClick={onManual} className="btn-primary px-5 py-2 text-sm">
           + 手動新增
         </button>
       </div>

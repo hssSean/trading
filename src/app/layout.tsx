@@ -21,7 +21,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: '#0A0A0F',
+  themeColor: '#0A0D11',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -32,7 +32,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="apple-touch-fullscreen" content="yes" />
         <link rel="apple-touch-icon" href="/icon-192.png" />
       </head>
-      <body className="bg-[#0A0A0F] min-h-dvh" suppressHydrationWarning>
+      <body className="bg-[#0A0D11] min-h-dvh" suppressHydrationWarning>
         <div className="max-w-xl mx-auto flex flex-col min-h-dvh">
           <StoreHydration>
             <main className="flex-1 pb-20">{children}</main>

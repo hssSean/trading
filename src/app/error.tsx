@@ -13,11 +13,11 @@ export default function GlobalError({
   }, [error]);
 
   return (
-    <div className="min-h-dvh bg-[#0A0A0F] flex flex-col items-center justify-center px-8 text-center gap-6">
+    <div className="min-h-dvh bg-[#0A0D11] flex flex-col items-center justify-center px-8 text-center gap-6">
       <div className="text-5xl">⚠️</div>
       <div>
-        <h2 className="text-[#EAEAF4] text-lg font-bold mb-2">發生錯誤</h2>
-        <p className="text-[#606080] text-sm">{error.message || '頁面載入失敗，請重試'}</p>
+        <h2 className="text-[#E8ECF1] text-lg font-bold mb-2">發生錯誤</h2>
+        <p className="text-[#565E6B] text-sm">{error.message || '頁面載入失敗，請重試'}</p>
       </div>
       <button
         onClick={reset}

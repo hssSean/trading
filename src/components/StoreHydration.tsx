@@ -719,7 +719,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
   // Show spinner during init
   if (!mounted || !hasHydrated) {
     return (
-      <div className="min-h-dvh bg-[#0A0A0F] flex items-center justify-center">
+      <div className="min-h-dvh bg-[#0A0D11] flex items-center justify-center">
         <div className="w-8 h-8 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
       </div>
     );
@@ -728,7 +728,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
   // While checking auth, show blank (avoid flash)
   if (!authReady) {
     return (
-      <div className="min-h-dvh bg-[#0A0A0F] flex items-center justify-center">
+      <div className="min-h-dvh bg-[#0A0D11] flex items-center justify-center">
         <div className="w-8 h-8 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
       </div>
     );
