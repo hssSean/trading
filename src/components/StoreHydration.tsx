@@ -280,7 +280,13 @@ async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> 
         const srv = statuses[t.id];
         if (t.result && !(t.status === 'tp1_hit' && !t.closedAt)) return t;
         if (!srv || srv.status == null) return t;
-        const newStatus = srv.status as 'waiting' | 'active' | 'tp1_hit';
+        const srvStatus = srv.status as 'waiting' | 'active' | 'tp1_hit';
+        // Fill is a one-way latch: never demote active/tp1_hit back to waiting just
+        // because the DB status column still lags (server monitor hasn't detected the
+        // limit fill yet). An unfilled order is cancelled via `result`, not un-filled.
+        const RANK: Record<string, number> = { waiting: 1, active: 2, tp1_hit: 3 };
+        const localRank = RANK[t.status ?? 'active'] ?? 2;
+        const newStatus = (RANK[srvStatus] ?? 2) >= localRank ? srvStatus : (t.status ?? 'active');
         if (newStatus === 'active') confirmedActive.add(t.id);
         return {
           ...t,
@@ -317,54 +323,44 @@ async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive:
   });
   if (suspects.length === 0) return;
 
-  // For each suspect: fetch 4h K-lines from openedAt to now and check whether
-  // price EVER touched the entry. 4h × 500 ≈ 83 days of coverage — enough for any
-  // realistic open trade. If touched → latch 'active'. If never touched → 'waiting'.
+  // For each suspect: fetch 4h K-lines and check whether price EVER touched the entry.
+  // startTime retreats ONE 4h bar before opened_at — the candle that contained the fill
+  // often opens before opened_at (opened_at lands mid-candle); without the retreat that
+  // candle is excluded and a filled-then-moved-away trade reads as "never touched".
+  // This fallback only PROMOTES (latches active) and re-persists status='active' to fix
+  // DB lag; it never demotes to waiting — fills are a one-way latch (server cancels
+  // unfilled limits via `result`, not by reverting to waiting).
   const toActivate: string[] = [];
-  const toWaiting:  string[] = [];
 
   for (const t of suspects) {
     try {
-      const candles = await fetchCandles(t.symbol, '4h', 500, 2, t.openedAt);
+      const candles = await fetchCandles(t.symbol, '4h', 500, 2, t.openedAt - 4 * 3600 * 1000);
       const entryTouched = candles.some(c =>
         t.direction === 'LONG'  ? c.low  <= t.entry :
         t.direction === 'SHORT' ? c.high >= t.entry :
         false
       );
-      if (entryTouched) {
-        toActivate.push(t.id);
-      } else {
-        toWaiting.push(t.id);
-      }
+      if (entryTouched) toActivate.push(t.id);
     } catch {
       // API failure — leave this trade's status unchanged; retry on next load
     }
     await new Promise(r => setTimeout(r, 250)); // stagger to avoid 429
   }
 
-  // Update Zustand store
+  if (toActivate.length === 0) return;
+
   const activateSet = new Set(toActivate);
-  const waitingSet  = new Set(toWaiting);
-  if (activateSet.size > 0 || waitingSet.size > 0) {
-    useStore.setState(s => ({
-      trades: s.trades.map(t => {
-        if (activateSet.has(t.id)) return { ...t, status: 'active'  as const };
-        if (waitingSet.has(t.id))  return { ...t, status: 'waiting' as const };
-        return t;
-      }),
-    }));
-  }
+  useStore.setState(s => ({
+    trades: s.trades.map(t => (activateSet.has(t.id) ? { ...t, status: 'active' as const } : t)),
+  }));
 
   // Persist to DB (best-effort; safe to fail if status column not yet migrated)
   if (userId) {
-    await Promise.allSettled([
-      ...toActivate.map(id =>
-        supabase.from('trades').update({ status: 'active'  }).eq('id', id).eq('user_id', userId)
+    await Promise.allSettled(
+      toActivate.map(id =>
+        supabase.from('trades').update({ status: 'active' }).eq('id', id).eq('user_id', userId)
       ),
-      ...toWaiting.map(id =>
-        supabase.from('trades').update({ status: 'waiting' }).eq('id', id).eq('user_id', userId)
-      ),
-    ]);
+    );
   }
 }
 
