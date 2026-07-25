@@ -239,7 +239,7 @@ export async function loadFromSupabase(userId: string) {
   const confirmedActive = await reconcileFromServer(webhookSecret);
 
   // Step 2: Fallback price-based reconcile for trades the server returned null status for.
-  await reconcileIncorrectlyActiveTrades(userId, confirmedActive);
+  await reconcileIncorrectlyActiveTrades(confirmedActive);
 }
 
 // Calls /api/trade-status (server uses service role key to read the status column that
@@ -304,7 +304,19 @@ async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> 
 // Fallback for trades where the server returned null status (legacy records) or the
 // server endpoint was unreachable. Uses signalPrice to identify unfilled limit orders,
 // then confirms via Binance live price. Skips trades the server confirmed as 'active'.
-async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive: Set<string> = new Set()): Promise<void> {
+//
+// 2026-07-26: this used to also write status='active' back to Supabase ("fix DB lag").
+// That gave the client fill-detection authority it must not have — the server is the
+// only side with an atomic .eq('status','waiting') write guarding against concurrent
+// crons, and its own Phase 1 candle scan is correctly time-anchored (openTime >= opened_at,
+// see route.ts). This fallback previously omitted that anchor, so pre-order candles could
+// satisfy entryTouched and the client would write a phantom fill straight into the DB —
+// confirmed live on ZEC/HYPE limit shorts that were never actually filled. Fix: added the
+// same anchor, AND removed the DB write. Local-only promotion is now purely cosmetic
+// (self-corrects next reconcileFromServer poll or the next server cron, ≤5min); a legacy
+// row truly stuck in 'waiting' forever (fill candle rolled off the lookback window) needs
+// a manual DB fix instead of a silent client write.
+async function reconcileIncorrectlyActiveTrades(confirmedActive: Set<string> = new Set()): Promise<void> {
   const store = useStore.getState();
   // Suspects: open trades that look like limit orders but whose fill status is uncertain.
   // Status may be null-defaulted to 'active' because the DB status column didn't exist.
@@ -325,19 +337,21 @@ async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive:
   });
   if (suspects.length === 0) return;
 
-  // For each suspect: fetch 4h K-lines and check whether price EVER touched the entry.
-  // startTime retreats ONE 4h bar before opened_at — the candle that contained the fill
-  // often opens before opened_at (opened_at lands mid-candle); without the retreat that
-  // candle is excluded and a filled-then-moved-away trade reads as "never touched".
-  // This fallback only PROMOTES (latches active) and re-persists status='active' to fix
-  // DB lag; it never demotes to waiting — fills are a one-way latch (server cancels
-  // unfilled limits via `result`, not by reverting to waiting).
+  // For each suspect: fetch 4h K-lines and check whether price touched the entry AFTER
+  // the order was placed. startTime retreats ONE 4h bar before opened_at (the candle
+  // containing the fill often opens before opened_at), but evalCandles then filters back
+  // to openTime >= openedAt — same two-step anchor as route.ts's Phase 1 fill scan — so
+  // pre-order price action can never be misread as a fill.
+  // This fallback only PROMOTES (latches active locally); it never demotes to waiting —
+  // fills are a one-way latch (server cancels unfilled limits via `result`, not by
+  // reverting to waiting) — and never writes to the DB (see function comment above).
   const toActivate: string[] = [];
 
   for (const t of suspects) {
     try {
       const candles = await fetchCandles(t.symbol, '4h', 500, 2, t.openedAt - 4 * 3600 * 1000);
-      const entryTouched = candles.some(c =>
+      const evalCandles = candles.filter(c => c.openTime >= t.openedAt);
+      const entryTouched = evalCandles.some(c =>
         t.direction === 'LONG'  ? c.low  <= t.entry :
         t.direction === 'SHORT' ? c.high >= t.entry :
         false
@@ -355,15 +369,6 @@ async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive:
   useStore.setState(s => ({
     trades: s.trades.map(t => (activateSet.has(t.id) ? { ...t, status: 'active' as const } : t)),
   }));
-
-  // Persist to DB (best-effort; safe to fail if status column not yet migrated)
-  if (userId) {
-    await Promise.allSettled(
-      toActivate.map(id =>
-        supabase.from('trades').update({ status: 'active' }).eq('id', id).eq('user_id', userId)
-      ),
-    );
-  }
 }
 
 // ── Full replace sync (used by manual "同步紀錄" button) ──────────
@@ -486,7 +491,7 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
   // is not readable by client; reconcileFromServer uses service role to get actual status).
   const webhookSecret = useStore.getState().webhookSecret;
   const confirmedActive = await reconcileFromServer(webhookSecret);
-  await reconcileIncorrectlyActiveTrades(userId, confirmedActive);
+  await reconcileIncorrectlyActiveTrades(confirmedActive);
 
   return Math.abs(merged.length - before);
 }
