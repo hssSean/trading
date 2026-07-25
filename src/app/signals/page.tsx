@@ -27,19 +27,20 @@ export default function SignalsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* ── Header ── */}
-      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1B222B]">
-        <div className="flex items-center justify-between mb-3">
+      <div className="px-3 pt-14 pb-2.5 safe-top border-b border-[#1B222B]">
+        <div className="flex items-center mb-2.5">
           <div>
-            <h1 className="text-[#E8ECF1] text-xl font-extrabold">交易信號</h1>
-            <p className="text-[#565E6B] text-xs mt-0.5">
+            <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">交易信號</h1>
+            <p className="text-[#565E6B] text-[10px] mt-0.5 num">
               共 {allSignals.length} 筆{unread > 0 ? ` · ${unread} 個未讀` : ''}
             </p>
           </div>
-          <div className="flex gap-2">
+          <span className="flex-1" />
+          <div className="flex gap-1.5">
             {unread > 0 && (
               <button
                 onClick={markAllRead}
-                className="text-[#2DD4BF] text-xs font-semibold border border-[#2DD4BF]/30 rounded-full px-3 py-1.5"
+                className="text-[#2DD4BF] text-[11px] border border-[#2DD4BF]/30 rounded px-2.5 py-1"
               >
                 全部已讀
               </button>
@@ -49,7 +50,7 @@ export default function SignalsPage() {
                 onClick={() => {
                   if (confirm('確定清除所有歷史信號？')) clearSignals();
                 }}
-                className="text-red-400 text-xs font-semibold border border-red-400/30 rounded-full px-3 py-1.5"
+                className="text-[#F6465D] text-[11px] border border-[#F6465D]/30 rounded px-2.5 py-1"
               >
                 清除
               </button>
@@ -58,23 +59,23 @@ export default function SignalsPage() {
         </div>
 
         {/* ── Filters ── */}
-        <div className="flex gap-2 mb-2">
+        <div className="flex gap-1.5 mb-2">
           {(['ALL', 'LONG', 'SHORT'] as DirFilter[]).map((f) => (
             <button
               key={f}
               onClick={() => setDir(f)}
-              className={`chip text-xs ${dir === f ? 'chip-active' : ''}`}
+              className={`chip text-[11px] ${dir === f ? 'chip-active' : ''}`}
             >
-              {f === 'ALL' ? '全部' : f === 'LONG' ? '做多 ▲' : '做空 ▼'}
+              {f === 'ALL' ? '全部' : f === 'LONG' ? 'LONG' : 'SHORT'}
             </button>
           ))}
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-1.5">
           {(['ALL', 'STRONG', 'MODERATE', 'WEAK'] as StrengthFilter[]).map((f) => (
             <button
               key={f}
               onClick={() => setStrength(f)}
-              className={`chip text-xs ${strength === f ? 'chip-active' : ''}`}
+              className={`chip text-[11px] ${strength === f ? 'chip-active' : ''}`}
             >
               {f === 'ALL' ? '全部強度' : f === 'STRONG' ? '強' : f === 'MODERATE' ? '中' : '弱'}
             </button>
@@ -83,12 +84,12 @@ export default function SignalsPage() {
       </div>
 
       {/* ── Signal list ── */}
-      <div className="flex-1 overflow-y-auto px-4 pt-3 scroll-container">
+      <div className="flex-1 overflow-y-auto px-3 pt-3 scroll-container">
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 gap-4 text-center">
-            <span className="text-4xl">📊</span>
+            <span className="text-[#2A323D] text-2xl num">[ ]</span>
             <div>
-              <p className="text-[#8A94A2] font-semibold">
+              <p className="text-[#8A94A2] font-medium">
                 {allSignals.length === 0 ? '還沒有交易信號' : '沒有符合篩選條件的信號'}
               </p>
               <p className="text-[#565E6B] text-sm mt-1">
