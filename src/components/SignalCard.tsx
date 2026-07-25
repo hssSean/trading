@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { TradingSignal } from '@/types';
 import { useStore } from '@/store/useStore';
-import { calcPositionPlan } from '@/lib/position';
+import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { formatDistanceToNow } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 
@@ -23,7 +23,7 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   const riskPct     = useStore((s) => s.settings.riskPctPerTrade ?? 1);
   const [flash, setFlash] = useState(false);
 
-  const effRisk = riskPct * (signal.tier === 'B' ? 0.5 : 1);
+  const effRisk = riskPct * tierRiskMultiplier(signal.symbol, signal.tier);
   const plan    = calcPositionPlan(accountSize, effRisk, signal.entry, signal.stopLoss, signal.tier === 'B' ? 5 : 10);
   const isHighVol  = signal.reasons.some((r) => r.startsWith('⚠ 高波動'));
   const sp         = signal.signalPrice ?? 0;

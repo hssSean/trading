@@ -3,7 +3,7 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useStore } from '@/store/useStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
 import { fetchCurrentPrice } from '@/api/binance';
-import { calcPositionPlan } from '@/lib/position';
+import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { isFinallyClosed } from '@/lib/tradeSync';
 import { StatsHero } from '@/components/StatsHero';
 import { TradeResult } from '@/types';
@@ -1146,7 +1146,7 @@ export default function TradesPage() {
 
                 {/* Position sizing (user risk%, tier B halved) for pending trades */}
                 {isPending && (() => {
-                  const effRisk = riskPct * (trade.tier === 'B' ? 0.5 : 1);
+                  const effRisk = riskPct * tierRiskMultiplier(trade.symbol, trade.tier);
                   const plan = calcPositionPlan(accountSize, effRisk, trade.entry, trade.stopLoss, trade.tier === 'B' ? 5 : 10);
                   if (!plan) return null;
                   const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;

@@ -7,6 +7,23 @@
 // Shared by SignalCard, trades journal, and the server push notifications so
 // every surface quotes identical numbers.
 
+// Alt-bucket slot cap: same-direction altcoin risk is bucketed at ≤1.0% total
+// (see checkSameDirectionRisk in api/analyze/route.ts), subdivided into ~3 slots
+// of ALT_SLOT_RISK each. This must be the SAME multiplier used for the real
+// position size shown to the user — otherwise the risk gate's bookkeeping and
+// the actual $ risked on an order diverge (bucket accounts 0.33%, order sizes at
+// the full 1.0% tier rate).
+export const ALT_SLOT_RISK = 0.33;
+
+// Fraction of the user's acctRiskPct actually put on a given signal: tier alone
+// (A=100%, B=50%) for BTC/ETH; capped at ALT_SLOT_RISK for altcoins, since an alt
+// slot's bookkeeping in checkSameDirectionRisk is capped there too.
+export function tierRiskMultiplier(symbol: string, tier: string | null | undefined): number {
+  const base = tier === 'B' ? 0.5 : 1.0;
+  const isAlt = !symbol.startsWith('BTC') && !symbol.startsWith('ETH');
+  return isAlt ? Math.min(base, ALT_SLOT_RISK) : base;
+}
+
 export interface PositionPlan {
   riskUSDT: number;      // max loss when SL is hit
   positionUSDT: number;  // notional position size

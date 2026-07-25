@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 import { sendWebPushToUser } from '@/lib/webpush';
-import { calcPositionPlan, formatPlanLine } from '@/lib/position';
+import { calcPositionPlan, formatPlanLine, tierRiskMultiplier, ALT_SLOT_RISK } from '@/lib/position';
 
 export const maxDuration = 60;
 
@@ -1044,9 +1044,9 @@ async function checkEventFilter(): Promise<{ active: boolean; reason?: string }>
 // 桶內零分散——單一幣種特有風險（插針/下架）100% 曝露在那一筆上，且名額
 // 用先到先得（掃描按成交量排名跑，非按分數排），不是擇優。改成 slot 制：
 // 山寨桶內每筆風險貢獻上限 ALT_SLOT_RISK，讓 1.0% 桶容納 ~3 筆分散部位，
-// 而不是 1 筆全倉。這只改「桶內記帳單位」，不改真實下單風險（下單時的
-// 實際 USDT 曝險仍是 acctRiskPct × tier，未動）；同向 2.0%／山寨 1.0% 這
-// 兩層總帽維持不變，三檔滿倉時桶內小計 0.99% 仍在 1.0% 內。
+// 而不是 1 筆全倉。風險貢獻用 `tierRiskMultiplier`（src/lib/position.ts）—
+// 與推播/前端算真實下單風險的同一份函式，記帳跟實際 USDT 曝險保證一致，
+// 不會像 commit 9862264 那版只改記帳、下單額度仍照 tier 全額算。
 async function checkSameDirectionRisk(
   profileId: string, direction: string, symbol: string, newTier: string | null | undefined,
 ): Promise<{ block: boolean; reason?: string }> {
@@ -1062,11 +1062,8 @@ async function checkSameDirectionRisk(
       .eq('user_id', profileId).eq('direction', direction).is('closed_at', null);
     const rows = (data ?? []) as { symbol: string; tier?: string | null }[];
 
-    const riskOf = (tier: string | null | undefined) => (tier === 'B' ? 0.5 : 1.0);
     const isAlt  = (sym: string) => !sym.startsWith('BTC') && !sym.startsWith('ETH');
-    const ALT_SLOT_RISK = 0.33; // 1.0% 桶 ÷ 3 筆
-    const riskContribution = (sym: string, tier: string | null | undefined) =>
-      isAlt(sym) ? Math.min(riskOf(tier), ALT_SLOT_RISK) : riskOf(tier);
+    const riskContribution = tierRiskMultiplier;
 
     let totalRisk = 0;
     let altRisk = 0;
@@ -1972,7 +1969,7 @@ export async function GET(req: NextRequest) {
             const eKind = isScalp ? ' ⚡短線' : '';
             // Concrete order instructions: notional / margin / leverage at the
             // user's synced account size (tier B = half risk, leverage ≤5x)
-            const effRisk = acctRiskPct * (entrySignal.tier === 'B' ? 0.5 : 1);
+            const effRisk = acctRiskPct * tierRiskMultiplier(entrySignal.symbol, entrySignal.tier);
             const plan = calcPositionPlan(acctSize, effRisk, entrySignal.entry, entrySignal.stopLoss, entrySignal.tier === 'B' ? 5 : 10);
             const planLine = plan ? `\n${formatPlanLine(plan)}｜止損虧 ${plan.riskUSDT}U` : '';
             await sendWebPushToUser(profileId, {
@@ -1988,7 +1985,7 @@ export async function GET(req: NextRequest) {
             const dir     = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
             const sym     = entrySignal.symbol.replace('USDT', '/USDT');
             const tp2     = entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0];
-            const effRisk = acctRiskPct * (entrySignal.tier === 'B' ? 0.5 : 1);
+            const effRisk = acctRiskPct * tierRiskMultiplier(entrySignal.symbol, entrySignal.tier);
             const plan    = calcPositionPlan(acctSize, effRisk, entrySignal.entry, entrySignal.stopLoss, entrySignal.tier === 'B' ? 5 : 10);
             const planTxt = plan ? `\n${formatPlanLine(plan)}｜止損虧 ${plan.riskUSDT}U` : '';
             const entryMsg =
