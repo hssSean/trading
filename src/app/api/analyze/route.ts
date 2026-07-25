@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 import { sendWebPushToUser } from '@/lib/webpush';
-import { calcPositionPlan, formatPlanLine, tierRiskMultiplier, ALT_SLOT_RISK } from '@/lib/position';
+import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
 
 export const maxDuration = 60;
 
@@ -1062,8 +1062,20 @@ async function checkEventFilter(): Promise<{ active: boolean; reason?: string }>
 // 而不是 1 筆全倉。風險貢獻用 `tierRiskMultiplier`（src/lib/position.ts）—
 // 與推播/前端算真實下單風險的同一份函式，記帳跟實際 USDT 曝險保證一致，
 // 不會像 commit 9862264 那版只改記帳、下單額度仍照 tier 全額算。
+//
+// 2026-07-26（第二次修正）：`tierRiskMultiplier` 回傳的是「倍率」（A=1.0、
+// B=0.5、山寨封頂0.33），本函式卻一直把它當「絕對帳戶百分比」直接跟 2.0%／
+// 1.0% 比——兩者只有在使用者 riskPctPerTrade 剛好=1% 時才會一致。實測帳戶
+// riskPctPerTrade=3%：真實下單風險 = 3% × 倍率，同向三張山寨滿倉真實曝險
+// 達 3%（0.99%×3），本函式卻以為只用了 0.99%，全部上限被低估達使用者
+// riskPctPerTrade 倍（此帳戶是 3 倍）。修正：倍率 × acctRiskPct 才是真實
+// 帳戶%，2.0%／1.0% 這兩層帽子改跟這個真實值比。
+// 已知近似：既有持倉是用「現在」的 acctRiskPct 反推，若使用者中途改過風險
+//設定，舊倉位開倉當下的真實風險可能跟現在算出來的不同——比照全站其餘倉位
+// 試算（也都是用「現在」acctRiskPct）的既有假設，不是這次修正引入的新問題。
 async function checkSameDirectionRisk(
   profileId: string, direction: string, symbol: string, newTier: string | null | undefined,
+  acctRiskPct: number,
 ): Promise<{ block: boolean; reason?: string }> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -1078,7 +1090,8 @@ async function checkSameDirectionRisk(
     const rows = (data ?? []) as { symbol: string; tier?: string | null }[];
 
     const isAlt  = (sym: string) => !sym.startsWith('BTC') && !sym.startsWith('ETH');
-    const riskContribution = tierRiskMultiplier;
+    const riskContribution = (sym: string, tier: string | null | undefined) =>
+      acctRiskPct * tierRiskMultiplier(sym, tier);
 
     let totalRisk = 0;
     let altRisk = 0;
@@ -1101,7 +1114,7 @@ async function checkSameDirectionRisk(
     if (isAltcoin && altRisk + newRisk > 1.0) {
       return {
         block: true,
-        reason: `山寨同向風險上限：${direction} 山寨桶已占用 ${altRisk.toFixed(2)}%，桶內每檔上限 ${ALT_SLOT_RISK}%`,
+        reason: `山寨同向風險上限：${direction} 山寨桶已占用 ${altRisk.toFixed(2)}%，新單 ${newRisk.toFixed(2)}% 會超過 1%`,
       };
     }
     return { block: false };
@@ -1814,7 +1827,7 @@ export async function GET(req: NextRequest) {
 
         // §4.3 Same-direction risk cap（風險加權：A=1%、B=0.5%）
         if (!skipReason && profileId) {
-          const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol, entrySignal.tier);
+          const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol, entrySignal.tier, acctRiskPct);
           if (sdCheck.block) { skipKey = 'same_dir_cap'; skipReason = `跳過 — ${sdCheck.reason}`; }
         }
 
