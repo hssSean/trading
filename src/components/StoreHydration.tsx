@@ -310,7 +310,9 @@ async function reconcileIncorrectlyActiveTrades(userId: string, confirmedActive:
   // Status may be null-defaulted to 'active' because the DB status column didn't exist.
   // Confirmed-active trades (server verified) are excluded — no need to re-check.
   const suspects = store.trades.filter(t => {
-    if (t.result || t.status === 'waiting') return false;
+    // Include 'waiting' too: a limit order whose entry the price already touched should
+    // latch back to 'active' here (heals trades a prior bug or server lag left as waiting).
+    if (t.result) return false;
     if (confirmedActive.has(t.id)) return false;
     const sp = t.signalPrice ?? 0;
     const hasLimitReason = (t.reasons ?? []).some(
