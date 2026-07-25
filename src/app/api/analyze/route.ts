@@ -226,6 +226,17 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
   const baseQ = () =>
     admin.from('trades').select('*').is('result', null);
 
+  // 2026-07-26: NULL status used to be swept into the ACTIVE net ("status column
+  // didn't exist yet" legacy assumption). But a NEW trade can also land with status
+  // NULL when the insert's column-fallback strips it (confirmed live on ZEC/HYPE:
+  // insert succeeded via the deepest fallback tier, which never writes status at
+  // all — the trade's fill was never actually confirmed by anyone). Treating that
+  // as "active" let Phase 2 run TP/SL/time-stop against an entry that may never
+  // have filled — the wrong failure mode is silent fabricated PnL, not silence.
+  // NULL is safer bucketed as WAITING: Phase 1's candle-touch check (below) then
+  // either confirms the fill properly (setting filled_at for the first time, which
+  // also self-heals genuine legacy rows) or leaves it waiting — it never invents
+  // a result out of an unconfirmed entry.
   const [
     { data: waitingRaw, error: waitErr },
     { data: activeRaw,  error: activeErr },
@@ -233,8 +244,8 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     // (closed_at null = "still watching for TP2"; set to now when trade is finally done)
     { data: tp1WatchRaw },
   ] = await Promise.all([
-    baseQ().eq('status', 'waiting'),
-    baseQ().or('status.eq.active,status.is.null,status.eq.tp1_hit'),
+    baseQ().or('status.eq.waiting,status.is.null'),
+    baseQ().or('status.eq.active,status.eq.tp1_hit'),
     admin.from('trades').select('*')
       .eq('status', 'tp1_hit').eq('result', 'WIN_TP1').is('closed_at', null),
   ]);
@@ -378,17 +389,21 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
     if (isFilled) {
       const filledAt = fillCandle!.closeTime ?? now;
-      // Atomic fill: .eq('status','waiting') ensures only the cron that transitions
-      // waiting→active actually sends the notification; concurrent cron gets 0 rows back.
+      // Atomic fill: matches status='waiting' OR NULL (NULL rows are routed into this
+      // same waiting pool above) so only the cron that transitions actually sends the
+      // notification; concurrent cron — or a second pass over an already-transitioned
+      // row — gets 0 rows back. A plain .eq('status','waiting') would never match a
+      // NULL row (Postgres NULL never equals anything), leaving it stuck re-detecting
+      // "filled" forever without the write ever landing.
       const fillRes  = await admin.from('trades')
         .update({ status: 'active', filled_at: filledAt, last_monitored_at: now })
-        .eq('id', trade.id).eq('status', 'waiting').select('id');
+        .eq('id', trade.id).or('status.eq.waiting,status.is.null').select('id');
 
       let fillWriteOk = !fillRes.error && (fillRes.data?.length ?? 0) > 0;
       if (fillRes.error) {
         if (fillRes.error.code === '42703') {
           const fb = await admin.from('trades').update({ status: 'active', opened_at: filledAt })
-            .eq('id', trade.id).eq('status', 'waiting').select('id');
+            .eq('id', trade.id).or('status.eq.waiting,status.is.null').select('id');
           if (fb.error) {
             console.error(`[monitor] fill write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
             await touchMonitoredAt(trade.id as string);
