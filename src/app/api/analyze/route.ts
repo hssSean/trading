@@ -1039,6 +1039,14 @@ async function checkEventFilter(): Promise<{ active: boolean; reason?: string }>
 // 佔全部拒絕 11-23%，是第二大容量瓶頸）。改為：
 //   同向合計風險 + 新單風險 ≤ 2.0%；山寨桶（非BTC/ETH）同向 ≤ 1.0%。
 // A 級 = 1%、B 級 = 0.5%（tier 欄位缺失的舊資料保守當 1%）。
+//
+// 2026-07-26：山寨桶原本是 1 個名額全有全無（A 級單開一筆就佔滿 1.0%），
+// 桶內零分散——單一幣種特有風險（插針/下架）100% 曝露在那一筆上，且名額
+// 用先到先得（掃描按成交量排名跑，非按分數排），不是擇優。改成 slot 制：
+// 山寨桶內每筆風險貢獻上限 ALT_SLOT_RISK，讓 1.0% 桶容納 ~3 筆分散部位，
+// 而不是 1 筆全倉。這只改「桶內記帳單位」，不改真實下單風險（下單時的
+// 實際 USDT 曝險仍是 acctRiskPct × tier，未動）；同向 2.0%／山寨 1.0% 這
+// 兩層總帽維持不變，三檔滿倉時桶內小計 0.99% 仍在 1.0% 內。
 async function checkSameDirectionRisk(
   profileId: string, direction: string, symbol: string, newTier: string | null | undefined,
 ): Promise<{ block: boolean; reason?: string }> {
@@ -1055,28 +1063,33 @@ async function checkSameDirectionRisk(
     const rows = (data ?? []) as { symbol: string; tier?: string | null }[];
 
     const riskOf = (tier: string | null | undefined) => (tier === 'B' ? 0.5 : 1.0);
-    const newRisk = riskOf(newTier);
+    const isAlt  = (sym: string) => !sym.startsWith('BTC') && !sym.startsWith('ETH');
+    const ALT_SLOT_RISK = 0.33; // 1.0% 桶 ÷ 3 筆
+    const riskContribution = (sym: string, tier: string | null | undefined) =>
+      isAlt(sym) ? Math.min(riskOf(tier), ALT_SLOT_RISK) : riskOf(tier);
 
     let totalRisk = 0;
     let altRisk = 0;
     for (const row of rows) {
-      const r = riskOf(row.tier);
+      const r = riskContribution(row.symbol, row.tier);
       totalRisk += r;
-      if (!row.symbol.startsWith('BTC') && !row.symbol.startsWith('ETH')) altRisk += r;
+      if (isAlt(row.symbol)) altRisk += r;
     }
+
+    const isAltcoin = isAlt(symbol);
+    const newRisk = riskContribution(symbol, newTier);
 
     if (totalRisk + newRisk > 2.0) {
       return {
         block: true,
-        reason: `同向風險上限：${direction} 已占用 ${totalRisk.toFixed(1)}%，新單 ${newRisk.toFixed(1)}% 會超過 2%`,
+        reason: `同向風險上限：${direction} 已占用 ${totalRisk.toFixed(2)}%，新單 ${newRisk.toFixed(2)}% 會超過 2%`,
       };
     }
 
-    const isAltcoin = !symbol.startsWith('BTC') && !symbol.startsWith('ETH');
     if (isAltcoin && altRisk + newRisk > 1.0) {
       return {
         block: true,
-        reason: `山寨同向風險上限：${direction} 山寨桶已占用 ${altRisk.toFixed(1)}%，加新單會超過 1%`,
+        reason: `山寨同向風險上限：${direction} 山寨桶已占用 ${altRisk.toFixed(2)}%，桶內每檔上限 ${ALT_SLOT_RISK}%`,
       };
     }
     return { block: false };
