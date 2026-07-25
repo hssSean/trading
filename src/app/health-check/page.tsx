@@ -37,12 +37,12 @@ const FIELD_LABELS: Record<string, string> = {
   tag: '策略標籤',
 };
 
-const LEVEL_STYLE: Record<VerdictLevel, { bg: string; border: string; text: string }> = {
-  gambling:         { bg: 'bg-red-500/10',    border: 'border-red-500/50',    text: 'text-red-400' },
-  insufficient:     { bg: 'bg-orange-500/10', border: 'border-orange-500/50', text: 'text-orange-400' },
-  luck_suspected:   { bg: 'bg-yellow-500/10', border: 'border-yellow-500/40', text: 'text-yellow-400' },
-  fragile_edge:     { bg: 'bg-yellow-500/10', border: 'border-yellow-500/40', text: 'text-yellow-400' },
-  statistical_edge: { bg: 'bg-green-500/10',  border: 'border-green-500/50',  text: 'text-green-400' },
+const LEVEL_STYLE: Record<VerdictLevel, { border: string; text: string }> = {
+  gambling:         { border: 'border-[#F6465D]/50', text: 'text-[#F6465D]' },
+  insufficient:     { border: 'border-[#C99A2E]/50', text: 'text-[#C99A2E]' },
+  luck_suspected:   { border: 'border-[#C99A2E]/40', text: 'text-[#C99A2E]' },
+  fragile_edge:     { border: 'border-[#C99A2E]/40', text: 'text-[#C99A2E]' },
+  statistical_edge: { border: 'border-[#0ECB81]/50', text: 'text-[#0ECB81]' },
 };
 
 const MARKET_LABEL: Record<Market, string> = {
@@ -172,7 +172,7 @@ export default function HealthCheckPage() {
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1B222B] shrink-0">
-        <h1 className="text-[#E8ECF1] text-xl font-extrabold tracking-tight">績效體檢</h1>
+        <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">績效體檢</h1>
         <p className="text-[#565E6B] text-xs mt-0.5">
           用統計學檢驗你的交易紀錄 — 是可重複的優勢，還是運氣與倖存者偏差
         </p>
@@ -183,8 +183,8 @@ export default function HealthCheckPage() {
         {/* ══ 上傳 ══ */}
         {step === 'upload' && (
           <>
-            <div className="px-3 py-2.5 bg-blue-500/10 border border-blue-500/30 rounded-2xl">
-              <p className="text-blue-400 text-xs font-semibold">🔒 檔案僅在你的裝置上分析，不會上傳</p>
+            <div className="px-3 py-2.5 border border-[#2DD4BF]/30 rounded-md">
+              <p className="text-[#2DD4BF] text-xs">檔案僅在你的裝置上分析，不會上傳</p>
               <p className="text-[#565E6B] text-[10px] mt-1">所有統計計算都在瀏覽器本地執行，交易紀錄不經過任何伺服器，也不會被儲存。</p>
             </div>
 
@@ -197,12 +197,12 @@ export default function HealthCheckPage() {
                 if (f) handleFile(f);
               }}
               onClick={() => fileInputRef.current?.click()}
-              className={`rounded-2xl border-2 border-dashed p-8 text-center cursor-pointer transition-colors ${
+              className={`rounded-md border-2 border-dashed p-8 text-center cursor-pointer transition-colors ${
                 dragOver ? 'border-[#2DD4BF] bg-[#2DD4BF]/5' : 'border-[#1B222B] bg-[#0F141A]'
               }`}
             >
-              <p className="text-4xl mb-2">📂</p>
-              <p className="text-[#E8ECF1] font-bold text-sm">拖放或點擊上傳交易紀錄</p>
+              <p className="text-[#3A424E] text-2xl mb-2 num">[ ↓ ]</p>
+              <p className="text-[#E8ECF1] text-sm font-medium">拖放或點擊上傳交易紀錄</p>
               <p className="text-[#565E6B] text-xs mt-1">支援 CSV / JSON ｜ 中英欄名自動辨識（券商/交易所匯出檔可直接用）</p>
               <input
                 ref={fileInputRef}
@@ -214,29 +214,29 @@ export default function HealthCheckPage() {
             </div>
 
             {errorMsg && (
-              <div className="px-3 py-2.5 bg-red-500/10 border border-red-500/30 rounded-2xl">
-                <p className="text-red-400 text-xs whitespace-pre-wrap">{errorMsg}</p>
+              <div className="px-3 py-2.5 border border-[#F6465D]/30 rounded-md">
+                <p className="text-[#F6465D] text-xs whitespace-pre-wrap">{errorMsg}</p>
               </div>
             )}
 
             <div>
-              <p className="text-[#3A424E] text-[10px] uppercase font-bold tracking-widest mb-2">或載入範例資料看效果</p>
+              <p className="tlabel mb-2">或載入範例資料看效果</p>
               <div className="space-y-2">
                 {EXAMPLE_FILES.map(ex => (
                   <button
                     key={ex.key}
                     onClick={() => loadExample(ex.key)}
-                    className="w-full text-left bg-[#0F141A] border border-[#1B222B] rounded-2xl px-4 py-3 active:opacity-70"
+                    className="w-full text-left bg-[#0F141A] border border-[#1B222B] rounded-md px-4 py-3 active:opacity-70"
                   >
-                    <p className="text-[#E8ECF1] text-sm font-bold">{ex.label}</p>
+                    <p className="text-[#E8ECF1] text-sm font-medium">{ex.label}</p>
                     <p className="text-[#565E6B] text-xs mt-0.5">{ex.description}</p>
                   </button>
                 ))}
               </div>
             </div>
 
-            <button onClick={downloadTemplate} className="w-full text-center text-xs text-[#565E6B] border border-[#1B222B] rounded-2xl py-2.5 active:opacity-70">
-              ⬇ 下載空白範本 CSV（照格式填好再上傳）
+            <button onClick={downloadTemplate} className="w-full text-center text-xs text-[#565E6B] border border-[#1B222B] rounded-md py-2.5 active:opacity-70">
+              下載空白範本 CSV（照格式填好再上傳）
             </button>
           </>
         )}
@@ -244,11 +244,11 @@ export default function HealthCheckPage() {
         {/* ══ 手動欄位對應 ══ */}
         {step === 'mapping' && (
           <>
-            <div className="px-3 py-2.5 bg-orange-500/10 border border-orange-500/30 rounded-2xl">
-              <p className="text-orange-400 text-xs font-semibold">無法自動辨識部分欄位 — 請手動指定對應</p>
+            <div className="px-3 py-2.5 border border-[#C99A2E]/30 rounded-md">
+              <p className="text-[#C99A2E] text-xs">無法自動辨識部分欄位 — 請手動指定對應</p>
               <p className="text-[#565E6B] text-[10px] mt-1">損益可由「pnl」或「進場價+出場價+數量」擇一算出；至少要讓其中一組齊全。</p>
             </div>
-            <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-4 space-y-3">
+            <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-4 space-y-3">
               {STANDARD_FIELDS.map(std => (
                 <div key={std} className="flex items-center gap-3">
                   <span className="text-[#8A94A2] text-xs w-32 shrink-0">{FIELD_LABELS[std] ?? std}</span>
@@ -262,7 +262,7 @@ export default function HealthCheckPage() {
                         return next;
                       });
                     }}
-                    className="flex-1 bg-[#141A21] border border-[#1B222B] rounded-xl px-2 py-1.5 text-xs text-[#E8ECF1] outline-none"
+                    className="flex-1 bg-[#141A21] border border-[#1B222B] rounded px-2 py-1.5 text-xs text-[#E8ECF1] outline-none"
                   >
                     <option value="">（自動 / 不使用）</option>
                     {mappingColumns.map(c => <option key={c} value={c}>{c}</option>)}
@@ -273,34 +273,34 @@ export default function HealthCheckPage() {
             <div className="flex gap-2">
               <button
                 onClick={() => tryParse(fileText, format, fileName, usedEncoding, overrides)}
-                className="flex-1 py-2.5 rounded-2xl bg-[#2DD4BF] text-[#0A0D11] text-sm font-bold active:opacity-80"
+                className="flex-1 py-2.5 rounded btn-primary text-sm active:opacity-80"
               >
                 套用並重新解析
               </button>
-              <button onClick={reset} className="px-4 py-2.5 rounded-2xl bg-[#141A21] text-[#565E6B] text-sm">取消</button>
+              <button onClick={reset} className="px-4 py-2.5 rounded bg-[#141A21] text-[#565E6B] text-sm">取消</button>
             </div>
-            {errorMsg && <p className="text-red-400 text-xs whitespace-pre-wrap">{errorMsg}</p>}
+            {errorMsg && <p className="text-[#F6465D] text-xs whitespace-pre-wrap">{errorMsg}</p>}
           </>
         )}
 
         {/* ══ 預覽確認 ══ */}
         {step === 'preview' && ingest && (
           <>
-            <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-4">
+            <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-4">
               <div className="flex items-center justify-between mb-1.5">
-                <p className="text-[#E8ECF1] text-sm font-bold truncate">{fileName}</p>
+                <p className="text-[#E8ECF1] text-sm font-medium truncate">{fileName}</p>
                 <span className="text-[#565E6B] text-xs shrink-0">{marketsInLog.map(mk => MARKET_LABEL[mk]).join('、')}</span>
               </div>
-              <p className="text-xs">
-                <span className="text-green-400 font-bold">{ingest.validCount} 筆有效</span>
-                {ingest.skipped > 0 && <span className="text-red-400 font-bold"> ・略過 {ingest.skipped} 筆</span>}
+              <p className="text-xs num">
+                <span className="text-[#0ECB81]">{ingest.validCount} 筆有效</span>
+                {ingest.skipped > 0 && <span className="text-[#F6465D]"> ・略過 {ingest.skipped} 筆</span>}
               </p>
               {ingest.warnings.map((w, i) => (
-                <p key={i} className="text-orange-400/80 text-[10px] mt-1">⚠ {w}</p>
+                <p key={i} className="text-[#C99A2E]/80 text-[10px] mt-1">{w}</p>
               ))}
               {ingest.skipReasons.length > 0 && (
-                <div className="mt-2 bg-[#0A0D11] rounded-xl px-3 py-2">
-                  <p className="text-[#565E6B] text-[10px] font-semibold mb-1">略過原因：</p>
+                <div className="mt-2 bg-[#0A0D11] rounded px-3 py-2">
+                  <p className="text-[#565E6B] text-[10px] mb-1">略過原因：</p>
                   {ingest.skipReasons.map((r, i) => (
                     <p key={i} className="text-[#565E6B] text-[10px]">• {r}</p>
                   ))}
@@ -309,24 +309,24 @@ export default function HealthCheckPage() {
             </div>
 
             {/* 預覽表格（前 8 筆） */}
-            <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-3 overflow-x-auto">
+            <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-3 overflow-x-auto">
               <table className="w-full text-[10px]">
                 <thead>
                   <tr className="text-[#3A424E] text-left">
-                    <th className="py-1 pr-2 font-semibold">代號</th>
-                    <th className="py-1 pr-2 font-semibold">方向</th>
-                    <th className="py-1 pr-2 font-semibold">出場日</th>
-                    <th className="py-1 pr-2 font-semibold text-right">損益</th>
-                    <th className="py-1 font-semibold">策略</th>
+                    <th className="py-1 pr-2 font-normal">代號</th>
+                    <th className="py-1 pr-2 font-normal">方向</th>
+                    <th className="py-1 pr-2 font-normal">出場日</th>
+                    <th className="py-1 pr-2 font-normal text-right">損益</th>
+                    <th className="py-1 font-normal">策略</th>
                   </tr>
                 </thead>
                 <tbody>
                   {ingest.log.trades.slice(0, 8).map((t, i) => (
                     <tr key={i} className="border-t border-[#1B222B]/50">
-                      <td className="py-1 pr-2 text-[#E8ECF1] font-semibold">{t.symbol}</td>
-                      <td className={`py-1 pr-2 ${t.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>{t.side === 'long' ? '多' : '空'}</td>
+                      <td className="py-1 pr-2 text-[#E8ECF1] num">{t.symbol}</td>
+                      <td className={`py-1 pr-2 ${t.side === 'long' ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>{t.side === 'long' ? '多' : '空'}</td>
                       <td className="py-1 pr-2 text-[#565E6B]">{t.exitTime.toLocaleDateString('zh-TW')}</td>
-                      <td className={`py-1 pr-2 text-right font-bold ${t.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{signed(t.pnl, 1)}</td>
+                      <td className={`py-1 pr-2 text-right num ${t.pnl >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>{signed(t.pnl, 1)}</td>
                       <td className="py-1 text-[#565E6B]">{t.tag ?? '—'}</td>
                     </tr>
                   ))}
@@ -338,8 +338,8 @@ export default function HealthCheckPage() {
             </div>
 
             {costWarnings.length > 0 && (
-              <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl px-3 py-2.5">
-                <p className="text-[#565E6B] text-[10px] font-bold mb-1">成本模型未涵蓋（誠實揭露）：</p>
+              <div className="bg-[#0F141A] border border-[#1B222B] rounded-md px-3 py-2.5">
+                <p className="text-[#565E6B] text-[10px] mb-1">成本模型未涵蓋（誠實揭露）：</p>
                 {costWarnings.map((w, i) => (
                   <p key={i} className="text-[#565E6B] text-[10px] leading-4 mb-1">• {w}</p>
                 ))}
@@ -347,16 +347,16 @@ export default function HealthCheckPage() {
             )}
 
             <div className="flex gap-2">
-              <button onClick={runAnalysis} className="flex-1 py-3 rounded-2xl bg-[#2DD4BF] text-[#0A0D11] text-sm font-extrabold active:opacity-80">
-                開始統計體檢 →
+              <button onClick={runAnalysis} className="flex-1 py-3 rounded btn-primary text-sm active:opacity-80">
+                開始統計體檢 ▸
               </button>
               <button
                 onClick={() => { setMappingColumns(ingest.columns); setStep('mapping'); }}
-                className="px-4 py-3 rounded-2xl bg-[#141A21] text-[#565E6B] text-xs"
+                className="px-4 py-3 rounded bg-[#141A21] text-[#565E6B] text-xs"
               >
                 調整欄位
               </button>
-              <button onClick={reset} className="px-4 py-3 rounded-2xl bg-[#141A21] text-[#565E6B] text-xs">取消</button>
+              <button onClick={reset} className="px-4 py-3 rounded bg-[#141A21] text-[#565E6B] text-xs">取消</button>
             </div>
           </>
         )}
@@ -378,17 +378,17 @@ export default function HealthCheckPage() {
           return (
             <>
               {/* 1. 裁決橫幅 */}
-              <div className={`rounded-2xl border p-4 ${st.bg} ${st.border}`}>
-                <p className={`text-2xl font-extrabold ${st.text}`}>{LEVEL_BADGE[v.level]}</p>
-                <p className="text-[#E8ECF1] text-sm font-bold mt-2 leading-6">{v.headline}</p>
+              <div className={`rounded-md border p-4 ${st.border}`}>
+                <p className={`text-xl font-medium ${st.text}`}>{LEVEL_BADGE[v.level]}</p>
+                <p className="text-[#E8ECF1] text-sm font-medium mt-2 leading-6">{v.headline}</p>
                 {v.reasons.map((r, i) => (
                   <p key={i} className="text-[#8A94A2] text-xs mt-2 leading-5">{r}</p>
                 ))}
                 {v.advice.length > 0 && (
-                  <div className="mt-3 bg-[#0A0D11]/60 rounded-xl px-3 py-2.5">
-                    <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-1.5">給你的建議</p>
+                  <div className="mt-3 bg-[#0A0D11]/60 rounded px-3 py-2.5">
+                    <p className="tlabel mb-1.5">給你的建議</p>
                     {v.advice.map((a, i) => (
-                      <p key={i} className="text-[#8A94A2] text-xs leading-5 mb-1">→ {a}</p>
+                      <p key={i} className="text-[#8A94A2] text-xs leading-5 mb-1">▸ {a}</p>
                     ))}
                   </div>
                 )}
@@ -416,32 +416,32 @@ export default function HealthCheckPage() {
               </div>
 
               {/* 3. 統計檢定區 */}
-              <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-4">
-                <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-2">顯著性檢定 — 這是本事還是運氣？</p>
+              <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-4">
+                <p className="tlabel mb-2">顯著性檢定 — 這是本事還是運氣？</p>
                 <div className="grid grid-cols-2 gap-1.5 mb-2">
-                  <div className="bg-[#0A0D11] rounded-xl p-2.5 text-center">
+                  <div className="bg-[#0A0D11] rounded p-2.5 text-center">
                     <p className="text-[#3A424E] text-[9px]">t 檢定 p 值</p>
-                    <p className={`text-sm font-bold ${sig.pValueT < 0.05 ? 'text-green-400' : 'text-red-400'}`}>{sig.pValueT.toFixed(4)}</p>
+                    <p className={`text-sm num ${sig.pValueT < 0.05 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>{sig.pValueT.toFixed(4)}</p>
                   </div>
-                  <div className="bg-[#0A0D11] rounded-xl p-2.5 text-center">
+                  <div className="bg-[#0A0D11] rounded p-2.5 text-center">
                     <p className="text-[#3A424E] text-[9px]">Bootstrap p 值（5000 次）</p>
-                    <p className={`text-sm font-bold ${sig.pValueBootstrap < 0.05 ? 'text-green-400' : 'text-red-400'}`}>{sig.pValueBootstrap.toFixed(4)}</p>
+                    <p className={`text-sm num ${sig.pValueBootstrap < 0.05 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>{sig.pValueBootstrap.toFixed(4)}</p>
                   </div>
                 </div>
                 <p className="text-[#565E6B] text-[10px]">
                   平均每筆 {signed(sig.mean)}，95% 信賴區間 [{sig.ciLow.toFixed(2)}, {sig.ciHigh.toFixed(2)}]
-                  ・雙檢定 {sig.isSignificant ? <span className="text-green-400 font-bold">皆顯著</span> : <span className="text-red-400 font-bold">未達顯著（p 需 &lt; 0.05）</span>}
+                  ・雙檢定 {sig.isSignificant ? <span className="text-[#0ECB81]">皆顯著</span> : <span className="text-[#F6465D]">未達顯著（p 需 &lt; 0.05）</span>}
                 </p>
 
                 {/* 樣本外驗證 */}
                 <div className="mt-3 pt-3 border-t border-[#1B222B]">
-                  <p className="text-[#E8ECF1] text-xs font-bold mb-2">{oos.headline}</p>
+                  <p className="text-[#E8ECF1] text-xs font-medium mb-2">{oos.headline}</p>
                   {oos.inSample.nTrades > 0 && oos.inSample.label !== '樣本不足' && (
                     <div className="grid grid-cols-2 gap-1.5 mb-2">
                       {[oos.inSample, oos.outSample].map((seg, i) => (
-                        <div key={i} className="bg-[#0A0D11] rounded-xl p-2.5">
+                        <div key={i} className="bg-[#0A0D11] rounded p-2.5">
                           <p className="text-[#3A424E] text-[9px] mb-1">{seg.label}（{seg.nTrades} 筆）</p>
-                          <p className={`text-xs font-bold ${seg.expectancy >= 0 ? 'text-green-400' : 'text-red-400'}`}>期望值 {signed(seg.expectancy)}</p>
+                          <p className={`text-xs num ${seg.expectancy >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>期望值 {signed(seg.expectancy)}</p>
                           <p className="text-[#565E6B] text-[10px]">勝率 {pct1(seg.winRate)}・p={seg.significance.pValueBootstrap.toFixed(3)}</p>
                         </div>
                       ))}
@@ -455,15 +455,15 @@ export default function HealthCheckPage() {
 
               {/* 4. 賭博警訊清單 */}
               {v.redFlags.length > 0 && (
-                <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-4">
-                  <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-2">🚩 賭博警訊（{v.redFlags.length}）</p>
+                <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-4">
+                  <p className="tlabel mb-2">賭博警訊（{v.redFlags.length}）</p>
                   <div className="space-y-2">
                     {v.redFlags.map((f, i) => (
                       <div key={i} className="flex gap-2">
-                        <span className={`shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-full h-fit ${
-                          f.severity === 'high' ? 'bg-red-500/20 text-red-400'
-                          : f.severity === 'medium' ? 'bg-orange-500/20 text-orange-400'
-                          : 'bg-[#141A21] text-[#565E6B]'
+                        <span className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded h-fit border ${
+                          f.severity === 'high' ? 'border-[#F6465D]/40 text-[#F6465D]'
+                          : f.severity === 'medium' ? 'border-[#C99A2E]/40 text-[#C99A2E]'
+                          : 'border-[#1B222B] text-[#565E6B]'
                         }`}>
                           {f.severity === 'high' ? '高' : f.severity === 'medium' ? '中' : '低'}
                         </span>
@@ -476,18 +476,18 @@ export default function HealthCheckPage() {
 
               {/* 5. 逐策略體檢 */}
               {result.tagVerdicts.length > 0 && (
-                <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-4">
-                  <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-1">逐策略體檢（最該砍的排最前）</p>
+                <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-4">
+                  <p className="tlabel mb-1">逐策略體檢（最該砍的排最前）</p>
                   <p className="text-[#3A424E] text-[9px] mb-2">刻意只列描述統計、不發「優勢認證」— 多標籤各自檢定會把運氣認成優勢（多重比較問題）</p>
                   <div className="space-y-1.5">
                     {result.tagVerdicts.map(tv => (
-                      <div key={tv.tag} className="flex items-center gap-2 bg-[#0A0D11] rounded-xl px-3 py-2">
+                      <div key={tv.tag} className="flex items-center gap-2 bg-[#0A0D11] rounded px-3 py-2">
                         <div className="flex-1 min-w-0">
-                          <p className="text-[#E8ECF1] text-xs font-bold truncate">{tv.tag}</p>
+                          <p className="text-[#E8ECF1] text-xs font-medium truncate">{tv.tag}</p>
                           <p className="text-[#565E6B] text-[10px]">{tv.nTrades} 筆・勝率 {pct1(tv.winRate)}</p>
                         </div>
                         <div className="text-right shrink-0">
-                          <p className={`text-xs font-bold ${tv.isLosing ? 'text-red-400' : 'text-green-400'}`}>{signed(tv.expectancy)}/筆</p>
+                          <p className={`text-xs num ${tv.isLosing ? 'text-[#F6465D]' : 'text-[#0ECB81]'}`}>{signed(tv.expectancy)}/筆</p>
                           <p className="text-[#565E6B] text-[10px]">{tagDescriptor(tv)}</p>
                         </div>
                       </div>
@@ -498,14 +498,14 @@ export default function HealthCheckPage() {
 
               {/* 跟單/聽明牌抽算 */}
               {result.followGuru && (
-                <div className="bg-[#0F141A] border border-orange-500/30 rounded-2xl p-4">
-                  <p className="text-orange-400 text-[10px] font-bold uppercase tracking-widest mb-2">📢 跟單 / 聽明牌成績單</p>
-                  <div className="flex gap-3 mb-2">
+                <div className="bg-[#0F141A] border border-[#C99A2E]/30 rounded-md p-4">
+                  <p className="tlabel text-[#C99A2E] mb-2">跟單 / 聽明牌成績單</p>
+                  <div className="flex gap-3 mb-2 num">
                     <span className="text-[#E8ECF1] text-xs">{result.followGuru.nTrades} 筆</span>
-                    <span className={`text-xs font-bold ${result.followGuru.expectancy < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    <span className={`text-xs ${result.followGuru.expectancy < 0 ? 'text-[#F6465D]' : 'text-[#0ECB81]'}`}>
                       每筆 {signed(result.followGuru.expectancy)}
                     </span>
-                    <span className={`text-xs font-bold ${result.followGuru.totalPnl < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    <span className={`text-xs ${result.followGuru.totalPnl < 0 ? 'text-[#F6465D]' : 'text-[#0ECB81]'}`}>
                       合計 {signed(result.followGuru.totalPnl)}
                     </span>
                   </div>
@@ -515,16 +515,16 @@ export default function HealthCheckPage() {
 
               {/* 6. 反事實 + 轉正數字 */}
               {result.counterfactual && (
-                <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-4">
-                  <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-2">🔀 反事實：如果停掉最差的「{result.counterfactual.worstTag}」</p>
+                <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-4">
+                  <p className="tlabel mb-2">反事實：如果停掉最差的「{result.counterfactual.worstTag}」</p>
                   <div className="grid grid-cols-2 gap-1.5 mb-2">
-                    <div className="bg-[#0A0D11] rounded-xl p-2.5 text-center">
+                    <div className="bg-[#0A0D11] rounded p-2.5 text-center">
                       <p className="text-[#3A424E] text-[9px]">目前每筆期望值</p>
-                      <p className={`text-sm font-bold ${result.counterfactual.beforeExpectancy >= 0 ? 'text-green-400' : 'text-red-400'}`}>{signed(result.counterfactual.beforeExpectancy)}</p>
+                      <p className={`text-sm num ${result.counterfactual.beforeExpectancy >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>{signed(result.counterfactual.beforeExpectancy)}</p>
                     </div>
-                    <div className="bg-[#0A0D11] rounded-xl p-2.5 text-center">
+                    <div className="bg-[#0A0D11] rounded p-2.5 text-center">
                       <p className="text-[#3A424E] text-[9px]">停掉後</p>
-                      <p className={`text-sm font-bold ${result.counterfactual.afterExpectancy >= 0 ? 'text-green-400' : 'text-red-400'}`}>{signed(result.counterfactual.afterExpectancy)}</p>
+                      <p className={`text-sm num ${result.counterfactual.afterExpectancy >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>{signed(result.counterfactual.afterExpectancy)}</p>
                     </div>
                   </div>
                   <p className="text-[#565E6B] text-[10px] leading-4">{result.counterfactual.message}</p>
@@ -532,8 +532,8 @@ export default function HealthCheckPage() {
               )}
 
               {result.breakeven.messages.length > 0 && (
-                <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-4">
-                  <p className="text-[#565E6B] text-[10px] font-bold uppercase tracking-widest mb-2">🎯 轉正數字 — 具體要改善到哪裡</p>
+                <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-4">
+                  <p className="tlabel mb-2">轉正數字 — 具體要改善到哪裡</p>
                   {result.breakeven.messages.map((msg, i) => (
                     <p key={i} className="text-[#8A94A2] text-xs leading-5 mb-1.5">• {msg}</p>
                   ))}
@@ -541,21 +541,21 @@ export default function HealthCheckPage() {
               )}
 
               {/* 免責聲明 + attribution */}
-              <div className="px-3 py-3 bg-[#0D0D16] border border-[#1B222B] rounded-2xl">
+              <div className="px-3 py-3 bg-[#0D0D16] border border-[#1B222B] rounded-md">
                 <p className="text-[#565E6B] text-[10px] leading-4">
-                  ⚠️ 本工具為統計分析與教育用途，不構成投資建議。統計結論受樣本品質影響，
+                  本工具為統計分析與教育用途，不構成投資建議。統計結論受樣本品質影響，
                   「具統計優勢」也不保證未來獲利；合約與槓桿交易可能導致全部本金損失。
                 </p>
                 <p className="text-[#3A424E] text-[10px] mt-2">
                   統計引擎移植自{' '}
-                  <a href="https://github.com/mars-tw/anti-gambling-trader-tw" target="_blank" rel="noopener noreferrer" className="text-blue-400 underline">
+                  <a href="https://github.com/mars-tw/anti-gambling-trader-tw" target="_blank" rel="noopener noreferrer" className="text-[#2DD4BF] underline">
                     anti-gambling-trader-tw
                   </a>
                   （MIT License）・計算全程在你的瀏覽器本地執行
                 </p>
               </div>
 
-              <button onClick={reset} className="w-full py-3 rounded-2xl bg-[#141A21] border border-[#1B222B] text-[#8A94A2] text-sm font-bold active:opacity-70">
+              <button onClick={reset} className="w-full py-3 rounded bg-[#141A21] border border-[#1B222B] text-[#8A94A2] text-sm active:opacity-70">
                 ↺ 分析另一份紀錄
               </button>
             </>
@@ -568,9 +568,9 @@ export default function HealthCheckPage() {
 
 function MetricCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
-    <div className="bg-[#0F141A] border border-[#1B222B] rounded-2xl p-2.5 text-center">
+    <div className="bg-[#0F141A] border border-[#1B222B] rounded-md p-2.5 text-center">
       <p className="text-[#3A424E] text-[9px] mb-0.5">{label}</p>
-      <p className="text-sm font-extrabold" style={{ color: color ?? '#E8ECF1' }}>{value}</p>
+      <p className="text-sm num font-medium" style={{ color: color ?? '#E8ECF1' }}>{value}</p>
       {sub && <p className="text-[#3A424E] text-[8px] mt-0.5">{sub}</p>}
     </div>
   );

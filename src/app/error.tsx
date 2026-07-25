@@ -14,14 +14,14 @@ export default function GlobalError({
 
   return (
     <div className="min-h-dvh bg-[#0A0D11] flex flex-col items-center justify-center px-8 text-center gap-6">
-      <div className="text-5xl">⚠️</div>
+      <div className="text-[#3A424E] text-2xl num">[ ! ]</div>
       <div>
-        <h2 className="text-[#E8ECF1] text-lg font-bold mb-2">發生錯誤</h2>
+        <h2 className="text-[#E8ECF1] text-lg font-medium mb-2">發生錯誤</h2>
         <p className="text-[#565E6B] text-sm">{error.message || '頁面載入失敗，請重試'}</p>
       </div>
       <button
         onClick={reset}
-        className="btn-primary px-8 py-3 rounded-2xl"
+        className="btn-primary px-8 py-3 rounded"
       >
         重新載入
       </button>
