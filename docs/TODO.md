@@ -113,8 +113,30 @@ Vercel Hobby 的 log 只留約 50 分鐘，事後查不到。
 
 # 自動化交易（Binance API）— 獨立專案
 
-> 討論於 2026-07-26。**尚未開始，也還沒決定執行引擎放哪**。
-> 現況：`src/api/binance.ts` 只有公開 API，**零認證基礎**。
+> 討論於 2026-07-26。**執行引擎放哪還沒決定**（見下方決策點）。
+> **第一批安全基礎設施已完成**（commit `580e2ad`，2026-07-26）——見 §進度。
+
+## 進度
+
+`src/engine/` 已建好，**尚未接上任何真實下單流程，也沒有任何地方呼叫這些模組**。
+選這批先做是因為機器放哪都用得到，不用等決策點定案：
+
+| 檔案 | 內容 | 測試 |
+|---|---|---|
+| `precision.ts` | stepSize/tickSize/minNotional 處理 | 12 |
+| `preTradeCheck.ts` | 下單前置檢查（強平緩衝/保證金/精度/權益地板/kill switch/當日虧損） | 15 |
+| `binanceClient.ts` | HMAC-SHA256 簽名 client（讀+寫端點都有，寫的還沒被呼叫過） | 8 |
+| `killSwitch.ts` | Redis flag + 自動觸發判斷（純函數） | 6 |
+| `watchdog.ts` | 持倉/掛單對帳（抓裸倉、孤兒單） | 9 |
+
+**還沒做、真錢上線前必做**：
+- watchdog 的輪詢迴圈本體（reconcile 邏輯有了，包成常駐 loop 還沒寫）
+- kill switch 觸發後的實際 flatten 動作（現在只設 flag，沒有一鍵撤單平倉）
+- testnet 對帳
+- 部分成交、取消/成交競態的處理（見下方「掛單過期功能會怎樣」）
+- `goodTillDate` 提前量在 testnet 實測
+- leverageBracket 查詢接上（`preTradeCheck` 現在吃固定 `maintenanceMarginRate` 參數，
+  還沒接上真實的分級查詢）
 
 ## 決策點（未定）
 
@@ -122,8 +144,9 @@ Vercel Hobby 的 log 只留約 50 分鐘，事後查不到。
 
 | 選項 | 靜態 IP | 持久連線 | 成本 |
 |---|---|---|---|
-| VPS / Fly.io / Railway（推薦） | ✓ | ✓ | ~$5/月 |
-| 自己的電腦 | ✓ | ✓ | 0（要一直開機） |
+| **Oracle Cloud Always Free 東京**（推薦） | ✓ | ✓ | $0 |
+| Vultr / Linode 東京 | ✓ | ✓ | ~$5/月 |
+| 自己的電腦 | ⚠️ 家用IP通常會變 | ✓ | 0（要一直開機） |
 | 硬留 Vercel | ✗ | ✗ | 0（不推薦） |
 
 **Vercel 不能用的三個理由**：
@@ -131,11 +154,15 @@ Vercel Hobby 的 log 只留約 50 分鐘，事後查不到。
 2. serverless 可能在下單序列中途被殺 → 進場成交但止損沒送出 = 裸倉
 3. 移動止損需要持續改單，5 分鐘 cron 粒度太粗；user data stream 需要持久連線
 
+**watchdog 不該跟引擎放同一台** — 同機掛掉兩個一起死，沒人知道出事。
+建議引擎+watchdog 放 VPS，Vercel cron 當死人開關（每 5 分鐘打 VPS `/health`，
+打不通就推播告警）。Binance API 主要在東京，選近的機房縮小撤單/改單的競態窗口。
+
 ## 上線順序（不要跳）
 
-1. **先做「怎麼停下來」** — kill switch + watchdog（不是先做下單）
-2. 前置檢查做成純函數 + 測試
-3. testnet（`testnet.binancefuture.com`）跑到對帳零誤差
+1. ~~先做「怎麼停下來」~~ ✅ kill switch + watchdog 核心邏輯已完成（純函數部分）
+2. ~~前置檢查做成純函數 + 測試~~ ✅ 已完成
+3. testnet（`testnet.binancefuture.com`）跑到對帳零誤差 ← **下一步**
 4. 真帳戶 dry-run：算出訂單參數但不送，log 出來跟手動下單比對一週
 5. 真錢最小規模（名目 5-10 USDT），每天對帳，跑一週
 6. 對帳零誤差才放大到策略原本的倉位
