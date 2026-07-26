@@ -7,6 +7,7 @@ import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
+import { clampAutoCloseAfterTp1 } from '@/lib/monitorMath';
 
 export const maxDuration = 60;
 
@@ -40,6 +41,7 @@ function tfBarMinutes(tf: string | null | undefined): number {
     default:    return 60;
   }
 }
+
 
 // Per-strategy threshold: Strategy B uses a 0-19 scoring scale; Strategy A uses 0-100.
 // v2.1 §1.5: tiered Strategy-A signals (A=65+/B=55+) are pre-gated inside
@@ -518,6 +520,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
     let trailingStop        = savedTrailingStop > 0 ? savedTrailingStop : 0;
     let trailingStopUpdated = false;
     let hitTrailingStop     = false;  // post-TP1 trailing exit (WIN_TP1)
+    let autoClosedAfterTp1  = false;  // 24h/72h/168h timeout fired after TP1 (floor-clamped)
     const riskDist          = Math.abs((trade.entry as number) - (trade.stop_loss as number));
 
     // Simple 14-period ATR from 1H candles — used to set/ratchet trailing stop.
@@ -759,7 +762,12 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
     if (!closeResult && ageHours >= autoCloseHours && lastClose !== null) {
       closeResult = localTp1Hit ? 'WIN_TP1' : 'MANUAL_CLOSE';
-      closePrice  = lastClose;
+      if (localTp1Hit) {
+        closePrice = clampAutoCloseAfterTp1(lastClose, trailingStop, trade.entry as number, isLong);
+        autoClosedAfterTp1 = true;
+      } else {
+        closePrice = lastClose;
+      }
     }
 
     if (!closeResult) {
@@ -857,7 +865,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         pushTitle  = `⏱ 到期平倉 ${sym}`;
       } else {
         const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
-                    : closeResult === 'WIN_TP1' ? (hitTrailingStop ? '🔒 移動止損出場（TP1 已達標）' : localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
+                    : closeResult === 'WIN_TP1' ? (hitTrailingStop ? '🔒 移動止損出場（TP1 已達標）' : autoClosedAfterTp1 ? '⏱ 到期平倉（TP1 已達標，保本以上）' : localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
                     : '❌ 止損出場';
         closeMsg  = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle = `${label} ${sym}`;
