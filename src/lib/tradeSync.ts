@@ -145,8 +145,7 @@ export function resolveStatus(input: StatusResolveInput): StatusResolveResult {
   return { status: localStatus, confirmed: true };
 }
 
-// 「同步中」：尚未拿到任何權威 status 來源的開放單（非使用者手動建立 ——
-// 手動單本來就沒有等待進場階段，addManualTrade 建立時就標 confirmed=true）。
+// 「同步中」：剛從訊號建立、尚未拿到任何權威 status 來源的開放單。
 // 不能顯示成「持倉中」，也不能被靜默丟掉不顯示。
 export function isUnconfirmedSync(
   t: Pick<TradeRecord, 'result' | 'status' | 'statusConfirmed'>,

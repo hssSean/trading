@@ -171,10 +171,10 @@ export async function loadFromSupabase(userId: string) {
     // historical records and must never be dropped just because a query didn't
     // return them (DB may have pruned old data, or the trade was closed offline).
     // Only open trades (result IS NULL) are held to the DB-authoritative standard.
-    // GRACE PERIOD: a just-created manual/local trade (addManualTrade writes
-    // locally, then a debounced 4s save uploads it) isn't in DB yet — purging it
-    // on a sync that races the save would delete it. Keep open trades younger
-    // than 2 min so the upload has time to land.
+    // GRACE PERIOD: a just-created local trade (addTrade writes locally, then a
+    // debounced 4s save uploads it) isn't in DB yet — purging it on a sync that
+    // races the save would delete it. Keep open trades younger than 2 min so the
+    // upload has time to land.
     const SYNC_GRACE_MS = 120_000;
     const nowTs = Date.now();
     useStore.setState(s => ({

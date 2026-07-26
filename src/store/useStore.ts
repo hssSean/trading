@@ -76,7 +76,6 @@ interface StoreState {
   updateTrade: (id: string, patch: Partial<Pick<TradeRecord, 'entryNotes' | 'entry'>>) => void;
   // Trade journal
   addTrade: (signal: TradingSignal) => void;
-  addManualTrade: (params: { symbol: string; direction: 'LONG' | 'SHORT'; entry: number; stopLoss: number; tp1: number; tp2: number; timeframe?: Timeframe; score?: number }) => void;
   closeTrade: (id: string, result: TradeResult, exitPrice: number) => void;
   // 伺服器同步用：TP1 達標但仍等 TP2（不關單，維持持倉中）
   markTp1Watching: (id: string, exitPrice: number, pnlPercent: number) => void;
@@ -216,34 +215,6 @@ export const useStore = create<StoreState>()(
           signalPrice: sp > 0 ? sp : undefined,
         };
         set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
-      },
-
-      addManualTrade: ({ symbol, direction, entry, stopLoss, tp1, tp2, timeframe = '1h', score = 0 }) => {
-        const existing = get().trades;
-        if (existing.some((t) => t.symbol === symbol && !t.result)) return;
-        const trade: TradeRecord = {
-          id: `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          signalId: `manual-${Date.now()}`,
-          symbol,
-          direction,
-          timeframe,
-          strength: 'STRONG',
-          score,
-          entry,
-          stopLoss,
-          tp1,
-          tp2,
-          reasons: ['手動建立'],
-          openedAt: Date.now(),
-          // 使用者宣告「已經是持倉」，沒有等待進場階段可言 —— 視為已確認，
-          // 避免被誤判成「未確認同步中」而顯示錯誤狀態。
-          status: 'active',
-          statusConfirmed: true,
-        };
-        set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
-        if (!get().coins.some((c) => c.symbol === symbol)) {
-          get().addCoin(symbol);
-        }
       },
 
       closeTrade: (id, result, exitPrice) => {
