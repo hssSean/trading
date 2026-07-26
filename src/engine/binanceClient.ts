@@ -1,0 +1,183 @@
+// Authenticated Binance Futures client. Unlike src/api/binance.ts (public market
+// data, no auth), everything here signs requests with the account's API secret
+// and can move real money. Read this whole file before wiring it into anything
+// that runs unattended — see docs/TODO.md 自動化交易 section for the deployment
+// prerequisites (isolated margin, kill switch, watchdog) this assumes exist.
+//
+// Credentials come from env vars only (BINANCE_API_KEY / BINANCE_API_SECRET or
+// their _TESTNET variants) — never hardcode, never log the secret or a full
+// signed query string (the signature alone isn't sensitive, but query strings
+// can carry the key in some error paths).
+
+import { createHmac } from 'crypto';
+import axios, { AxiosInstance } from 'axios';
+
+export interface BinanceClientConfig {
+  apiKey: string;
+  apiSecret: string;
+  testnet: boolean;
+}
+
+export function loadBinanceConfigFromEnv(testnet: boolean): BinanceClientConfig {
+  const apiKey    = testnet ? process.env.BINANCE_TESTNET_API_KEY    : process.env.BINANCE_API_KEY;
+  const apiSecret = testnet ? process.env.BINANCE_TESTNET_API_SECRET : process.env.BINANCE_API_SECRET;
+  if (!apiKey || !apiSecret) {
+    throw new Error(
+      testnet
+        ? 'BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET not set'
+        : 'BINANCE_API_KEY / BINANCE_API_SECRET not set',
+    );
+  }
+  return { apiKey, apiSecret, testnet };
+}
+
+// Pure — signs a pre-built query string. Split out from the request methods so
+// the signing itself is unit-testable without any network mocking.
+export function signQuery(queryString: string, secret: string): string {
+  return createHmac('sha256', secret).update(queryString).digest('hex');
+}
+
+// Pure — builds the exact query string Binance expects (insertion order matters
+// for readability/debugging but NOT for the signature itself, since HMAC covers
+// the whole string as sent). Filters out undefined so optional params don't
+// serialize as "key=undefined".
+export function buildSignedQuery(
+  params: Record<string, string | number | boolean | undefined>,
+  secret: string,
+  timestamp: number,
+  recvWindow = 5000,
+): string {
+  const withMeta = { ...params, timestamp, recvWindow };
+  const qs = Object.entries(withMeta)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+    .join('&');
+  const signature = signQuery(qs, secret);
+  return `${qs}&signature=${signature}`;
+}
+
+export type OrderSide = 'BUY' | 'SELL';
+export type PositionSide = 'BOTH' | 'LONG' | 'SHORT'; // BOTH unless hedge mode is enabled
+
+export interface PlaceOrderParams {
+  symbol: string;
+  side: OrderSide;
+  type: 'LIMIT' | 'MARKET' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
+  quantity?: number;         // omit for closePosition orders
+  price?: number;            // LIMIT only
+  stopPrice?: number;        // STOP_MARKET / TAKE_PROFIT_MARKET
+  timeInForce?: 'GTC' | 'GTD' | 'IOC' | 'FOK';
+  goodTillDate?: number;     // required when timeInForce=GTD, ms epoch
+  closePosition?: boolean;   // true for SL/TP orders that flatten the whole position
+  reduceOnly?: boolean;
+  newClientOrderId?: string; // idempotency key — always set this from the caller
+}
+
+export interface PositionRisk {
+  symbol: string;
+  positionAmt: string;     // signed: positive = long, negative = short, "0" = flat
+  entryPrice: string;
+  liquidationPrice: string;
+  leverage: string;
+  marginType: 'isolated' | 'cross';
+  isolatedMargin: string;
+  unRealizedProfit: string;
+}
+
+export interface OpenOrder {
+  symbol: string;
+  orderId: number;
+  clientOrderId: string;
+  side: OrderSide;
+  type: string;
+  status: string;
+  origQty: string;
+  executedQty: string;
+  stopPrice: string;
+  closePosition: boolean;
+}
+
+export class BinanceFuturesClient {
+  private http: AxiosInstance;
+  private secret: string;
+
+  constructor(config: BinanceClientConfig) {
+    this.secret = config.apiSecret;
+    this.http = axios.create({
+      baseURL: config.testnet ? 'https://testnet.binancefuture.com/fapi' : 'https://fapi.binance.com/fapi',
+      timeout: 10_000,
+      headers: { 'X-MBX-APIKEY': config.apiKey },
+    });
+  }
+
+  private async signedRequest<T>(
+    method: 'GET' | 'POST' | 'DELETE',
+    path: string,
+    params: Record<string, string | number | boolean | undefined> = {},
+  ): Promise<T> {
+    const qs = buildSignedQuery(params, this.secret, Date.now());
+    const res = await this.http.request<T>({ method, url: `${path}?${qs}` });
+    return res.data;
+  }
+
+  // ── Read-only — safe to call freely, no money movement ──────────────────
+
+  async getBalance(): Promise<Array<{ asset: string; balance: string; availableBalance: string }>> {
+    return this.signedRequest('GET', '/v2/balance');
+  }
+
+  async getPositionRisk(symbol?: string): Promise<PositionRisk[]> {
+    return this.signedRequest('GET', '/v2/positionRisk', { symbol });
+  }
+
+  async getOpenOrders(symbol?: string): Promise<OpenOrder[]> {
+    return this.signedRequest('GET', '/v1/openOrders', { symbol });
+  }
+
+  async getExchangeInfo(): Promise<{ symbols: unknown[] }> {
+    // Public endpoint but routed through the same base URL (testnet has its own
+    // exchangeInfo with potentially different filters than mainnet).
+    const res = await this.http.get('/v1/exchangeInfo');
+    return res.data;
+  }
+
+  async getLeverageBrackets(symbol?: string): Promise<Array<{ symbol: string; brackets: Array<{ notionalCap: number; maintMarginRatio: number }> }>> {
+    return this.signedRequest('GET', '/v1/leverageBracket', { symbol });
+  }
+
+  // ── State-changing — every call here can move real money ────────────────
+
+  async setLeverage(symbol: string, leverage: number): Promise<{ leverage: number; symbol: string }> {
+    return this.signedRequest('POST', '/v1/leverage', { symbol, leverage });
+  }
+
+  // Binance rejects this with -4046 if there's an open position on the symbol —
+  // callers must set margin type BEFORE placing the first order, not after.
+  async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED'): Promise<{ code: number; msg: string }> {
+    return this.signedRequest('POST', '/v1/marginType', { symbol, marginType });
+  }
+
+  async placeOrder(params: PlaceOrderParams): Promise<{ orderId: number; clientOrderId: string; status: string }> {
+    return this.signedRequest('POST', '/v1/order', {
+      symbol: params.symbol,
+      side: params.side,
+      type: params.type,
+      quantity: params.quantity,
+      price: params.price,
+      stopPrice: params.stopPrice,
+      timeInForce: params.timeInForce,
+      goodTillDate: params.goodTillDate,
+      closePosition: params.closePosition,
+      reduceOnly: params.reduceOnly,
+      newClientOrderId: params.newClientOrderId,
+    });
+  }
+
+  async cancelOrder(symbol: string, orderId: number): Promise<{ orderId: number; status: string }> {
+    return this.signedRequest('DELETE', '/v1/order', { symbol, orderId });
+  }
+
+  async cancelAllOpenOrders(symbol: string): Promise<{ code: number; msg: string }> {
+    return this.signedRequest('DELETE', '/v1/allOpenOrders', { symbol });
+  }
+}
