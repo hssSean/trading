@@ -9,6 +9,7 @@ import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { computeIndicators } from '@/analysis/indicators';
 import { Candle, Timeframe, TradingSignal } from '@/types';
 import { loadFromSupabase } from '@/components/StoreHydration';
+import { isUnconfirmedSync } from '@/lib/tradeSync';
 
 const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
   '5m': '15m', '15m': '1h', '1h': '4h', '4h': '1d',
@@ -33,10 +34,13 @@ async function checkCoinPrice(symbol: string): Promise<boolean> {
       priceChangePercent24h: ticker.priceChangePercent,
     });
 
-    // Mark TP1 locally for active (non-waiting, non-tp1_hit) trades
+    // Mark TP1 locally for active (non-waiting, non-tp1_hit) trades. Excludes
+    // isUnconfirmedSync: an unconfirmed trade's real DB status may still be
+    // 'waiting' (limit order not yet filled) — status===undefined here is NOT
+    // proof of an active position, just an unresolved sync gap (see tradeSync.ts).
     const fresh = useStore.getState();
     const active = fresh.trades.filter(
-      t => t.symbol === symbol && !t.result && t.status !== 'waiting' && t.status !== 'tp1_hit'
+      t => t.symbol === symbol && !t.result && t.status !== 'waiting' && t.status !== 'tp1_hit' && !isUnconfirmedSync(t)
     );
     for (const trade of active) {
       const tp1Reached = trade.direction === 'LONG'

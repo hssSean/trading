@@ -180,6 +180,11 @@ export interface TradeRecord {
   exitPrice?: number;
   pnlPercent?: number;
   status?: 'waiting' | 'active' | 'tp1_hit'; // 'tp1_hit' = TP1 reached, monitoring for TP2
+  // true once `status` came from an authoritative source (server read, or a locally
+  // re-derived tp1_hit from readable result/closed_at) — false/undefined means it's an
+  // unconfirmed local guess that must never be displayed as a real position or allowed
+  // to out-rank a later server read. See tradeSync.ts resolveStatus.
+  statusConfirmed?: boolean;
   signalPrice?: number;           // market price when signal was generated
   tier?: 'A' | 'B';               // v2.1 signal tier (B = half-risk light position)
   scoreBreakdown?: ScoreBreakdown; // per-group contributions for attribution

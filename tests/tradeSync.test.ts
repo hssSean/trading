@@ -8,6 +8,8 @@ import {
   resolveServerOutcome,
   deriveTp1Status,
   isFinallyClosed,
+  resolveStatus,
+  isUnconfirmedSync,
   type ServerOutcome,
 } from '../src/lib/tradeSync';
 
@@ -98,6 +100,59 @@ describe('deriveTp1Status', () => {
   it('無 result → 用 fallback', () => {
     expect(deriveTp1Status(undefined, null, 'waiting')).toBe('waiting');
     expect(deriveTp1Status(null, null, 'active')).toBe('active');
+  });
+});
+
+describe('resolveStatus', () => {
+  it('THE BUG: 未確認的本地假 active + 伺服器真值 waiting → 必須採用伺服器值，不能讓假值贏', () => {
+    const r = resolveStatus({ localStatus: 'active', localConfirmed: false, serverStatus: 'waiting' });
+    expect(r.status).toBe('waiting');
+    expect(r.confirmed).toBe(true);
+  });
+
+  it('伺服器回應中根本沒有這筆單（undefined）→ 保留本地值不變', () => {
+    const r = resolveStatus({ localStatus: 'active', localConfirmed: false, serverStatus: undefined });
+    expect(r).toEqual({ status: 'active', confirmed: false });
+  });
+
+  it('伺服器回應此單但 status 欄位是 NULL → 沒有權威資訊，保留本地值不變（不可誤判成確認）', () => {
+    const r = resolveStatus({ localStatus: 'active', localConfirmed: false, serverStatus: null });
+    expect(r).toEqual({ status: 'active', confirmed: false });
+  });
+
+  it('已確認本地值 active + 伺服器仍回 waiting（DB 寫入延遲）→ 單向閂鎖，不倒退', () => {
+    const r = resolveStatus({ localStatus: 'active', localConfirmed: true, serverStatus: 'waiting' });
+    expect(r).toEqual({ status: 'active', confirmed: true });
+  });
+
+  it('已確認本地值 tp1_hit + 伺服器回 active（落後）→ 不倒退', () => {
+    const r = resolveStatus({ localStatus: 'tp1_hit', localConfirmed: true, serverStatus: 'active' });
+    expect(r).toEqual({ status: 'tp1_hit', confirmed: true });
+  });
+
+  it('已確認本地值 waiting + 伺服器回 active（真的成交了）→ 前進採用', () => {
+    const r = resolveStatus({ localStatus: 'waiting', localConfirmed: true, serverStatus: 'active' });
+    expect(r).toEqual({ status: 'active', confirmed: true });
+  });
+
+  it('未確認本地值 undefined + 伺服器回 waiting → 採用伺服器值並標記已確認', () => {
+    const r = resolveStatus({ localStatus: undefined, localConfirmed: false, serverStatus: 'waiting' });
+    expect(r).toEqual({ status: 'waiting', confirmed: true });
+  });
+});
+
+describe('isUnconfirmedSync', () => {
+  it('status undefined 且未確認、無 result → 同步中', () => {
+    expect(isUnconfirmedSync({ result: undefined, status: undefined, statusConfirmed: false })).toBe(true);
+  });
+  it('status undefined 但 statusConfirmed=true（手動單）→ 非同步中', () => {
+    expect(isUnconfirmedSync({ result: undefined, status: undefined, statusConfirmed: true })).toBe(false);
+  });
+  it('已有 status 值 → 非同步中，即使 statusConfirmed 未設', () => {
+    expect(isUnconfirmedSync({ result: undefined, status: 'waiting', statusConfirmed: false })).toBe(false);
+  });
+  it('已收到 result（已結束或 tp1-watching）→ 非同步中', () => {
+    expect(isUnconfirmedSync({ result: 'WIN_TP1', status: undefined, statusConfirmed: false })).toBe(false);
   });
 });
 

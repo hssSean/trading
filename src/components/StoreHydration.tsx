@@ -5,7 +5,7 @@ import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
 import { fetchCandles } from '@/api/binance';
 import { TradeRecord, TradeResult, TradingSignal } from '@/types';
-import { resolveServerOutcome, deriveTp1Status } from '@/lib/tradeSync';
+import { resolveServerOutcome, deriveTp1Status, resolveStatus } from '@/lib/tradeSync';
 
 // Tracks IDs deleted in this session so loadFromSupabase won't re-add them.
 // Module-level so it persists across re-renders and periodic syncs.
@@ -49,13 +49,17 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     result:      (r.result as TradeRecord['result']) ?? undefined,
     exitPrice:   (r.exit_price as number | null) ?? undefined,
     pnlPercent:  (r.pnl_percent as number | null) ?? undefined,
-    // status 欄位對 authenticated role 不可讀（會退回 'active'）；但 result=WIN_TP1 且
-    // 無 closed_at 唯一對應 tp1-watching，據此還原 status 才不會被誤判成「結束」。
+    // status 欄位對 authenticated role 不可讀，永遠是 undefined —— 這裡絕不能塞 'active'
+    // 頂替（曾經這樣做，被單向閂鎖誤認成「已確認成交」，伺服器後來查到的真值 'waiting'
+    // 永遠打不贏，推薦單一出現就顯示持倉中）。唯一例外：result=WIN_TP1 且無 closed_at
+    // 可從「可讀欄位」單獨推出 tp1_hit，這才算真正確認，其餘一律留 undefined 交給
+    // reconcileFromServer 用 service role 補上權威值。
     status:      deriveTp1Status(
                    (r.result as TradeRecord['result']) ?? undefined,
                    (r.closed_at as number | null) ?? undefined,
-                   ((r.status as string | null) as 'waiting' | 'active' | 'tp1_hit' | undefined) ?? 'active',
+                   undefined,
                  ),
+    statusConfirmed: (r.result as TradeRecord['result']) === 'WIN_TP1' && (r.closed_at as number | null) == null,
     signalPrice: (r.signal_price as number | null) ?? undefined,
     filledAt:    (r.filled_at as number | null) ?? undefined,
     tier:        ((r.tier as string | null) as 'A' | 'B' | undefined) ?? undefined,
@@ -277,22 +281,24 @@ async function reconcileFromServer(webhookSecret: string): Promise<Set<string>> 
       trades: s.trades.map(t => {
         // Adopt current_stop even for closed-result trades that are still tp1-watching
         // (result=WIN_TP1, no closedAt) so the position card can show the live stop.
-        const srv = statuses[t.id];
         if (t.result && !(t.status === 'tp1_hit' && !t.closedAt)) return t;
-        if (!srv || srv.status == null) return t;
-        const srvStatus = srv.status as 'waiting' | 'active' | 'tp1_hit';
-        // Fill is a one-way latch: never demote active/tp1_hit back to waiting just
-        // because the DB status column still lags (server monitor hasn't detected the
-        // limit fill yet). An unfilled order is cancelled via `result`, not un-filled.
-        const RANK: Record<string, number> = { waiting: 1, active: 2, tp1_hit: 3 };
-        const localRank = RANK[t.status ?? 'active'] ?? 2;
-        const newStatus = (RANK[srvStatus] ?? 2) >= localRank ? srvStatus : (t.status ?? 'active');
-        if (newStatus === 'active') confirmedActive.add(t.id);
+        const srv = statuses[t.id];
+        // srv missing entirely (id not in response) vs srv.status===null (row found,
+        // column NULL/unmigrated) are different cases — resolveStatus needs both kept
+        // distinct so a NULL read doesn't get treated as "no info, keep local as-is"
+        // in a way that also silently re-confirms a stale local guess.
+        const resolved = resolveStatus({
+          localStatus:    t.status,
+          localConfirmed: t.statusConfirmed ?? false,
+          serverStatus:   srv ? (srv.status as 'waiting' | 'active' | 'tp1_hit' | null) : undefined,
+        });
+        if (resolved.status === 'active' && resolved.confirmed) confirmedActive.add(t.id);
         return {
           ...t,
-          status: newStatus,
-          ...(srv.signalPrice != null ? { signalPrice: srv.signalPrice } : {}),
-          ...(srv.currentStop != null ? { currentStop: srv.currentStop } : {}),
+          status: resolved.status,
+          statusConfirmed: resolved.confirmed,
+          ...(srv?.signalPrice != null ? { signalPrice: srv.signalPrice } : {}),
+          ...(srv?.currentStop != null ? { currentStop: srv.currentStop } : {}),
         };
       }),
     }));
@@ -367,7 +373,7 @@ async function reconcileIncorrectlyActiveTrades(confirmedActive: Set<string> = n
 
   const activateSet = new Set(toActivate);
   useStore.setState(s => ({
-    trades: s.trades.map(t => (activateSet.has(t.id) ? { ...t, status: 'active' as const } : t)),
+    trades: s.trades.map(t => (activateSet.has(t.id) ? { ...t, status: 'active' as const, statusConfirmed: true } : t)),
   }));
 }
 

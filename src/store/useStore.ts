@@ -210,7 +210,9 @@ export const useStore = create<StoreState>()(
           tp2: signal.takeProfits[1] ?? signal.takeProfits[0],
           reasons: signal.reasons,
           openedAt: Date.now(),
+          // 本地猜測，非伺服器確認 —— 之後 reconcileFromServer 一律以權威值覆蓋。
           status: isLimitOrder ? 'waiting' : 'active',
+          statusConfirmed: false,
           signalPrice: sp > 0 ? sp : undefined,
         };
         set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
@@ -233,6 +235,10 @@ export const useStore = create<StoreState>()(
           tp2,
           reasons: ['手動建立'],
           openedAt: Date.now(),
+          // 使用者宣告「已經是持倉」，沒有等待進場階段可言 —— 視為已確認，
+          // 避免被誤判成「未確認同步中」而顯示錯誤狀態。
+          status: 'active',
+          statusConfirmed: true,
         };
         set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
         if (!get().coins.some((c) => c.symbol === symbol)) {

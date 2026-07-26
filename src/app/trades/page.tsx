@@ -4,7 +4,7 @@ import { useStore } from '@/store/useStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
 import { fetchCurrentPrice } from '@/api/binance';
 import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
-import { isFinallyClosed } from '@/lib/tradeSync';
+import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
 import { StatsHero } from '@/components/StatsHero';
 import { TradeResult } from '@/types';
 
@@ -147,8 +147,14 @@ export default function TradesPage() {
   // Memoize derived arrays: prevents filtered from recomputing on every store update (coins poll).
   const waiting       = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);
   const closed        = useMemo(() => trades.filter(isFinallyClosed), [trades]);
-  // 持倉中 = 未真正結束且非等待進場（含 TP1 已達標、追蹤 TP2 中的單）
-  const pending       = useMemo(() => trades.filter(t => !isFinallyClosed(t) && t.status !== 'waiting'), [trades]);
+  // 同步中 = 剛從訊號建立、尚未拿到伺服器權威 status（見 tradeSync.ts）——
+  // 不能算「持倉中」（會捏造出不存在的曝險/PnL），要獨立一桶。
+  const unconfirmed   = useMemo(() => trades.filter(isUnconfirmedSync), [trades]);
+  // 持倉中 = 未真正結束、非等待進場、且非同步中（含 TP1 已達標、追蹤 TP2 中的單）
+  const pending       = useMemo(
+    () => trades.filter(t => !isFinallyClosed(t) && t.status !== 'waiting' && !isUnconfirmedSync(t)),
+    [trades],
+  );
   // 追蹤TP2 = TP1 hit, result locked as WIN_TP1, not yet finally closed
   const watchingTp2   = useMemo(() => trades.filter(t => t.status === 'tp1_hit' && t.result === 'WIN_TP1' && !t.closedAt), [trades]);
   // Live-PnL counts so 浮盈/浮虧 chips show how many trades they'd match
@@ -379,7 +385,7 @@ export default function TradesPage() {
              : filter === 'CLOSED'    ? closed
              : filter === 'PROFIT'    ? pending.filter(t => (calcLivePnl(t) ?? -1) > 0)
              : filter === 'LOSS_LIVE' ? pending.filter(t => (calcLivePnl(t) ?? 1) < 0)
-             : [...waiting, ...pending, ...closed];
+             : [...waiting, ...pending, ...unconfirmed, ...closed];
     // Closed result sub-filter
     if (filter === 'CLOSED' && resultFilter !== 'ALL') {
       if (resultFilter === 'WIN')  base = base.filter(isWinTrade);
@@ -405,7 +411,7 @@ export default function TradesPage() {
       return sortDir === 'desc' ? -diff : diff;
     });
     return base;
-  }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, now, coins]);
+  }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, unconfirmed, now, coins]);
 
   const exportCsv = () => {
     // 時間輸出 ISO（含年份）：舊格式「7/17 上午08:00」缺年份，
@@ -542,6 +548,7 @@ export default function TradesPage() {
               {closed.length} 已結束 · {pending.length} 持倉
               {watchingTp2.length > 0 && <span className="text-[#0ECB81]"> · {watchingTp2.length} 追蹤TP2</span>}
               {waiting.length > 0 && <span className="text-[#C99A2E]"> · {waiting.length} 掛單中</span>}
+              {unconfirmed.length > 0 && <span className="text-[#565E6B]"> · {unconfirmed.length} 同步中</span>}
             </p>
           </div>
           <span className="flex-1" />
@@ -948,7 +955,9 @@ export default function TradesPage() {
             const isWaiting     = trade.status === 'waiting';
             const isTp1Hit      = trade.status === 'tp1_hit';
             const isWatchingTp2 = isTp1Hit && trade.result === 'WIN_TP1' && !trade.closedAt;
-            const isPending     = !trade.result && !isWaiting;
+            // 尚未拿到伺服器權威 status——不可當「持倉中」顯示（會捏造曝險/PnL）。
+            const isUnconfirmed = isUnconfirmedSync(trade);
+            const isPending     = !trade.result && !isWaiting && !isUnconfirmed;
             const isWin     = isWinTrade(trade);
             const coinData  = coins.find(c => c.symbol === trade.symbol);
             const livePx    = coinData?.currentPrice ?? 0;
@@ -1016,7 +1025,7 @@ export default function TradesPage() {
                     {trade.tier === 'B' && (
                       <Tag text="B 輕倉 0.5%" />
                     )}
-                    {(isPending || isWaiting) && (
+                    {(isPending || isWaiting || isUnconfirmed) && (
                       <span className="text-[11px] text-[#3A424E] num">{fmtDuration(now - trade.openedAt)}</span>
                     )}
                   </div>
@@ -1024,6 +1033,10 @@ export default function TradesPage() {
                     {isWaiting ? (
                       <span className="text-[11px] text-[#8A94A2] border border-[#3A2F14] px-1.5 py-0.5 rounded">
                         等待進場
+                      </span>
+                    ) : isUnconfirmed ? (
+                      <span className="text-[11px] text-[#565E6B] border border-[#1B222B] px-1.5 py-0.5 rounded">
+                        同步中
                       </span>
                     ) : isPending ? (
                       <>
