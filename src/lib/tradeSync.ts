@@ -113,8 +113,9 @@ export type TradeStatus = 'waiting' | 'active' | 'tp1_hit';
 export interface StatusResolveInput {
   localStatus: TradeStatus | undefined;
   localConfirmed: boolean;
-  // undefined = 這筆單根本不在伺服器回應裡（查詢漏掉/網路失敗）→ 保留本地
-  // null      = 有回應但欄位是 NULL（未遷移/insert fallback 剝欄位）→ 沒有權威資訊，一樣保留本地
+  // undefined = 這筆單根本不在伺服器回應裡（查詢漏掉/網路失敗）→ 沒有權威資訊，保留本地
+  // null      = 伺服器有這一列，但 status 欄位是 NULL（insert 最深層 fallback 把 status
+  //             整個剝掉，該列從創建起就是 NULL）→ 這**是**權威資訊，語意等同 waiting
   // 真值       = 伺服器權威讀值
   serverStatus: TradeStatus | null | undefined;
 }
@@ -129,24 +130,36 @@ const STATUS_RANK: Record<TradeStatus, number> = { waiting: 1, active: 2, tp1_hi
 export function resolveStatus(input: StatusResolveInput): StatusResolveResult {
   const { localStatus, localConfirmed, serverStatus } = input;
 
-  if (serverStatus === undefined || serverStatus === null) {
+  // 伺服器根本沒回這一列 → 沒有任何權威資訊可用，原封不動保留本地。
+  if (serverStatus === undefined) {
     return { status: localStatus, confirmed: localConfirmed };
   }
+
+  // status 欄位是 NULL 時比照 waiting —— 必須和伺服器同語意。
+  // 伺服器自 ecc40e6 起把 NULL 併入 waiting 池（`status.eq.waiting,status.is.null`），
+  // 照掛單邏輯監控、照掛單推播；客戶端若把 NULL 當「沒資訊」而保留 undefined，
+  // 那筆單就卡在「同步中」桶，使用者在「等待進場」永遠看不到它——收得到掛單
+  // 通知、畫面卻沒有單（2026-07-27 AKEUSDT 實錘）。
+  const effectiveServer: TradeStatus = serverStatus === null ? 'waiting' : serverStatus;
+
   if (!localConfirmed) {
     // 沒有已確認的本地值需要保護 —— 伺服器權威讀值直接採用。
-    return { status: serverStatus, confirmed: true };
+    return { status: effectiveServer, confirmed: true };
   }
   // 單向閂鎖：已確認的本地值只在伺服器讀值「不落後」時才被覆蓋
-  // （絕不因為 DB 寫入延遲就把 active/tp1_hit 退回 waiting）。
+  // （絕不因為 DB 寫入延遲就把 active/tp1_hit 退回 waiting）。NULL→waiting 走同一套，
+  // 所以監控已寫入成交後又讀到一張舊的 NULL 快照時，也不會把單打回等待進場。
   const localRank = STATUS_RANK[localStatus ?? 'active'] ?? 2;
-  if ((STATUS_RANK[serverStatus] ?? 2) >= localRank) {
-    return { status: serverStatus, confirmed: true };
+  if ((STATUS_RANK[effectiveServer] ?? 2) >= localRank) {
+    return { status: effectiveServer, confirmed: true };
   }
   return { status: localStatus, confirmed: true };
 }
 
-// 「同步中」：剛從訊號建立、尚未拿到任何權威 status 來源的開放單。
-// 不能顯示成「持倉中」，也不能被靜默丟掉不顯示。
+// 「同步中」：伺服器還沒回過這一列（首次載入尚未 reconcile、/api/trade-status
+// 失敗或密鑰不符）的開放單。不能顯示成「持倉中」（會捏造不存在的曝險），
+// 也不能被靜默丟掉不顯示。
+// 註：status 欄位為 NULL 的列**不算**同步中——resolveStatus 已把它歸成 waiting。
 export function isUnconfirmedSync(
   t: Pick<TradeRecord, 'result' | 'status' | 'statusConfirmed'>,
 ): boolean {

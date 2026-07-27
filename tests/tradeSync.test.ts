@@ -115,9 +115,28 @@ describe('resolveStatus', () => {
     expect(r).toEqual({ status: 'active', confirmed: false });
   });
 
-  it('伺服器回應此單但 status 欄位是 NULL → 沒有權威資訊，保留本地值不變（不可誤判成確認）', () => {
+  // 2026-07-27 實錘（AKEUSDT）：insert 最深層 fallback 會把 status 整個剝掉，該列
+  // 從創建起 status 就是 NULL。伺服器自 ecc40e6 起把 NULL 併入 waiting 池監控並照掛單
+  // 推播；客戶端若把 NULL 當「沒資訊」保留本地 undefined，那筆單就落進「同步中」桶，
+  // 使用者在「等待進場」永遠看不到它——收得到掛單通知、畫面卻沒有單。兩邊必須同語意。
+  it('THE BUG: 伺服器回應此單但 status 欄位是 NULL → 比照伺服器語意當 waiting（不可留在未確認）', () => {
+    const r = resolveStatus({ localStatus: undefined, localConfirmed: false, serverStatus: null });
+    expect(r).toEqual({ status: 'waiting', confirmed: true });
+  });
+
+  it('status NULL + 未確認的本地假 active → 一樣降為 waiting（假值不受閂鎖保護）', () => {
     const r = resolveStatus({ localStatus: 'active', localConfirmed: false, serverStatus: null });
-    expect(r).toEqual({ status: 'active', confirmed: false });
+    expect(r).toEqual({ status: 'waiting', confirmed: true });
+  });
+
+  it('status NULL + 已確認本地 active（監控已寫入成交，讀到舊快照）→ 閂鎖保護，不倒退', () => {
+    const r = resolveStatus({ localStatus: 'active', localConfirmed: true, serverStatus: null });
+    expect(r).toEqual({ status: 'active', confirmed: true });
+  });
+
+  it('status NULL + 已確認本地 tp1_hit → 閂鎖保護，不倒退', () => {
+    const r = resolveStatus({ localStatus: 'tp1_hit', localConfirmed: true, serverStatus: null });
+    expect(r).toEqual({ status: 'tp1_hit', confirmed: true });
   });
 
   it('已確認本地值 active + 伺服器仍回 waiting（DB 寫入延遲）→ 單向閂鎖，不倒退', () => {

@@ -1924,6 +1924,26 @@ export async function GET(req: NextRequest) {
                   const ir2 = await admin.from('trades').insert(baseData);
                   if (!ir2.error) {
                     insertOk = true;
+                    // 2026-07-27: this branch used to succeed SILENTLY. It strips `status`
+                    // and `signal_price` — the two columns the whole limit-order flow runs
+                    // on — so every trade it creates is born status=NULL: invisible to the
+                    // 等待進場 tab, and monitored only because ecc40e6 buckets NULL as
+                    // waiting. It had been firing on every insert for weeks with zero
+                    // trace. Log loudly, and surface the ORIGINAL error so the missing
+                    // column is identifiable instead of guessed at.
+                    console.error(
+                      `[analyze] DEGRADED INSERT for ${entrySignal.symbol} — status/signal_price were stripped ` +
+                      `(row created with status=NULL). Triggering error: [${irT.error.code}] ${irT.error.message}. ` +
+                      `Fix the schema so this stops: ALTER TABLE trades ` +
+                      `ADD COLUMN IF NOT EXISTS strategy TEXT, ` +
+                      `ADD COLUMN IF NOT EXISTS regime TEXT, ` +
+                      `ADD COLUMN IF NOT EXISTS confidence NUMERIC, ` +
+                      `ADD COLUMN IF NOT EXISTS funding_rate NUMERIC, ` +
+                      `ADD COLUMN IF NOT EXISTS suggested_risk_pct NUMERIC, ` +
+                      `ADD COLUMN IF NOT EXISTS suggested_leverage NUMERIC, ` +
+                      `ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'A', ` +
+                      `ADD COLUMN IF NOT EXISTS score_breakdown JSONB;`
+                    );
                   } else if (ir2.error.code === '23505') {
                     console.log(`[analyze] concurrent insert blocked for ${entrySignal.symbol} (23505/fallback) — another cron won the race`);
                   } else {
