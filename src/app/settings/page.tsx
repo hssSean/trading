@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
-import { setIsResetting, clearSessionDeletedIds } from '@/components/StoreHydration';
+import { setIsResetting, clearSessionDeletedIds, removeCoinPermanently } from '@/components/StoreHydration';
 import { SignalStrength, Timeframe } from '@/types';
 
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
@@ -65,7 +65,7 @@ interface AnalyzeResult {
 export default function SettingsPage() {
   const {
     coins, settings, webhookSecret,
-    removeCoin, clearSignals, updateSettings, setWebhookSecret,
+    clearSignals, updateSettings, setWebhookSecret,
   } = useStore();
   const router = useRouter();
 
@@ -712,7 +712,7 @@ export default function SettingsPage() {
                     <p className="text-[#565E6B] text-xs mt-0.5">{coin.timeframes.join(' · ')}{coin.signals.length > 0 && ` · ${coin.signals.length} 個信號`}</p>
                   </div>
                   <button
-                    onClick={() => { if (confirm('確定移除 ' + coin.displayName + '？')) removeCoin(coin.symbol); }}
+                    onClick={() => { if (confirm('確定移除 ' + coin.displayName + '？')) removeCoinPermanently(coin.symbol); }}
                     className="text-[#F6465D] text-xs px-3 py-1.5 rounded border border-[#F6465D]/20"
                   >
                     移除

@@ -11,24 +11,31 @@ import { resolveServerOutcome, deriveTp1Status, resolveStatus } from '@/lib/trad
 // Module-level so it persists across re-renders and periodic syncs.
 const sessionDeletedIds = new Set<string>();
 
+// Same guard as sessionDeletedIds above, but for watchlist symbols — removeCoin only
+// ever touched local state (待修改事項.md watchlist bug: same resurrection pattern as
+// the trades one above, just for coins instead of trades).
+const sessionDeletedCoinSymbols = new Set<string>();
+
 // Set to true during a full reset to block all sync from running concurrently.
 let isResetting = false;
 export function setIsResetting(v: boolean) { isResetting = v; }
 export function clearSessionDeletedIds() { sessionDeletedIds.clear(); }
 
-// IDs whose server-side delete has not yet been confirmed to succeed — persisted so a
-// closed tab/app doesn't lose track of them. sessionDeletedIds already hides them from
-// the UI immediately; this queue is purely about eventually reaching the DB (待修改事項.md P2-2).
+// IDs/symbols whose server-side delete has not yet been confirmed to succeed — persisted
+// so a closed tab/app doesn't lose track of them. sessionDeletedIds/sessionDeletedCoinSymbols
+// already hide them from the UI immediately; this queue is purely about eventually reaching
+// the DB (待修改事項.md P2-2).
 const PENDING_DELETE_KEY = 'pendingTradeDeletes';
+const PENDING_COIN_DELETE_KEY = 'pendingWatchlistDeletes';
 
-function loadPendingDeletes(): string[] {
+function loadPendingIds(key: string): string[] {
   try {
-    const raw = localStorage.getItem(PENDING_DELETE_KEY);
+    const raw = localStorage.getItem(key);
     return raw ? (JSON.parse(raw) as string[]) : [];
   } catch { return []; }
 }
-function savePendingDeletes(ids: string[]): void {
-  try { localStorage.setItem(PENDING_DELETE_KEY, JSON.stringify(ids)); } catch { /* storage unavailable — best effort */ }
+function savePendingIds(key: string, ids: string[]): void {
+  try { localStorage.setItem(key, JSON.stringify(ids)); } catch { /* storage unavailable — best effort */ }
 }
 
 // Supabase's `.delete()` returns { error } on a DB-level failure rather than throwing —
@@ -52,9 +59,9 @@ export async function deleteTradePermanently(tradeId: string): Promise<void> {
 
   const ok = await tryDeleteFromServer(tradeId, userId);
   if (!ok) {
-    const pending = new Set(loadPendingDeletes());
+    const pending = new Set(loadPendingIds(PENDING_DELETE_KEY));
     pending.add(tradeId);
-    savePendingDeletes(Array.from(pending));
+    savePendingIds(PENDING_DELETE_KEY, Array.from(pending));
     useStore.getState().setSyncWarning('刪除未能同步到伺服器，將自動重試（本機顯示不受影響）');
   }
 }
@@ -63,7 +70,7 @@ export async function deleteTradePermanently(tradeId: string): Promise<void> {
 // queued in an earlier session). Called alongside loadFromSupabase so it rides the same
 // cadence (page load, periodic sync, visibility change) without a dedicated timer.
 export async function retryPendingDeletes(userId: string): Promise<void> {
-  const pending = loadPendingDeletes();
+  const pending = loadPendingIds(PENDING_DELETE_KEY);
   if (pending.length === 0) return;
   const stillPending: string[] = [];
   for (const id of pending) {
@@ -71,7 +78,46 @@ export async function retryPendingDeletes(userId: string): Promise<void> {
     const ok = await tryDeleteFromServer(id, userId);
     if (!ok) stillPending.push(id);
   }
-  savePendingDeletes(stillPending);
+  savePendingIds(PENDING_DELETE_KEY, stillPending);
+}
+
+async function tryDeleteWatchlistFromServer(symbol: string, userId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('watchlist').delete().eq('user_id', userId).eq('symbol', symbol);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// Mirrors deleteTradePermanently above: removeCoin only ever removed local state, so the
+// watchlist row survived server-side and the next loadFromSupabase (periodic sync, tab
+// visibility change, next login) added it right back.
+export async function removeCoinPermanently(symbol: string): Promise<void> {
+  sessionDeletedCoinSymbols.add(symbol);
+  useStore.getState().removeCoin(symbol);
+  const userId = useStore.getState().userId;
+  if (!userId) return;
+
+  const ok = await tryDeleteWatchlistFromServer(symbol, userId);
+  if (!ok) {
+    const pending = new Set(loadPendingIds(PENDING_COIN_DELETE_KEY));
+    pending.add(symbol);
+    savePendingIds(PENDING_COIN_DELETE_KEY, Array.from(pending));
+    useStore.getState().setSyncWarning('移除幣種未能同步到伺服器，將自動重試（本機顯示不受影響）');
+  }
+}
+
+export async function retryPendingCoinDeletes(userId: string): Promise<void> {
+  const pending = loadPendingIds(PENDING_COIN_DELETE_KEY);
+  if (pending.length === 0) return;
+  const stillPending: string[] = [];
+  for (const symbol of pending) {
+    sessionDeletedCoinSymbols.add(symbol); // guard against a concurrent loadFromSupabase re-adding it
+    const ok = await tryDeleteWatchlistFromServer(symbol, userId);
+    if (!ok) stillPending.push(symbol);
+  }
+  savePendingIds(PENDING_COIN_DELETE_KEY, stillPending);
 }
 
 // ── Supabase sync helpers ──────────────────────────────────────────
@@ -148,7 +194,7 @@ export async function loadFromSupabase(userId: string) {
   const { data: wl } = await supabase.from('watchlist').select('symbol,timeframes').eq('user_id', userId);
   if (wl) {
     const existing = new Set(store.coins.map(c => c.symbol));
-    wl.forEach(r => { if (!existing.has(r.symbol)) store.addCoin(r.symbol); });
+    wl.forEach(r => { if (!existing.has(r.symbol) && !sessionDeletedCoinSymbols.has(r.symbol)) store.addCoin(r.symbol); });
   }
 
   // Load all trades including 'waiting' limit orders.
@@ -514,7 +560,7 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
   const { data: wl } = await supabase.from('watchlist').select('symbol,timeframes').eq('user_id', userId);
   if (wl) {
     const existing = new Set(useStore.getState().coins.map(c => c.symbol));
-    wl.forEach(r => { if (!existing.has(r.symbol)) useStore.getState().addCoin(r.symbol); });
+    wl.forEach(r => { if (!existing.has(r.symbol) && !sessionDeletedCoinSymbols.has(r.symbol)) useStore.getState().addCoin(r.symbol); });
   }
   const { data: prof } = await supabase.from('profiles').select('*').eq('id', userId).single();
   if (prof) {
@@ -690,6 +736,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     loadFromSupabase(userId)
       .then(() => pickupServerSignals())  // pick up any Redis-queued signals missed on other pages
       .then(() => retryPendingDeletes(userId))
+      .then(() => retryPendingCoinDeletes(userId))
       .catch(() => {});
 
     // Auto-save on state changes (debounced 4s)
@@ -716,6 +763,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
       if (uid) {
         await loadFromSupabase(uid).catch(() => {});
         await retryPendingDeletes(uid).catch(() => {});
+        await retryPendingCoinDeletes(uid).catch(() => {});
       }
     }, 2 * 60 * 1000);
 
@@ -730,6 +778,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
       await loadFromSupabase(uid).catch(() => {});
       await pickupServerSignals(); // catch any signals queued since last visit
       await retryPendingDeletes(uid).catch(() => {});
+      await retryPendingCoinDeletes(uid).catch(() => {});
       await saveToSupabase(uid).catch(() => {});
     };
     document.addEventListener('visibilitychange', handleVisibility);
