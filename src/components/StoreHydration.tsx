@@ -16,15 +16,62 @@ let isResetting = false;
 export function setIsResetting(v: boolean) { isResetting = v; }
 export function clearSessionDeletedIds() { sessionDeletedIds.clear(); }
 
+// IDs whose server-side delete has not yet been confirmed to succeed — persisted so a
+// closed tab/app doesn't lose track of them. sessionDeletedIds already hides them from
+// the UI immediately; this queue is purely about eventually reaching the DB (待修改事項.md P2-2).
+const PENDING_DELETE_KEY = 'pendingTradeDeletes';
+
+function loadPendingDeletes(): string[] {
+  try {
+    const raw = localStorage.getItem(PENDING_DELETE_KEY);
+    return raw ? (JSON.parse(raw) as string[]) : [];
+  } catch { return []; }
+}
+function savePendingDeletes(ids: string[]): void {
+  try { localStorage.setItem(PENDING_DELETE_KEY, JSON.stringify(ids)); } catch { /* storage unavailable — best effort */ }
+}
+
+// Supabase's `.delete()` returns { error } on a DB-level failure rather than throwing —
+// only a network exception hits the catch block. The original code checked neither,
+// so a rejected delete (RLS, transient DB error) silently no-opped with the row still
+// live server-side. Both paths are now treated as failure.
+async function tryDeleteFromServer(tradeId: string, userId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('trades').delete().eq('id', tradeId).eq('user_id', userId);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 export async function deleteTradePermanently(tradeId: string): Promise<void> {
   sessionDeletedIds.add(tradeId);
   useStore.getState().deleteTrade(tradeId);
   const userId = useStore.getState().userId;
-  if (userId) {
-    try {
-      await supabase.from('trades').delete().eq('id', tradeId).eq('user_id', userId);
-    } catch { /* best effort — sessionDeletedIds prevents re-add even if this fails */ }
+  if (!userId) return;
+
+  const ok = await tryDeleteFromServer(tradeId, userId);
+  if (!ok) {
+    const pending = new Set(loadPendingDeletes());
+    pending.add(tradeId);
+    savePendingDeletes(Array.from(pending));
+    useStore.getState().setSyncWarning('刪除未能同步到伺服器，將自動重試（本機顯示不受影響）');
   }
+}
+
+// Retries deletes that failed to reach the server in a previous attempt (including ones
+// queued in an earlier session). Called alongside loadFromSupabase so it rides the same
+// cadence (page load, periodic sync, visibility change) without a dedicated timer.
+export async function retryPendingDeletes(userId: string): Promise<void> {
+  const pending = loadPendingDeletes();
+  if (pending.length === 0) return;
+  const stillPending: string[] = [];
+  for (const id of pending) {
+    sessionDeletedIds.add(id); // guard against a concurrent loadFromSupabase re-adding it
+    const ok = await tryDeleteFromServer(id, userId);
+    if (!ok) stillPending.push(id);
+  }
+  savePendingDeletes(stillPending);
 }
 
 // ── Supabase sync helpers ──────────────────────────────────────────
@@ -220,8 +267,6 @@ export async function loadFromSupabase(userId: string) {
       useStore.getState().clearSignals();
       // Sync profile settings then return — no trades to reconcile
       useStore.setState(s => ({
-        lineToken:     prof.line_token  || s.lineToken,
-        lineUserId:    prof.line_user_id || s.lineUserId,
         webhookSecret: prof.webhook_secret || s.webhookSecret,
         settings:      prof.settings ? { ...s.settings, ...(prof.settings as object) } : s.settings,
       }));
@@ -229,8 +274,6 @@ export async function loadFromSupabase(userId: string) {
     }
 
     useStore.setState(s => ({
-      lineToken:     prof.line_token  || s.lineToken,
-      lineUserId:    prof.line_user_id || s.lineUserId,
       webhookSecret: prof.webhook_secret || s.webhookSecret,
       settings:      prof.settings ? { ...s.settings, ...(prof.settings as object) } : s.settings,
     }));
@@ -400,44 +443,34 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
 
   const localStore = useStore.getState().trades;
 
-  // Step 2: Upload only what Supabase is missing or behind on:
-  //   - New local trades not yet in Supabase
-  //   - Local trades we closed but Supabase still has as open
-  // Never overwrite a Supabase result with a local open state.
-  const toUpload = localStore
+  // Step 2: Update only what Supabase is behind on — a local trade we closed but
+  // Supabase still has as open. UPDATE-ONLY, never insert/upsert: every trade row is
+  // authored by the server (auto-insert on signal detection — route.ts Step 1), so a
+  // missing server row (`!sv`) means it was legitimately cancelled/deleted, not "new
+  // and needs creating". Upserting here would resurrect a dead limit order with none
+  // of the server-owned columns (status/signal_price null) — the ghost-order bug this
+  // replaces (待修改事項.md P0-1).
+  const toUpdate = localStore
     .filter(t => t.status !== 'waiting' && !sessionDeletedIds.has(t.id))
     .filter(t => {
       const sv = serverMap.get(t.id);
-      if (!sv) return true;                    // new local trade
-      if (t.result && !sv.result) return true; // local has close result, server doesn't
-      return false;                            // server state is same or newer — don't overwrite
+      if (!sv) return false;                   // no server row — nothing to update, never create one
+      return !!t.result && !sv.result;         // local has close result, server doesn't
     });
 
-  if (toUpload.length > 0) {
-    // 'status' and 'signal_price' omitted — server owns these via service role.
-    const rows = toUpload.map(t => ({
+  if (toUpdate.length > 0) {
+    const rows = toUpdate.map(t => ({
       id:           t.id,
-      user_id:      userId,
-      signal_id:    t.signalId,
-      symbol:       t.symbol,
-      direction:    t.direction,
-      timeframe:    t.timeframe,
-      strength:     t.strength,
-      score:        t.score,
-      entry:        t.entry,
-      stop_loss:    t.stopLoss,
-      tp1:          t.tp1,
-      tp2:          t.tp2,
-      reasons:      t.reasons,
-      entry_notes:  t.entryNotes ?? '',
-      opened_at:    t.openedAt,
       closed_at:    t.closedAt ?? null,
       result:       t.result ?? null,
       exit_price:   t.exitPrice ?? null,
       pnl_percent:  t.pnlPercent ?? null,
+      entry_notes:  t.entryNotes ?? '',
     }));
-    await supabase.from('trades').upsert(rows, { onConflict: 'id' });
-    toUpload.forEach(t => serverMap.set(t.id, t));
+    await Promise.all(rows.map(({ id, ...patch }) =>
+      supabase.from('trades').update(patch).eq('id', id).eq('user_id', userId)
+    ));
+    toUpdate.forEach(t => serverMap.set(t.id, t));
   }
 
   // Step 3: Deduplicate by signalId — two devices may have independently created
@@ -486,8 +519,6 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
   const { data: prof } = await supabase.from('profiles').select('*').eq('id', userId).single();
   if (prof) {
     useStore.setState(s => ({
-      lineToken:     prof.line_token  || s.lineToken,
-      lineUserId:    prof.line_user_id || s.lineUserId,
       webhookSecret: prof.webhook_secret || s.webhookSecret,
       settings:      prof.settings ? { ...s.settings, ...(prof.settings as object) } : s.settings,
     }));
@@ -529,8 +560,6 @@ export async function saveToSupabase(userId: string) {
   // Upsert profile
   await supabase.from('profiles').upsert({
     id:             userId,
-    line_token:     s.lineToken,
-    line_user_id:   s.lineUserId,
     webhook_secret: s.webhookSecret,
     settings:       s.settings,
   });
@@ -539,58 +568,40 @@ export async function saveToSupabase(userId: string) {
   const watchRows = s.coins.map(c => ({ user_id: userId, symbol: c.symbol, timeframes: c.timeframes }));
   if (watchRows.length > 0) await supabase.from('watchlist').upsert(watchRows, { onConflict: 'user_id,symbol' });
 
-  // Upsert trades (skip waiting — server manages those directly).
-  // 'status' and 'signal_price' are intentionally omitted: the server owns these columns
-  // via service role. Including them in client upserts causes the whole row to fail if
-  // column-level grants for the authenticated role are missing (42703/42501 errors).
+  // Update trades (skip waiting — server manages those directly). UPDATE-ONLY, never
+  // insert/upsert: every row is authored by the server (auto-insert on signal detection
+  // — route.ts Step 1). The client only ever owns two kinds of edits — entry_notes/entry
+  // (updateTrade) and a manual close's closed_at/result/exit/pnl — never row creation.
+  // Upserting here would resurrect a row the server legitimately deleted (cancelled limit
+  // order) with none of the server-owned columns (status/signal_price null) — the
+  // ghost-order bug this replaces (待修改事項.md P0-1).
   //
-  // CRITICAL: the SERVER owns closing (the monitor writes closed_at/result). For trades the
-  // client still considers OPEN (no local closedAt — incl. TP1-watching, which carries
-  // result=WIN_TP1 but no closedAt), we must NOT send closed_at/result: a stale save racing a
-  // server close would write closed_at=null and wipe the just-set trailing-stop close, leaving
-  // the trade stuck in 持倉中 forever. So we split into two upserts with disjoint column sets
-  // (a single bulk upsert would union keys and re-introduce the null-clobber):
-  //   • open rows      → base columns only; server keeps ownership of result/closed_at
-  //   • finalized rows → include closed_at/result/exit/pnl (client-authoritative, e.g. manual close)
-  const baseRow = (t: TradeRecord) => ({
-    id:           t.id,
-    user_id:      userId,
-    signal_id:    t.signalId,
-    symbol:       t.symbol,
-    direction:    t.direction,
-    timeframe:    t.timeframe,
-    strength:     t.strength,
-    score:        t.score,
-    entry:        t.entry,
-    stop_loss:    t.stopLoss,
-    tp1:          t.tp1,
-    tp2:          t.tp2,
-    reasons:      t.reasons,
-    entry_notes:  t.entryNotes ?? '',
-    opened_at:    t.openedAt,
-  });
-  const nonWaiting   = s.trades.filter(t => t.status !== 'waiting');
-  const openRows      = nonWaiting.filter(t => !t.closedAt).map(baseRow);
+  // openRows additionally require statusConfirmed: an unconfirmed row is one the server
+  // JUST created; it already has everything server-authored, so there's nothing client-
+  // side worth pushing until the next reconcile confirms it (skips a pointless request
+  // for every still-unconfirmed trade on every 4s debounce tick).
+  const nonWaiting = s.trades.filter(t => t.status !== 'waiting');
+  const openRows = nonWaiting
+    .filter(t => !t.closedAt && t.statusConfirmed)
+    .map(t => ({ id: t.id, entry_notes: t.entryNotes ?? '', entry: t.entry }));
   const finalizedRows = nonWaiting.filter(t => !!t.closedAt).map(t => ({
-    ...baseRow(t),
+    id:          t.id,
+    entry_notes: t.entryNotes ?? '',
+    entry:       t.entry,
     closed_at:   t.closedAt ?? null,
     result:      t.result ?? null,
     exit_price:  t.exitPrice ?? null,
     pnl_percent: t.pnlPercent ?? null,
   }));
 
-  const upsertTrades = async (rows: Record<string, unknown>[]) => {
-    if (rows.length === 0) return;
-    const { error } = await supabase.from('trades').upsert(rows, { onConflict: 'id' });
-    if (error && error.code !== '23505') {
-      // 23505 = partial unique index blocked a duplicate open trade; the client's
-      // local trade ID doesn't match the server's — loadFromSupabase will reconcile.
-      // Any other error is unexpected and worth logging.
-      console.error('[saveToSupabase] upsert error:', error.code, error.message);
-    }
+  const updateTrades = async (rows: { id: string; [k: string]: unknown }[]) => {
+    await Promise.all(rows.map(async ({ id, ...patch }) => {
+      const { error } = await supabase.from('trades').update(patch).eq('id', id).eq('user_id', userId);
+      if (error) console.error('[saveToSupabase] update error:', error.code, error.message);
+    }));
   };
-  await upsertTrades(openRows);
-  await upsertTrades(finalizedRows);
+  await updateTrades(openRows);
+  await updateTrades(finalizedRows);
 }
 
 // ── Pending signal pickup (runs on any page, not just home) ───────
@@ -678,6 +689,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
 
     loadFromSupabase(userId)
       .then(() => pickupServerSignals())  // pick up any Redis-queued signals missed on other pages
+      .then(() => retryPendingDeletes(userId))
       .catch(() => {});
 
     // Auto-save on state changes (debounced 4s)
@@ -701,7 +713,10 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     // - reflects server-side TP/SL auto-close results
     const periodicSync = setInterval(async () => {
       const uid = useStore.getState().userId;
-      if (uid) await loadFromSupabase(uid).catch(() => {});
+      if (uid) {
+        await loadFromSupabase(uid).catch(() => {});
+        await retryPendingDeletes(uid).catch(() => {});
+      }
     }, 2 * 60 * 1000);
 
     // Sync immediately when user returns to the tab (e.g. after LINE notification)
@@ -714,6 +729,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
       // Load first so we pick up closes from other devices before uploading our state.
       await loadFromSupabase(uid).catch(() => {});
       await pickupServerSignals(); // catch any signals queued since last visit
+      await retryPendingDeletes(uid).catch(() => {});
       await saveToSupabase(uid).catch(() => {});
     };
     document.addEventListener('visibilitychange', handleVisibility);

@@ -4,9 +4,11 @@ export const maxDuration = 10;
 
 function checkAuth(req: NextRequest): boolean {
   const envSecret = process.env.WEBHOOK_SECRET;
+  // No secret configured: fail-open only outside production — must fail-closed on
+  // production, since this route uses the service role to read every trade (待修改事項.md P2-1).
+  if (!envSecret) return process.env.VERCEL_ENV !== 'production';
   const provided = req.headers.get('x-webhook-secret') ?? req.nextUrl.searchParams.get('secret');
-  if (envSecret && provided !== envSecret) return false;
-  return true;
+  return provided === envSecret;
 }
 
 // POST { ids: string[] }

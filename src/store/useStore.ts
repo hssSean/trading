@@ -50,8 +50,6 @@ interface StoreState {
   settings: AppSettings;
   allSignals: TradingSignal[];
   trades: TradeRecord[];
-  lineToken: string;
-  lineUserId: string;
   webhookSecret: string;
   userId: string;            // Supabase user ID (empty if not logged in)
   _hasHydrated: boolean;
@@ -70,12 +68,9 @@ interface StoreState {
   updateSettings: (patch: Partial<AppSettings>) => void;
   syncWarning: string | null;
   setSyncWarning: (msg: string | null) => void;
-  setLine: (token: string, userId: string) => void;
   setWebhookSecret: (secret: string) => void;
   setUserId: (id: string) => void;
   updateTrade: (id: string, patch: Partial<Pick<TradeRecord, 'entryNotes' | 'entry'>>) => void;
-  // Trade journal
-  addTrade: (signal: TradingSignal) => void;
   closeTrade: (id: string, result: TradeResult, exitPrice: number) => void;
   // 伺服器同步用：TP1 達標但仍等 TP2（不關單，維持持倉中）
   markTp1Watching: (id: string, exitPrice: number, pnlPercent: number) => void;
@@ -101,8 +96,6 @@ export const useStore = create<StoreState>()(
       settings: DEFAULT_SETTINGS,
       allSignals: [],
       trades: [],
-      lineToken: '',
-      lineUserId: '',
       webhookSecret: (() => {
         try { if (typeof crypto !== 'undefined') return crypto.randomUUID(); } catch {}
         return 'abc123';
@@ -180,42 +173,10 @@ export const useStore = create<StoreState>()(
         set((s) => ({ settings: { ...s.settings, ...patch } })),
 
       setSyncWarning: (msg) => set({ syncWarning: msg }),
-      setLine: (token, userId) => set({ lineToken: token, lineUserId: userId }),
       setWebhookSecret: (secret) => set({ webhookSecret: secret }),
       setUserId: (id) => set({ userId: id }),
       updateTrade: (id, patch) =>
         set(s => ({ trades: s.trades.map(t => t.id === id ? { ...t, ...patch } : t) })),
-
-      // ── Trade journal ──────────────────────────────────────
-      addTrade: (signal) => {
-        const existing = get().trades;
-        // Skip if this exact signal was already journalled (open or closed)
-        if (existing.some((t) => t.signalId === signal.id)) return;
-        // Skip if there's already an open trade for this symbol
-        if (existing.some((t) => t.symbol === signal.symbol && !t.result)) return;
-        const sp = signal.signalPrice ?? 0;
-        const isLimitOrder = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
-        const trade: TradeRecord = {
-          id: `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          signalId: signal.id,
-          symbol: signal.symbol,
-          direction: signal.direction,
-          timeframe: signal.timeframe,
-          strength: signal.strength,
-          score: signal.score,
-          entry: signal.entry,
-          stopLoss: signal.stopLoss,
-          tp1: signal.takeProfits[0],
-          tp2: signal.takeProfits[1] ?? signal.takeProfits[0],
-          reasons: signal.reasons,
-          openedAt: Date.now(),
-          // 本地猜測，非伺服器確認 —— 之後 reconcileFromServer 一律以權威值覆蓋。
-          status: isLimitOrder ? 'waiting' : 'active',
-          statusConfirmed: false,
-          signalPrice: sp > 0 ? sp : undefined,
-        };
-        set((s) => ({ trades: [trade, ...s.trades].slice(0, 500) }));
-      },
 
       closeTrade: (id, result, exitPrice) => {
         set((s) => ({
@@ -278,8 +239,6 @@ export const useStore = create<StoreState>()(
         settings: s.settings,
         allSignals: s.allSignals.slice(0, 100),
         trades: s.trades.slice(0, 500),
-        lineToken: s.lineToken,
-        lineUserId: s.lineUserId,
         webhookSecret: s.webhookSecret,
         userId: s.userId,
         lastResetAt: s.lastResetAt,

@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { TradingSignal } from '@/types';
 import { useStore } from '@/store/useStore';
 import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
+import { loadFromSupabase } from '@/components/StoreHydration';
 import { formatDistanceToNow } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 
@@ -16,12 +17,13 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   const isLong    = signal.direction === 'LONG';
   const tp1       = signal.takeProfits?.[0];
   const tp2       = signal.takeProfits?.[1];
-  const addTrade    = useStore((s) => s.addTrade);
+  const userId      = useStore((s) => s.userId);
   const hasTrade    = useStore((s) => s.trades.some((t) => t.symbol === signal.symbol && !t.result));
   const justAdded   = useStore((s) => s.trades.some((t) => t.signalId === signal.id));
   const accountSize = useStore((s) => s.settings.accountSize);
   const riskPct     = useStore((s) => s.settings.riskPctPerTrade ?? 1);
-  const [flash, setFlash] = useState(false);
+  const [flash, setFlash]     = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   const effRisk = riskPct * tierRiskMultiplier(signal.symbol, signal.tier);
   const plan    = calcPositionPlan(accountSize, effRisk, signal.entry, signal.stopLoss, signal.tier === 'B' ? 5 : 10);
@@ -30,12 +32,21 @@ export function SignalCard({ signal, onClick, compact }: Props) {
   const isLimit    = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
   const isIntraday = signal.timeframe === '5m' || signal.timeframe === '15m';
 
-  const handleAddTrade = (e: React.MouseEvent) => {
+  // 伺服器在訊號產生的同一個請求裡就已經自動入帳（見 route.ts Step 1），所以這裡從來
+  // 不需要、也不該在本地捏造一張新的交易列——那只會製造一張沒有 status/signal_price
+  // 的殭屍單（見 待修改事項.md P1-3）。按鈕只負責「現在就去把伺服器那張正牌的單拉下來」，
+  // 補上本地尚未同步到的空窗（通常 2 分鐘內的定期同步就會自動補上）。
+  const handleSync = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (hasTrade || justAdded) return;
-    addTrade(signal);
-    setFlash(true);
-    setTimeout(() => setFlash(false), 2000);
+    if (hasTrade || justAdded || syncing || !userId) return;
+    setSyncing(true);
+    try {
+      await loadFromSupabase(userId);
+      setFlash(true);
+      setTimeout(() => setFlash(false), 2000);
+    } finally {
+      setSyncing(false);
+    }
   };
 
   let timeAgo = '';
@@ -107,8 +118,8 @@ export function SignalCard({ signal, onClick, compact }: Props) {
           <span className="text-[#565E6B] text-[10px]">{timeAgo}</span>
           <span className="flex-1" />
           <button
-            onClick={handleAddTrade}
-            disabled={hasTrade || justAdded}
+            onClick={handleSync}
+            disabled={hasTrade || justAdded || syncing}
             className={`text-[11px] font-medium px-3.5 py-1.5 rounded transition-colors ${
               flash
                 ? 'border border-[#0ECB81]/45 text-[#0ECB81]'
@@ -117,7 +128,7 @@ export function SignalCard({ signal, onClick, compact }: Props) {
                 : 'bg-[#2DD4BF] text-[#0A0D11] active:opacity-80'
             }`}
           >
-            {flash ? '✓ 已加入' : justAdded ? '已在紀錄' : hasTrade ? '已持倉' : '記錄 ▸'}
+            {flash ? '✓ 已同步' : justAdded ? '已在紀錄' : hasTrade ? '已持倉' : syncing ? '同步中…' : '同步 ▸'}
           </button>
         </div>
       )}

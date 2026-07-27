@@ -155,6 +155,7 @@ export interface AppSettings {
   soundEnabled: boolean;
   accountSize: number;      // USDT, for position sizing
   riskPctPerTrade?: number; // % of account risked per A-tier trade (default 1; B tier = half)
+  muteCancelPush?: boolean; // suppress "推薦單失效" push/LINE (funnel/bias tracking unaffected)
 }
 
 export type TradeResult = 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | 'MANUAL_CLOSE';

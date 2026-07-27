@@ -4,7 +4,6 @@ import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume, fetchFundingRate }
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
-import { sendLineMessage, buildLineFlexMessage } from '@/lib/line';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
 import { clampAutoCloseAfterTp1 } from '@/lib/monitorMath';
@@ -197,15 +196,18 @@ function checkAuth(req: NextRequest): boolean {
   // Vercel cron — must have CRON_SECRET set
   const isVercelCron = !!(cronSecret && cronAuth === `Bearer ${cronSecret}`);
   if (isVercelCron) return true;
+  // No WEBHOOK_SECRET configured: fail-open only outside production (local dev/preview
+  // convenience). On production this must fail-closed — an unset secret must never mean
+  // "anyone may call this," since this route writes trades/notifications (待修改事項.md P2-1).
+  if (!envSecret) return process.env.VERCEL_ENV !== 'production';
   // Accept secret from header (preferred) or legacy query param
   const provided = req.headers.get('x-webhook-secret') ?? req.nextUrl.searchParams.get('secret');
-  if (envSecret && provided !== envSecret) return false;
-  return true;
+  return provided === envSecret;
 }
 
 // ── Server-side monitor: fill detection + TP/SL via K-line scan ──
 // Uses 1h candlestick high/low so events between cron runs are never missed.
-async function monitorActiveTrades(lineToken: string, lineUserId: string, profileId: string) {
+async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key) return { monitored: 0, closed: 0, filled: 0, cancelled: 0 };
@@ -226,8 +228,8 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
   // ── Fetch waiting and active trades separately ────────────────
   // No user_id filter: admin (service role) has full table access and should
-  // process all open trades.  LINE notifications are already scoped to
-  // lineUserId / lineToken so they reach the correct recipient.
+  // process all open trades. notifyOk (below, per loop) guards against pushing
+  // about a stray/legacy row whose user_id doesn't match the resolved profileId.
   const baseQ = () =>
     admin.from('trades').select('*').is('result', null);
 
@@ -309,6 +311,14 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
   // ── Phase 1: fill detection for waiting (limit) orders ───────
   for (const trade of waiting) {
+    // baseQ() intentionally has no user_id filter (service role scans every open trade
+    // regardless of owner — see comment above). A row whose user_id is a stray/legacy
+    // value that doesn't match the resolved profileId must still be MONITORED (fill/
+    // cancel logic below always runs), but must not push a notification about someone
+    // else's — or an orphaned — trade to this profileId. LINE is unaffected: there's
+    // only one linked LINE account regardless of which row triggered the message.
+    const notifyOk = !trade.user_id || trade.user_id === profileId;
+
     // Retreat one candle-width (1h) so the candle that was already open at order-placement time
     // is always included — the Binance startTime filter uses openTime, which can be earlier than
     // the exact placement timestamp.
@@ -407,7 +417,15 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       let fillWriteOk = !fillRes.error && (fillRes.data?.length ?? 0) > 0;
       if (fillRes.error) {
         if (fillRes.error.code === '42703') {
-          const fb = await admin.from('trades').update({ status: 'active', opened_at: filledAt })
+          // Legacy schema missing filled_at/last_monitored_at columns — write status only.
+          // Previously this also wrote opened_at:filledAt to smuggle a fill timestamp into
+          // a legacy row, but opened_at is the time-anchor every age-based decision (24h/
+          // 72h/168h auto-close, time-stop, Phase 1's evalCandles filter) is computed from —
+          // silently moving it forward corrupted every one of those for this trade's whole
+          // remaining lifetime. Losing the precise fill timestamp on this legacy-only path
+          // is the acceptable trade-off (Phase 2 already falls back to opened_at when
+          // filled_at is absent, same as before).
+          const fb = await admin.from('trades').update({ status: 'active' })
             .eq('id', trade.id).or('status.eq.waiting,status.is.null').select('id');
           if (fb.error) {
             console.error(`[monitor] fill write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
@@ -426,15 +444,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         filled++;
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = (trade.symbol as string).replace('USDT', '/USDT');
-        const fillMsg =
-          `【✅ 掛單成交】${sym}\n` +
-          `${dir} 進場已確認，已自動加入交易日誌\n` +
-          `成交價：$${fmtPrice(fillCandle!.close)}\n` +
-          `TP1：$${fmtPrice(trade.tp1 as number)} ｜ SL：$${fmtPrice(trade.stop_loss as number)}`;
-        if (lineToken && lineUserId) {
-          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: fillMsg }]);
-        }
-        if (profileId) {
+        if (profileId && notifyOk) {
           await sendWebPushToUser(profileId, {
             title: `✅ 掛單成交 ${sym}`,
             body: `${dir} 成交價 $${fmtPrice(fillCandle!.close)} ｜ TP1 $${fmtPrice(trade.tp1 as number)} ｜ SL $${fmtPrice(trade.stop_loss as number)}`,
@@ -465,20 +475,19 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
         }
         // Notify only after row is confirmed gone — prevents repeat if delete had failed.
         // cancelReason/cancelBody were set during the chronological scan above.
-        {
+        // muteCancelPush (settings toggle) only suppresses the notification — funnel
+        // counter (cancelled++) and bias-hold above still run either way (待修改事項.md P0-2).
+        if (!muteCancelPush) {
           const dir = isLong ? '▲ 做多' : '▼ 做空';
           const sym = (trade.symbol as string).replace('USDT', '/USDT');
-          const holdNote = cancelClass === 'opportunity_expired'
-            ? `\n（${isLong ? '多頭' : '空頭'} bias 保留 ${BIAS_HOLD_BARS} 根 K 線，期間反向訊號僅列觀察，同向可重掛）` : '';
-          const reason = (cancelReason ?? '掛單已自動取消') + holdNote;
-          const cancelMsg = `【⚠️ 掛單取消】${sym}\n${dir} ${reason}`;
-          if (lineToken && lineUserId) {
-            await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: cancelMsg }]);
-          }
-          if (profileId) {
+          // v2.4 §1.3: wording made explicit that this is the system's own paper order
+          // expiring, not a real position — the original "⚠️ 掛單取消" phrasing read as
+          // an alarm about something the user did, when it's actually routine cleanup
+          // of a recommendation that never got filled (待修改事項.md P0-2 選項 A).
+          if (profileId && notifyOk) {
             await sendWebPushToUser(profileId, {
-              title: `⚠️ 掛單取消 ${sym}`,
-              body: `${dir} ${cancelBody ?? '掛單已取消'}`,
+              title: `推薦單失效 ${sym}`,
+              body: `${dir} ${cancelBody ?? '未進場，掛單已取消'}（非持倉）`,
               tag: `cancel-${trade.id}`,
             });
           }
@@ -492,6 +501,9 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
   // ── Phase 2: TP/SL monitoring + timeframe-aware auto-close ───
   for (const trade of active) {
+    // See Phase 1's notifyOk comment — same guard, this loop has its own `trade`.
+    const notifyOk = !trade.user_id || trade.user_id === profileId;
+
     // Retreat one 1h candle-width so the candle open at fill/creation time is always covered.
     const rawStart2 = (trade.last_monitored_at ?? trade.filled_at ?? trade.opened_at ?? (now - 168 * 3_600_000)) as number;
     const startMs   = rawStart2 - 3_600_000;
@@ -637,7 +649,7 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       const rOf = (stop: number) => (isLong ? stop - (trade.entry as number) : (trade.entry as number) - stop) / riskDist;
       const prevProtR = savedTrailingStop > 0 ? rOf(savedTrailingStop) : -Infinity;
       const newProtR  = rOf(trailingStop);
-      if (newProtR > prevProtR + 0.15 && profileId) {
+      if (newProtR > prevProtR + 0.15 && profileId && notifyOk) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = (trade.symbol as string).replace('USDT', '/USDT');
         await sendWebPushToUser(profileId, {
@@ -709,18 +721,11 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
 
       // Notify only after status='tp1_hit' is persisted — next cron sees isTp1Hit=true,
       // skips the justHitTp1 branch, preventing repeat notification.
-      // If write failed, no LINE is sent; next cron retries the write.
+      // If write failed, no push is sent; next cron retries the write.
       if (tp1WriteOk) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = (trade.symbol as string).replace('USDT', '/USDT');
-        const tp1Msg =
-          `【🎯 TP1 達標】${sym}\n` +
-          `${dir} TP1 $${fmtPrice(trade.tp1 as number)} 已達標，繼續持有等待 TP2 $${fmtPrice(trade.tp2 as number)}\n` +
-          `💡 建議立刻將止損移至成本 $${fmtPrice(trade.entry as number)}`;
-        if (lineToken && lineUserId) {
-          await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: tp1Msg }]);
-        }
-        if (profileId) {
+        if (profileId && notifyOk) {
           await sendWebPushToUser(profileId, {
             title: `🎯 TP1 達標 ${sym}`,
             body: `${dir} $${fmtPrice(trade.tp1 as number)} ｜ 止損移至 $${fmtPrice(trade.entry as number)}`,
@@ -855,25 +860,18 @@ async function monitorActiveTrades(lineToken: string, lineUserId: string, profil
       const dir = isLong ? '▲ 做多' : '▼ 做空';
       const sym = (trade.symbol as string).replace('USDT', '/USDT');
       const pnlStr = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
-      let closeMsg: string;
       let pushTitle: string;
       if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
-        closeMsg   = `【⏱ 時間止損】${sym}\n${dir} 8 根 K 線停滯於 ±0.3R 未達 TP1，平價出場釋放倉位\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle  = `⏱ 時間止損 ${sym}`;
       } else if (closeResult === 'MANUAL_CLOSE') {
-        closeMsg   = `【⏱ 到期平倉】${sym}\n${dir} 超過 ${autoCloseHours}小時未達標，自動平倉\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle  = `⏱ 到期平倉 ${sym}`;
       } else {
         const label = closeResult === 'WIN_TP2' ? '✅ TP2 全部達標'
                     : closeResult === 'WIN_TP1' ? (hitTrailingStop ? '🔒 移動止損出場（TP1 已達標）' : autoClosedAfterTp1 ? '⏱ 到期平倉（TP1 已達標，保本以上）' : localTp1Hit ? '🔒 SL 出場（TP1 已達標）' : '✅ TP1 達標')
                     : '❌ 止損出場';
-        closeMsg  = `【平倉通知】${sym}\n${dir} ${label}\n出場價：$${fmtPrice(closePrice)}\n損益：${pnlStr}`;
         pushTitle = `${label} ${sym}`;
       }
-      if (lineToken && lineUserId) {
-        await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: closeMsg }]);
-      }
-      if (profileId) {
+      if (profileId && notifyOk) {
         await sendWebPushToUser(profileId, {
           title: pushTitle,
           body: `${dir} 出場 $${fmtPrice(closePrice)} ｜ ${pnlStr}`,
@@ -1443,62 +1441,40 @@ export async function GET(req: NextRequest) {
 
   const coinsParam = req.nextUrl.searchParams.get('coins') ?? process.env.WATCH_COINS ?? '';
   const tfParam    = process.env.ANALYSIS_TIMEFRAMES ?? '5m,15m,1h';
-  const lineUserId = process.env.LINE_USER_ID ?? '';
   const minScore   = parseInt(process.env.MIN_SCORE ?? '5', 10);
 
-  // ── Resolve LINE token: profile (user-managed) > env fallback ──────────────
-  // profiles.line_token is updated whenever the user saves settings in the app,
-  // so it stays fresh. LINE_CHANNEL_TOKEN env var expires every 30 days and
-  // requires manual renewal in Vercel — reading from the profile avoids that.
-  let lineToken = process.env.LINE_CHANNEL_TOKEN ?? '';
   // Resolved Supabase profile UUID — used for trade insert + Web Push subscription lookup.
-  // Fallback order: (1) line_user_id column match, (2) SUPABASE_PROFILE_ID env var (direct override).
+  // SUPABASE_PROFILE_ID env var is a direct override (single-user system, no per-request
+  // auth on this endpoint to derive it from).
   let profileId = '';
   // Account settings synced from the app (profiles.settings JSONB) — drives the
   // position/margin/leverage line in notifications. Defaults match the store.
   let acctSize    = 1000;
   let acctRiskPct = 1;
+  let muteCancelPush = false;
   {
     const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
     const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-    if (sbUrl && sbKey) {
+    if (sbUrl && sbKey && process.env.SUPABASE_PROFILE_ID) {
+      profileId = process.env.SUPABASE_PROFILE_ID;
       try {
-        const { createClient: mkLineAdmin } = await import('@supabase/supabase-js');
-        const lineAdmin = mkLineAdmin(sbUrl, sbKey, {
+        const { createClient: mkProfileAdmin } = await import('@supabase/supabase-js');
+        const profileAdmin = mkProfileAdmin(sbUrl, sbKey, {
           auth: { autoRefreshToken: false, persistSession: false },
         });
-        const applySettings = (s: unknown) => {
-          const st = s as { accountSize?: number; riskPctPerTrade?: number } | null;
-          if (st?.accountSize && st.accountSize > 0)         acctSize    = st.accountSize;
-          if (st?.riskPctPerTrade && st.riskPctPerTrade > 0) acctRiskPct = st.riskPctPerTrade;
-        };
-        if (lineUserId) {
-          const { data: lp } = await lineAdmin
-            .from('profiles').select('id, line_token, settings')
-            .eq('line_user_id', lineUserId).maybeSingle();
-          if (lp?.line_token) lineToken = lp.line_token;
-          if (lp?.id) profileId = lp.id;
-          if (lp?.settings) applySettings(lp.settings);
-        }
-        // Direct-UUID override: set SUPABASE_PROFILE_ID in Vercel env vars to bypass
-        // line_user_id lookup (useful when line_user_id column is null or mismatched).
-        if (!profileId && process.env.SUPABASE_PROFILE_ID) {
-          profileId = process.env.SUPABASE_PROFILE_ID;
-          console.log('[analyze] profileId resolved via SUPABASE_PROFILE_ID env var');
-          try {
-            const { data: sp } = await lineAdmin
-              .from('profiles').select('settings').eq('id', profileId).maybeSingle();
-            if (sp?.settings) applySettings(sp.settings);
-          } catch { /* keep defaults */ }
-        }
+        const { data: sp } = await profileAdmin
+          .from('profiles').select('settings').eq('id', profileId).maybeSingle();
+        const st = sp?.settings as { accountSize?: number; riskPctPerTrade?: number; muteCancelPush?: boolean } | null;
+        if (st?.accountSize && st.accountSize > 0)         acctSize    = st.accountSize;
+        if (st?.muteCancelPush)                            muteCancelPush = true;
+        if (st?.riskPctPerTrade && st.riskPctPerTrade > 0) acctRiskPct = st.riskPctPerTrade;
       } catch (e) {
-        console.error('[analyze] profile lookup threw:', String(e));
-        if (process.env.SUPABASE_PROFILE_ID) profileId = process.env.SUPABASE_PROFILE_ID;
+        console.error('[analyze] profile settings lookup threw:', String(e));
       }
     }
     if (!profileId) {
       console.warn('[analyze] profileId is empty — trades will NOT be inserted. ' +
-        'Set SUPABASE_PROFILE_ID env var in Vercel or ensure profiles.line_user_id matches LINE_USER_ID.');
+        'Set SUPABASE_PROFILE_ID env var in Vercel.');
     }
   }
 
@@ -1510,7 +1486,6 @@ export async function GET(req: NextRequest) {
   // Entry timeframe: multi-TF analysis confirms direction; only this TF produces the entry/TP/SL.
   // Override via ENTRY_TIMEFRAME env var; default 1h (the faster TF in a 4h+1h setup).
   const entryTf    = (process.env.ENTRY_TIMEFRAME ?? '1h').trim() as Timeframe;
-  const lineReady  = !!(lineToken && lineUserId);
   const usingRedis = !!getRedis();
 
   interface ScanResult {
@@ -1519,7 +1494,6 @@ export async function GET(req: NextRequest) {
     topScore: number;
     rawTopScore?: number;
     topSignal: { direction: string; strength: string; score: number; entry: number; confidence?: number; fundingRate?: number } | null;
-    lineSent: boolean;
     locked: boolean;
     confluenceMet?: boolean;
     agreeTFs?: number;
@@ -1531,7 +1505,6 @@ export async function GET(req: NextRequest) {
     suggestedRiskPct?: number;
     fundingRate?: number;
     event_filter_active?: boolean;
-    lineError?: string;
     note?: string;
     error?: string;
   }
@@ -1570,8 +1543,6 @@ export async function GET(req: NextRequest) {
     const allSignals: TradingSignal[] = [];
     let topScore  = 0;
     let rawTopScore = 0; // best pre-gate score — shows near-misses in scan status
-    let lineSent  = false;
-    let lineError: string | undefined;
     let entryTfBias: 'LONG' | 'SHORT' | null = null; // entry TF's 4H EMA200 direction
 
     try {
@@ -1994,13 +1965,7 @@ export async function GET(req: NextRequest) {
             if (pendingSignals.length > 50) pendingSignals.splice(0, pendingSignals.length - 50);
           }
 
-          // ── Step 3: Signal notifications — LINE and Web Push are independent ───
-          // Either or both may fail without affecting the trade record or each other.
-          if (lineToken && lineUserId) {
-            const { ok, error } = await sendLineMessage(lineToken, lineUserId, buildFlexMessages(entrySignal));
-            lineSent  = ok;
-            lineError = error;
-          }
+          // ── Step 3: Signal notification (Web Push) ──────────────────────────
           if (profileId) {
             const edir  = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
             const esym  = entrySignal.symbol.replace('USDT', '/USDT');
@@ -2023,19 +1988,8 @@ export async function GET(req: NextRequest) {
           if (!isLimitOrder) {
             const dir     = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
             const sym     = entrySignal.symbol.replace('USDT', '/USDT');
-            const tp2     = entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0];
             const effRisk = acctRiskPct * tierRiskMultiplier(entrySignal.symbol, entrySignal.tier);
             const plan    = calcPositionPlan(acctSize, effRisk, entrySignal.entry, entrySignal.stopLoss, entrySignal.tier === 'B' ? 5 : 10);
-            const planTxt = plan ? `\n${formatPlanLine(plan)}｜止損虧 ${plan.riskUSDT}U` : '';
-            const entryMsg =
-              `【✅ 市場入場】${sym}${isScalp ? '（⚡短線）' : ''}\n` +
-              `${dir} 已進場\n` +
-              `進場價：$${fmtPrice(entrySignal.entry)}\n` +
-              `TP1：$${fmtPrice(entrySignal.takeProfits[0])}｜TP2：$${fmtPrice(tp2)}｜止損：$${fmtPrice(entrySignal.stopLoss)}` +
-              planTxt;
-            if (lineToken && lineUserId) {
-              await sendLineWithRetry(lineToken, lineUserId, [{ type: 'text', text: entryMsg }]);
-            }
             if (profileId) {
               await sendWebPushToUser(profileId, {
                 title: `✅ 市場入場 ${sym}${isScalp ? ' ⚡短線' : ''}`,
@@ -2117,7 +2071,6 @@ export async function GET(req: NextRequest) {
         topSignal: strong[0]
           ? { direction: strong[0].direction, strength: strong[0].strength, score: strong[0].score, entry: strong[0].entry, confidence: strong[0].confidence, fundingRate: strong[0].fundingRate }
           : null,
-        lineSent,
         locked,
         confluenceMet,
         agreeTFs,
@@ -2129,7 +2082,6 @@ export async function GET(req: NextRequest) {
         suggestedRiskPct,
         fundingRate: symbolFundingRate,
         event_filter_active: eventFilter.active,
-        ...(lineError  ? { lineError }       : {}),
         ...(skipReason   ? { note: skipReason }
           : gateNote     ? { note: gateNote }
           : stratBPaused ? { note: '策略B連虧2筆暫停24h' }
@@ -2137,14 +2089,14 @@ export async function GET(req: NextRequest) {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      results.push({ symbol, signalCount: 0, topScore, topSignal: null, lineSent: false, locked: false, error: msg });
+      results.push({ symbol, signalCount: 0, topScore, topSignal: null, locked: false, error: msg });
     }
 
     await delay(300);
   }
 
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
-  const monitor = await monitorActiveTrades(lineToken, lineUserId, profileId)
+  const monitor = await monitorActiveTrades(profileId, muteCancelPush)
     .catch(() => ({ monitored: 0, closed: 0, filled: 0, cancelled: 0 }));
 
   // Shadow simulation: merge new rejects, advance live ones against real candles
@@ -2202,7 +2154,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     ok: true, analyzedAt: new Date().toISOString(),
-    minScore, lineReady, usingRedis, coins: coins.length, notified, results,
+    minScore, usingRedis, coins: coins.length, notified, results,
     monitor,
     btcRegime: btcState.regime,
     circuitBreaker: breaker.triggered ? breaker.reason : null,
@@ -2262,23 +2214,6 @@ export async function DELETE(req: NextRequest) {
   return NextResponse.json({ ok: true, symbol, unlocked: true, usingRedis: !!r });
 }
 
-function buildFlexMessages(signal: TradingSignal): object[] {
-  const flex = buildLineFlexMessage(signal);
-  const coin = signal.symbol.replace('USDT', '/USDT');
-  const dir  = signal.direction === 'LONG' ? '做多▲' : '做空▼';
-  return [{ type: 'flex', altText: `${dir} ${coin} 交易信號 | 得分 ${signal.score} | RR ${signal.riskReward}:1`, contents: flex }];
-}
-
 function delay(ms: number) {
   return new Promise(r => setTimeout(r, ms));
-}
-
-// Retry LINE send once after 1.5s if the first attempt fails (handles transient LINE API errors).
-async function sendLineWithRetry(token: string, uid: string, msgs: object[]) {
-  const first = await sendLineMessage(token, uid, msgs);
-  if (first.ok) return first;
-  await delay(1500);
-  const second = await sendLineMessage(token, uid, msgs);
-  if (!second.ok) console.error(`[LINE] both attempts failed: ${second.error ?? 'unknown'}`);
-  return second;
 }

@@ -8,8 +8,6 @@ interface CloudData {
   watchlist:  { symbol: string; timeframes: string[] }[];
   trades:     TradeRecord[];
   settings?:  Partial<AppSettings>;
-  lineToken?: string;
-  lineUserId?: string;
   savedAt:    number;
 }
 

@@ -11,7 +11,9 @@ const TARGET_USER_ID = 'ab52926d-f1d4-4573-b6c3-523a92ea12bd';
 
 function checkAuth(req: NextRequest): boolean {
   const envSecret = process.env.WEBHOOK_SECRET;
-  if (!envSecret) return true;
+  // No secret configured: fail-open only outside production, fail-closed on production
+  // (待修改事項.md P2-1) — this endpoint sends real pushes to a hardcoded user_id.
+  if (!envSecret) return process.env.VERCEL_ENV !== 'production';
   const h = req.headers.get('x-webhook-secret') ?? '';
   const q = req.nextUrl.searchParams.get('secret') ?? '';
   return h === envSecret || q === envSecret;

@@ -43,34 +43,29 @@ const STRENGTHS: { value: SignalStrength; label: string; desc: string }[] = [
   { value: 'STRONG',   label: '僅強信號', desc: '得分 ≥12，最高可信度信號' },
 ];
 
-type TestStatus = 'idle' | 'sending' | 'ok' | 'fail';
-
 interface AnalyzeResult {
   ok: boolean;
   analyzedAt?: string;
   minScore?: number;
-  lineReady?: boolean;
   notified?: string[];
   results?: {
     symbol: string;
     signalCount: number;
     topScore: number;
     topSignal: { direction: string; strength?: string; score: number; entry: number } | null;
-    lineSent: boolean;
     locked?: boolean;
     confluenceMet?: boolean;
     agreeTFs?: number;
     tfsAnalyzed?: string[];
     note?: string;
-    lineError?: string;
     error?: string;
   }[];
 }
 
 export default function SettingsPage() {
   const {
-    coins, settings, lineToken, lineUserId, webhookSecret,
-    removeCoin, clearSignals, updateSettings, setLine, setWebhookSecret,
+    coins, settings, webhookSecret,
+    removeCoin, clearSignals, updateSettings, setWebhookSecret,
   } = useStore();
   const router = useRouter();
 
@@ -90,14 +85,9 @@ export default function SettingsPage() {
     router.replace('/login');
   };
 
-  const [token, setToken]         = useState(lineToken);
-  const [userId, setUserId]       = useState(lineUserId);
   const [secret, setSecret]       = useState(webhookSecret);
-  const [testStatus, setTestStatus] = useState<TestStatus>('idle');
-  const [testError, setTestError]   = useState('');
   const [appUrl, setAppUrl]         = useState('');
   const [copied, setCopied]         = useState(false);
-  const [guideOpen, setGuideOpen]   = useState(false);
   const [diagResult, setDiagResult] = useState<AnalyzeResult | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -273,7 +263,7 @@ export default function SettingsPage() {
   }, []);
 
   const handleResetAllLocks = async () => {
-    if (!confirm('確定要重置所有幣種的 LINE 推播鎖定嗎？\n（解除後，下次分析達到條件即可重新推播）')) return;
+    if (!confirm('確定要重置所有幣種的推播鎖定嗎？\n（解除後，下次分析達到條件即可重新推播）')) return;
     setResetting(true); setResetMsg('');
     try {
       const res  = await fetch('/api/analyze', { method: 'DELETE', headers: { 'x-webhook-secret': secret.trim() || 'abc123' } });
@@ -337,29 +327,8 @@ export default function SettingsPage() {
     }
   };
 
-  const saveLine = () => {
-    setLine(token.trim(), userId.trim());
+  const saveWebhookSecret = () => {
     setWebhookSecret(secret.trim() || 'abc123');
-  };
-
-  const testLine = async () => {
-    if (!token.trim() || !userId.trim()) return;
-    setTestStatus('sending');
-    setTestError('');
-    try {
-      const res = await fetch('/api/test-line', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-webhook-secret': secret.trim() || 'abc123' },
-        body: JSON.stringify({ channelToken: token.trim(), userId: userId.trim() }),
-      });
-      const data = await res.json();
-      if (data.ok) { setTestStatus('ok'); }
-      else { setTestStatus('fail'); setTestError(data.error ?? '發送失敗'); }
-    } catch {
-      setTestStatus('fail');
-      setTestError('網路錯誤');
-    }
-    setTimeout(() => { setTestStatus('idle'); setTestError(''); }, 4000);
   };
 
   // Manually trigger analyze and show full diagnostic
@@ -387,8 +356,6 @@ export default function SettingsPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const unsaved = token.trim() !== lineToken || userId.trim() !== lineUserId || (secret.trim() || 'abc123') !== webhookSecret;
-
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1B222B]">
@@ -411,44 +378,6 @@ export default function SettingsPage() {
               className="px-4 py-2 rounded border border-[#F6465D]/30 text-[#F6465D] text-sm disabled:opacity-40"
             >
               {loggingOut ? '登出中…' : '登出'}
-            </button>
-          </div>
-        </Section>
-
-        {/* LINE */}
-        <Section title="LINE 通知設定">
-          <button
-            onClick={() => setGuideOpen((v) => !v)}
-            className="w-full flex items-center justify-between border border-[#1B222B] rounded px-4 py-3 mb-3"
-          >
-            <span className="text-[#8A94A2] text-sm">設定教學</span>
-            <span className="text-[#8A94A2] text-xs">{guideOpen ? '▲ 收起' : '▼ 展開'}</span>
-          </button>
-
-          {guideOpen && (
-            <div className="bg-[#141A21] rounded p-4 mb-3 space-y-3 text-xs text-[#8A94A2] leading-relaxed">
-              <p><span className="text-[#2DD4BF]">步驟 1</span> — 開啟 developers.line.biz → 建立 Provider → 建立 Messaging API channel</p>
-              <p><span className="text-[#2DD4BF]">步驟 2</span> — 進入 Channel → 「Messaging API」分頁 → 滾到底 → 「Channel access token」→ Issue → 複製</p>
-              <p><span className="text-[#2DD4BF]">步驟 3</span> — 「Basic settings」分頁 → 找「Your user ID」(格式 Uxxxxxx) → 複製</p>
-              <p><span className="text-[#2DD4BF]">步驟 4</span> — 用手機掃 QR Code 加 Bot 好友（必做！）</p>
-            </div>
-          )}
-
-          <input value={token} onChange={(e) => setToken(e.target.value)} placeholder="Channel Access Token" className="input-field mb-2" />
-          <input value={userId} onChange={(e) => setUserId(e.target.value)} placeholder="User ID（格式：Uxxxxxxxxxxxxxxxx）" className="input-field mb-3" />
-
-          {testError && <p className="text-[#F6465D] text-xs mb-2 border border-[#F6465D]/30 rounded px-3 py-2">{testError}</p>}
-
-          <div className="flex gap-2">
-            <button onClick={saveLine} disabled={!unsaved} className="flex-1 btn-primary py-2.5 rounded text-sm disabled:opacity-40">
-              {unsaved ? '儲存' : '已儲存'}
-            </button>
-            <button
-              onClick={testLine}
-              disabled={!token.trim() || !userId.trim() || testStatus === 'sending'}
-              className="flex-1 py-2.5 rounded text-sm bg-[#141A21] text-[#8A94A2] border border-[#1B222B] disabled:opacity-40"
-            >
-              {testStatus === 'sending' ? '發送中…' : testStatus === 'ok' ? '成功' : testStatus === 'fail' ? '失敗' : '測試發送'}
             </button>
           </div>
         </Section>
@@ -540,7 +469,7 @@ export default function SettingsPage() {
           )}
 
           <p className="text-[#3A424E] text-xs mt-3 leading-5">
-            推播從伺服器每小時自動掃描後觸發，LINE 與 Web Push 同時發送（二選一或並存皆可）
+            推播從伺服器每小時自動掃描後觸發至此裝置
           </p>
         </Section>
 
@@ -550,7 +479,7 @@ export default function SettingsPage() {
             <p className="text-[#565E6B] text-xs mb-1.5">Webhook 密鑰（要和 Vercel 環境變數一致）</p>
             <div className="flex gap-2">
               <input value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="WEBHOOK_SECRET" className="input-field flex-1" />
-              <button onClick={saveLine} className="btn-primary px-4 rounded text-sm shrink-0">存</button>
+              <button onClick={saveWebhookSecret} className="btn-primary px-4 rounded text-sm shrink-0">存</button>
             </div>
           </div>
 
@@ -583,20 +512,18 @@ export default function SettingsPage() {
 
           {diagResult && (
             <div className="bg-[#141A21] rounded p-3 text-xs space-y-2">
-              <p className="text-[#2DD4BF] num">
-                {diagResult.ok ? '分析完成' : '分析失敗'} · LINE {diagResult.lineReady ? '已設定' : '未設定'}
-              </p>
+              <p className="text-[#2DD4BF] num">{diagResult.ok ? '分析完成' : '分析失敗'}</p>
               <p className="text-[#8A94A2]">已通知：{diagResult.notified?.join(', ') || '無'}</p>
               {diagResult.results?.map((r) => (
                 <div key={r.symbol} className={`rounded px-3 py-2 border ${
-                  r.lineSent ? 'border-[#0ECB81]/30' :
-                  r.locked   ? 'border-[#C99A2E]/30' :
+                  diagResult.notified?.includes(r.symbol) ? 'border-[#0ECB81]/30' :
+                  r.locked                                ? 'border-[#C99A2E]/30' :
                   'border-[#1B222B]'
                 }`}>
                   <div className="flex items-center justify-between">
                     <span className="text-[#E8ECF1] num">{r.symbol.replace('USDT', '')}</span>
-                    <span className={r.lineSent ? 'text-[#0ECB81]' : r.locked ? 'text-[#C99A2E]' : 'text-[#565E6B]'}>
-                      {r.lineSent ? 'LINE 已發送' : r.locked ? '持倉鎖定' : '—'}
+                    <span className={diagResult.notified?.includes(r.symbol) ? 'text-[#0ECB81]' : r.locked ? 'text-[#C99A2E]' : 'text-[#565E6B]'}>
+                      {diagResult.notified?.includes(r.symbol) ? '已通知' : r.locked ? '持倉鎖定' : '—'}
                     </span>
                   </div>
                   {r.topSignal && (
@@ -612,7 +539,6 @@ export default function SettingsPage() {
                   )}
                   {!r.topSignal && <p className="text-[#565E6B] mt-1">無信號（得分 {r.topScore}）</p>}
                   {r.note && <p className="text-[#C99A2E]/80 mt-1">{r.note}</p>}
-                  {r.lineError && <p className="text-[#F6465D] mt-1">LINE 錯誤：{r.lineError}</p>}
                   {r.error && <p className="text-[#F6465D] mt-1">錯誤：{r.error}</p>}
                 </div>
               ))}
@@ -622,8 +548,6 @@ export default function SettingsPage() {
           <div className="mt-3 border border-[#2DD4BF]/20 rounded px-4 py-3">
             <p className="text-[#2DD4BF] text-xs mb-1">Vercel 環境變數</p>
             <p className="text-[#8A94A2] text-xs font-mono leading-6 num">
-              LINE_CHANNEL_TOKEN=你的token<br />
-              LINE_USER_ID=你的userId<br />
               WEBHOOK_SECRET={secret || 'abc123'}<br />
               CRON_SECRET=任意密碼<br />
               ANALYSIS_TIMEFRAMES=4h,1h<br />
@@ -631,6 +555,7 @@ export default function SettingsPage() {
               <span className="text-[#2DD4BF]">NEXT_PUBLIC_SUPABASE_URL=你的url</span><br />
               <span className="text-[#2DD4BF]">NEXT_PUBLIC_SUPABASE_ANON_KEY=你的key</span><br />
               <span className="text-[#2DD4BF]">SUPABASE_SERVICE_ROLE_KEY=你的key</span><br />
+              <span className="text-[#2DD4BF]">SUPABASE_PROFILE_ID=你的 profiles.id</span><br />
               <span className="text-[#0ECB81]">NEXT_PUBLIC_VAPID_PUBLIC_KEY=（見部署說明）</span><br />
               <span className="text-[#0ECB81]">VAPID_PRIVATE_KEY=（見部署說明）</span>
             </p>
@@ -685,6 +610,32 @@ export default function SettingsPage() {
           <p className="text-[#3A424E] text-xs mt-2 num">
             每筆最大虧損 = {(settings.accountSize * (settings.riskPctPerTrade ?? 1) / 100).toFixed(2)} USDT（帳戶 {settings.riskPctPerTrade ?? 1}%）
           </p>
+        </Section>
+
+        {/* Cancel-push mute */}
+        <Section title="推薦單失效通知">
+          <p className="text-[#565E6B] text-xs mb-3 leading-5">
+            每張達標訊號都會自動記一張紙上單；沒回測到進場價時系統會自動失效。
+            關閉後這類「未進場」通知不再推播，但漏斗統計與方向 bias 判斷照常運作，不受影響。
+          </p>
+          <div className="flex gap-2">
+            {[
+              { v: false, label: '推播（預設）' },
+              { v: true,  label: '靜音' },
+            ].map(({ v, label }) => (
+              <button
+                key={String(v)}
+                onClick={() => updateSettings({ muteCancelPush: v })}
+                className={`flex-1 py-2.5 rounded text-sm border transition-all ${
+                  (settings.muteCancelPush ?? false) === v
+                    ? 'border-[#2DD4BF] text-[#2DD4BF]'
+                    : 'border-[#1B222B] bg-[#141A21] text-[#565E6B]'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </Section>
 
         {/* Signal Strength */}
@@ -777,7 +728,7 @@ export default function SettingsPage() {
           <div className="border border-[#0ECB81]/20 rounded px-4 py-3 mb-3">
             <p className="text-[#0ECB81] text-xs mb-1">自動同步已啟用</p>
             <p className="text-[#565E6B] text-xs leading-5">
-              交易紀錄、自選幣種、LINE 設定均自動同步至 Supabase。<br />
+              交易紀錄、自選幣種、通知設定均自動同步至 Supabase。<br />
               任何裝置登入同一帳號，資料即時一致。
             </p>
           </div>
@@ -789,7 +740,7 @@ export default function SettingsPage() {
 
         {/* Data */}
         <Section title="資料管理">
-          {/* Reset all LINE locks */}
+          {/* Reset all signal notification locks */}
           {resetMsg && (
             <div className={`mb-3 px-3 py-2 rounded text-xs ${
               resetMsg.includes('失敗') ? 'border border-[#F6465D]/30 text-[#F6465D]' : 'border border-[#0ECB81]/30 text-[#0ECB81]'
@@ -840,6 +791,12 @@ export default function SettingsPage() {
             <span className="text-[#F6465D]/70">本 App 僅供參考，不構成投資建議</span>
           </p>
         </Section>
+
+        {/* Build version — a PWA tab can sit open on a stale bundle for days;
+            this makes it obvious whether you're actually looking at the latest deploy. */}
+        <p className="text-[#3A424E] text-[10px] text-center num pb-2">
+          build {process.env.NEXT_PUBLIC_BUILD_SHA ? process.env.NEXT_PUBLIC_BUILD_SHA.slice(0, 7) : 'dev'}
+        </p>
 
         <div className="h-4" />
       </div>

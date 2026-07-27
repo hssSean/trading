@@ -4,7 +4,9 @@ import { createClient } from '@supabase/supabase-js';
 
 function checkAuth(req: NextRequest): boolean {
   const envSecret = process.env.WEBHOOK_SECRET;
-  if (!envSecret) return true; // no secret configured
+  // No secret configured: fail-open only outside production, fail-closed on production
+  // (待修改事項.md P2-1) — this endpoint performs a full destructive account reset.
+  if (!envSecret) return process.env.VERCEL_ENV !== 'production';
   const h = req.headers.get('x-webhook-secret') ?? '';
   const q = req.nextUrl.searchParams.get('secret') ?? '';
   return h === envSecret || q === envSecret;

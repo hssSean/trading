@@ -6,9 +6,11 @@ export const dynamic = 'force-dynamic';
 // Same auth contract as /api/analyze: webhook secret via header or query param.
 function checkAuth(req: NextRequest): boolean {
   const envSecret = process.env.WEBHOOK_SECRET;
-  const provided  = req.headers.get('x-webhook-secret') ?? req.nextUrl.searchParams.get('secret');
-  if (envSecret && provided !== envSecret) return false;
-  return true;
+  // No secret configured: fail-open only outside production, fail-closed on production
+  // (待修改事項.md P2-1).
+  if (!envSecret) return process.env.VERCEL_ENV !== 'production';
+  const provided = req.headers.get('x-webhook-secret') ?? req.nextUrl.searchParams.get('secret');
+  return provided === envSecret;
 }
 
 export interface ScanStatusCoin {

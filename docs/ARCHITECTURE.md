@@ -18,7 +18,7 @@
 - 資料庫：Supabase PostgreSQL
 - 快取/狀態：Upstash Redis
 - 行情：Binance Futures 公開 REST API（免金鑰）
-- 推播：Web Push（主要）／LINE（**已棄用**，月配額用完，程式碼保留未維護）
+- 推播：Web Push（唯一管道，LINE 已於 P2-3 完全拔除）
 
 > ⚠️ Vercel 專案有兩個並存：`tradding_app`（**正在跑的**）與 `trading`（廢棄部署）。
 > 查 log 要認明 `traddingapp-nu.vercel.app` 這個 host。
@@ -309,8 +309,7 @@ NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_K
 UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
 NEXT_PUBLIC_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
 ANALYSIS_TIMEFRAMES（預設 5m,15m,1h）, MIN_SCORE
-SUPABASE_PROFILE_ID（可選，繞過 line_user_id 查找）
-LINE_CHANNEL_TOKEN, LINE_USER_ID（已棄用）
+SUPABASE_PROFILE_ID（必填 —— profileId 解析唯一來源，P2-3 拔除 LINE 後不再有備援查找）
 ```
 
 ### 測試
