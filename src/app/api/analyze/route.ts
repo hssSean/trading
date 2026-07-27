@@ -1593,12 +1593,43 @@ export async function GET(req: NextRequest) {
     note?: string;
     error?: string;
   }
+
+  // docs/TODO.md P2 #5 — everything the deferred same_dir_cap/insert/funnel/
+  // results logic needs, snapshotted per-symbol before deferring to pass 2.
+  interface PendingCandidate {
+    symbol: string;
+    entrySignal: TradingSignal;
+    isScalp: boolean;
+    strong: TradingSignal[];
+    topScore: number;
+    rawTopScore: number;
+    locked: boolean;
+    confluenceMet: boolean;
+    agreeTFs: number;
+    tfsAnalyzed: string[];
+    symbolRegime: Regime;
+    symbolAdx: number;
+    symbolAtrPct: number;
+    suggestedRiskPct: number;
+    symbolFundingRate: number;
+    stratBPaused: boolean;
+    entryTfBias: 'LONG' | 'SHORT' | null;
+  }
+
   const results: ScanResult[] = [];
   const notified: string[] = [];
   // v2.1 §0: reject funnel — one record per candidate signal, sent or not
   const funnelEntries: Array<Record<string, unknown>> = [];
   // Rejected candidates with concrete levels → simulated as shadow trades
   const shadowCandidates: ShadowTrade[] = [];
+  // docs/TODO.md P2 #5: candidates that cleared every per-symbol gate (locked/
+  // cooldown/confluence/no_entry_tf/btc_direction/btc_pause/loss_cooldown/
+  // bias_hold) and are genuine contenders for the shared same-direction risk
+  // budget. Scan order is by trading volume rank — first-come-first-served on
+  // a scarce resource is the worst allocation rule. Deferred here so ALL of
+  // this cycle's candidates are known before same_dir_cap decides who gets the
+  // slot; resolved in score-descending order after the main loop (below).
+  const pendingCandidates: PendingCandidate[] = [];
 
   // §2.3 BTC regime — fetch once, apply to all altcoin signals
   const btcState = await fetchBtcRegime();
@@ -1824,6 +1855,9 @@ export async function GET(req: NextRequest) {
 
       let skipReason: string | undefined;
       let skipKey:    string | undefined; // v2.1 §0: machine-readable gate id for the reject funnel
+      // docs/TODO.md P2 #5: true once this candidate is parked for pass-2 same_dir_cap
+      // resolution — its funnel/results entries and insert are built in pass 2 instead.
+      let deferredToPass2 = false;
 
       // Phase 6: event filter (global; checked before per-symbol risk gates)
       if (eventFilter.active)
@@ -1892,33 +1926,175 @@ export async function GET(req: NextRequest) {
           }
         }
 
-        // §4.3 Same-direction risk cap（風險加權：A=1%、B=0.5%）
-        if (!skipReason && profileId) {
-          const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol, entrySignal.tier, acctRiskPct);
-          if (sdCheck.block) { skipKey = 'same_dir_cap'; skipReason = `跳過 — ${sdCheck.reason}`; }
+        // §4.3 same_dir_cap / hard-stop duplicate check / insert / notify / funnel /
+        // results are ALL deferred to pass 2 (docs/TODO.md P2 #5, 名額分配先到先得問題):
+        // this candidate has cleared every per-symbol-only gate (btc_direction/pause,
+        // loss_cooldown, bias_hold), making it a genuine contender for the shared
+        // same-direction risk budget. Resolving that contention here would award the
+        // budget by scan order (volume rank) instead of by score — the exact
+        // first-come-first-served problem the redesign fixes. Pass 2 (after the main
+        // loop) sorts all of this cycle's candidates by score and resolves them in
+        // that order instead.
+        if (!skipReason) {
+          deferredToPass2 = true;
+          pendingCandidates.push({
+            symbol, entrySignal, isScalp, strong, topScore, rawTopScore, locked, confluenceMet,
+            agreeTFs, tfsAnalyzed: timeframes.filter(tf => candleCache.has(tf)),
+            symbolRegime, symbolAdx, symbolAtrPct, suggestedRiskPct, symbolFundingRate,
+            stratBPaused, entryTfBias,
+          });
         }
+      }
 
-        // Hard-stop duplicate check
-        if (!skipReason && profileId) {
-          const _su = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
-          const _sk = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-          if (_su && _sk) {
-            try {
-              const { createClient: mkChk } = await import('@supabase/supabase-js');
-              const chk = mkChk(_su, _sk, { auth: { autoRefreshToken: false, persistSession: false } });
-              // Symbol-global (no user_id filter): single-user system, and legacy
-              // rows with NULL user_id must still block — 7/17 saw two overlapping
-              // AKE longs slip past the user-scoped version of this check.
-              const { count: c } = await chk.from('trades')
-                .select('id', { count: 'exact', head: true })
-                .eq('symbol', entrySignal.symbol).is('closed_at', null);
-              if (c !== null && c > 0)
-                { skipKey = 'has_open_position'; skipReason = `跳過 — 同幣種已有持倉 (${symbol})`; }
-            } catch (e) {
-              skipKey = 'dup_check_error';
-              skipReason = `跳過 — 重複檢查失敗 (${String(e).slice(0, 80)})`;
-              console.error(`[analyze] hard-stop check threw for ${symbol}:`, String(e));
-            }
+      // ── Signal gate ── moved to pass 2 (docs/TODO.md P2 #5): a candidate only
+      // reaches here with entrySignal set and skipReason still falsy via the
+      // deferredToPass2 branch above, so this gate is resolved for every such
+      // candidate in score order, not scan order — see the pass-2 loop below.
+      // (gateNote — insert-failure note — no longer applies to a pass-1-resolved
+      // candidate; pass 2 has its own gateNote for the entries it resolves.)
+
+      // ── v2.1 §0: reject funnel — log every candidate regardless of outcome ──
+      // Candidate = any qualifying signal existed OR raw score reached tier-B floor.
+      // !deferredToPass2: a parked candidate's funnel/results entry is built in
+      // pass 2 once its same_dir_cap outcome is actually known — building it here
+      // would wrongly log it as accepted (notified is still empty at this point
+      // for every candidate, deferred or not).
+      if (!deferredToPass2 && (topStrong || rawTopScore >= 55)) {
+        const signalSent = notified.includes(symbol);
+        const rejectedAt = signalSent ? null
+          : skipKey            ? skipKey
+          : !topStrong         ? 'score_gate'
+          : !profileId         ? 'no_profile'
+          : 'insert_failed';
+        funnelEntries.push({
+          at: Date.now(),
+          symbol,
+          strategy:  topStrong?.strategy ?? 'A',
+          direction: topStrong?.direction ?? null,
+          rawScore:  Math.max(rawTopScore, topStrong?.score ?? 0),
+          tier:      entrySignal?.tier ?? topStrong?.tier ?? null,
+          rejectedAt,
+          rejectDetail: skipReason
+            ?? (rejectedAt === 'score_gate'    ? `原始分 ${rawTopScore} 未達門檻或組數不足`
+              : rejectedAt === 'no_profile'    ? 'profileId 未解析，無法寫入 DB'
+              : rejectedAt === 'insert_failed' ? 'DB 寫入失敗（見 Vercel logs）'
+              : null),
+          filters: {
+            adx4h:          isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(1)),
+            regime:         symbolRegime,
+            btcRegime:      btcState.regime,
+            btcMovePct:     btcState.movePct ?? null,
+            btcPausedLong:  btcState.longPaused,
+            btcPausedShort: btcState.shortPaused,
+            agreeTFs,
+            entryTfBias,
+            totalOpenRisk,
+          },
+        });
+
+        // Shadow candidate: gate-rejected with concrete levels → simulate outcome
+        const shadowSrc = entrySignal ?? topStrong;
+        if (rejectedAt && SHADOW_GATES.has(rejectedAt) && shadowSrc) {
+          const ssp = shadowSrc.signalPrice ?? 0;
+          const isLimit = ssp > 0 && Math.abs(shadowSrc.entry - ssp) / ssp > 0.003;
+          shadowCandidates.push({
+            id: `shdw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            at: Date.now(),
+            symbol,
+            direction: shadowSrc.direction,
+            timeframe: shadowSrc.timeframe,
+            entry: shadowSrc.entry,
+            stopLoss: shadowSrc.stopLoss,
+            tp1: shadowSrc.takeProfits[0],
+            tp2: shadowSrc.takeProfits[1] ?? shadowSrc.takeProfits[0],
+            score: shadowSrc.score,
+            tier: shadowSrc.tier ?? null,
+            strategy: shadowSrc.strategy ?? 'A',
+            rejectedAt,
+            signalPrice: ssp,
+            status: isLimit ? 'waiting' : 'active',
+            ...(isLimit ? {} : { filledAt: Date.now() }),
+            lastCheckedAt: Date.now(),
+          });
+        }
+      }
+
+      if (!deferredToPass2) {
+        results.push({
+          symbol,
+          signalCount: strong.length,
+          topScore,
+          rawTopScore,
+          topSignal: strong[0]
+            ? { direction: strong[0].direction, strength: strong[0].strength, score: strong[0].score, entry: strong[0].entry, confidence: strong[0].confidence, fundingRate: strong[0].fundingRate }
+            : null,
+          locked,
+          confluenceMet,
+          agreeTFs,
+          tfsAnalyzed: timeframes.filter(tf => candleCache.has(tf)),
+          regime: symbolRegime,
+          btcRegime: btcState.regime,
+          adx4h: isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(2)),
+          atrPercentile: symbolAtrPct,
+          suggestedRiskPct,
+          fundingRate: symbolFundingRate,
+          event_filter_active: eventFilter.active,
+          ...(skipReason   ? { note: skipReason }
+            : stratBPaused ? { note: '策略B連虧2筆暫停24h' }
+            : {}),
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      results.push({ symbol, signalCount: 0, topScore, topSignal: null, locked: false, error: msg });
+    }
+
+    await delay(300);
+  }
+
+  // ── Pass 2: resolve deferred candidates in score order (docs/TODO.md P2 #5) ──
+  // Everything from here through the funnel/results entry is the same gate that
+  // used to run inline per-symbol in pass 1 (same_dir_cap → hard-stop duplicate
+  // check → DB insert → lock/pending-signal → Web Push notify), just resolved
+  // for the highest-scoring candidate first instead of whichever symbol the scan
+  // happened to reach first by trading-volume rank. checkSameDirectionRisk reads
+  // fresh DB state on every call, so a candidate that wins the budget here is
+  // correctly "seen" by the next (lower-scoring) candidate's check — same
+  // cross-candidate accounting as before, just reordered.
+  const sortedCandidates = [...pendingCandidates].sort((a, b) => b.entrySignal.score - a.entrySignal.score);
+
+  for (const cand of sortedCandidates) {
+    const { symbol, entrySignal, isScalp } = cand;
+    try {
+      let skipKey: string | undefined;
+      let skipReason: string | undefined;
+
+      // §4.3 Same-direction risk cap（風險加權：A=1%、B=0.5%）
+      if (profileId) {
+        const sdCheck = await checkSameDirectionRisk(profileId, entrySignal.direction, symbol, entrySignal.tier, acctRiskPct);
+        if (sdCheck.block) { skipKey = 'same_dir_cap'; skipReason = `跳過 — ${sdCheck.reason}`; }
+      }
+
+      // Hard-stop duplicate check
+      if (!skipReason && profileId) {
+        const _su = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+        const _sk = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+        if (_su && _sk) {
+          try {
+            const { createClient: mkChk } = await import('@supabase/supabase-js');
+            const chk = mkChk(_su, _sk, { auth: { autoRefreshToken: false, persistSession: false } });
+            // Symbol-global (no user_id filter): single-user system, and legacy
+            // rows with NULL user_id must still block — 7/17 saw two overlapping
+            // AKE longs slip past the user-scoped version of this check.
+            const { count: c } = await chk.from('trades')
+              .select('id', { count: 'exact', head: true })
+              .eq('symbol', entrySignal.symbol).is('closed_at', null);
+            if (c !== null && c > 0)
+              { skipKey = 'has_open_position'; skipReason = `跳過 — 同幣種已有持倉 (${symbol})`; }
+          } catch (e) {
+            skipKey = 'dup_check_error';
+            skipReason = `跳過 — 重複檢查失敗 (${String(e).slice(0, 80)})`;
+            console.error(`[analyze] hard-stop check threw for ${symbol}:`, String(e));
           }
         }
       }
@@ -1926,7 +2102,7 @@ export async function GET(req: NextRequest) {
       // ── Signal gate: DB record and notifications are fully decoupled from each other ──
       // profileId (Supabase user UUID) is the only identity requirement; LINE success is not.
       let gateNote: string | undefined; // surfaces insert failures in scan-status panel
-      if (entrySignal && !!profileId && !locked && !sameCandle && !onCooldown && confluenceMet && !skipReason) {
+      if (!!profileId && !skipReason) {
         const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
         const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
         const sp           = entrySignal.signalPrice ?? 0;
@@ -2056,7 +2232,7 @@ export async function GET(req: NextRequest) {
         if (insertOk) {
           notified.push(symbol);
           await setLock(symbol, {
-            sentAt: now, candleBucket: nowBucket,
+            sentAt: Date.now(), candleBucket: current4hBucket(),
             direction: entrySignal.direction, locked: true,
           });
           const rp = getRedis();
@@ -2087,113 +2263,94 @@ export async function GET(req: NextRequest) {
               tag: `signal-${entrySignal.id}`,
             });
           }
-
-          // 市價單不再另外推一則「✅ 市場入場」確認（2026-07-27 移除）。
-          //
-          // 那是 LINE 時代的遺留：當時 Step 3 送的是 Flex 圖卡、這裡送的是純文字，
-          // 兩者形式不同所以並存合理。LINE 拔除後兩則都變成 Web Push，內容就成了
-          // 純重複——確認訊息的欄位（方向/進場/TP1/SL/倉位）全部已經在 Step 3 裡，
-          // 它甚至比確認訊息多了分數與止損虧損金額。
-          //
-          // 而且它會誤導：市價單本來就是「立刻以市價進場」，不存在「後來才成交」
-          // 這個事件，但連著兩則推播看起來就像「剛推的單秒成交了」。真正有兩段
-          // 生命週期的是限價單——它由 monitorActiveTrades 在成交 K 線出現時才推
-          // 「✅ 掛單成交」，那則保留。
+          // 市價單不再另外推一則「✅ 市場入場」確認（2026-07-27 移除，見同名註解於 pass 1 沿革）。
         }
       }
 
-      // ── v2.1 §0: reject funnel — log every candidate regardless of outcome ──
-      // Candidate = any qualifying signal existed OR raw score reached tier-B floor.
-      if (topStrong || rawTopScore >= 55) {
-        const signalSent = notified.includes(symbol);
-        const rejectedAt = signalSent ? null
-          : skipKey            ? skipKey
-          : !topStrong         ? 'score_gate'
-          : !profileId         ? 'no_profile'
-          : 'insert_failed';
-        funnelEntries.push({
+      // ── v2.1 §0: reject funnel — same shape as pass 1's, for a deferred candidate ──
+      const signalSent = notified.includes(symbol);
+      const rejectedAt = signalSent ? null
+        : skipKey    ? skipKey
+        : !profileId ? 'no_profile'
+        : 'insert_failed';
+      funnelEntries.push({
+        at: Date.now(),
+        symbol,
+        strategy:  entrySignal.strategy ?? 'A',
+        direction: entrySignal.direction,
+        rawScore:  Math.max(cand.rawTopScore, entrySignal.score),
+        tier:      entrySignal.tier ?? null,
+        rejectedAt,
+        rejectDetail: skipReason
+          ?? (rejectedAt === 'no_profile'    ? 'profileId 未解析，無法寫入 DB'
+            : rejectedAt === 'insert_failed' ? 'DB 寫入失敗（見 Vercel logs）'
+            : null),
+        filters: {
+          adx4h:          isNaN(cand.symbolAdx) ? null : parseFloat(cand.symbolAdx.toFixed(1)),
+          regime:         cand.symbolRegime,
+          btcRegime:      btcState.regime,
+          btcMovePct:     btcState.movePct ?? null,
+          btcPausedLong:  btcState.longPaused,
+          btcPausedShort: btcState.shortPaused,
+          agreeTFs:       cand.agreeTFs,
+          entryTfBias:    cand.entryTfBias,
+          totalOpenRisk,
+        },
+      });
+
+      // Shadow candidate: gate-rejected with concrete levels → simulate outcome
+      if (rejectedAt && SHADOW_GATES.has(rejectedAt)) {
+        const ssp = entrySignal.signalPrice ?? 0;
+        const isLimit = ssp > 0 && Math.abs(entrySignal.entry - ssp) / ssp > 0.003;
+        shadowCandidates.push({
+          id: `shdw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           at: Date.now(),
           symbol,
-          strategy:  topStrong?.strategy ?? 'A',
-          direction: topStrong?.direction ?? null,
-          rawScore:  Math.max(rawTopScore, topStrong?.score ?? 0),
-          tier:      entrySignal?.tier ?? topStrong?.tier ?? null,
+          direction: entrySignal.direction,
+          timeframe: entrySignal.timeframe,
+          entry: entrySignal.entry,
+          stopLoss: entrySignal.stopLoss,
+          tp1: entrySignal.takeProfits[0],
+          tp2: entrySignal.takeProfits[1] ?? entrySignal.takeProfits[0],
+          score: entrySignal.score,
+          tier: entrySignal.tier ?? null,
+          strategy: entrySignal.strategy ?? 'A',
           rejectedAt,
-          rejectDetail: skipReason
-            ?? (rejectedAt === 'score_gate'    ? `原始分 ${rawTopScore} 未達門檻或組數不足`
-              : rejectedAt === 'no_profile'    ? 'profileId 未解析，無法寫入 DB'
-              : rejectedAt === 'insert_failed' ? 'DB 寫入失敗（見 Vercel logs）'
-              : null),
-          filters: {
-            adx4h:          isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(1)),
-            regime:         symbolRegime,
-            btcRegime:      btcState.regime,
-            btcMovePct:     btcState.movePct ?? null,
-            btcPausedLong:  btcState.longPaused,
-            btcPausedShort: btcState.shortPaused,
-            agreeTFs,
-            entryTfBias,
-            totalOpenRisk,
-          },
+          signalPrice: ssp,
+          status: isLimit ? 'waiting' : 'active',
+          ...(isLimit ? {} : { filledAt: Date.now() }),
+          lastCheckedAt: Date.now(),
         });
-
-        // Shadow candidate: gate-rejected with concrete levels → simulate outcome
-        const shadowSrc = entrySignal ?? topStrong;
-        if (rejectedAt && SHADOW_GATES.has(rejectedAt) && shadowSrc) {
-          const ssp = shadowSrc.signalPrice ?? 0;
-          const isLimit = ssp > 0 && Math.abs(shadowSrc.entry - ssp) / ssp > 0.003;
-          shadowCandidates.push({
-            id: `shdw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            at: Date.now(),
-            symbol,
-            direction: shadowSrc.direction,
-            timeframe: shadowSrc.timeframe,
-            entry: shadowSrc.entry,
-            stopLoss: shadowSrc.stopLoss,
-            tp1: shadowSrc.takeProfits[0],
-            tp2: shadowSrc.takeProfits[1] ?? shadowSrc.takeProfits[0],
-            score: shadowSrc.score,
-            tier: shadowSrc.tier ?? null,
-            strategy: shadowSrc.strategy ?? 'A',
-            rejectedAt,
-            signalPrice: ssp,
-            status: isLimit ? 'waiting' : 'active',
-            ...(isLimit ? {} : { filledAt: Date.now() }),
-            lastCheckedAt: Date.now(),
-          });
-        }
       }
 
       results.push({
         symbol,
-        signalCount: strong.length,
-        topScore,
-        rawTopScore,
-        topSignal: strong[0]
-          ? { direction: strong[0].direction, strength: strong[0].strength, score: strong[0].score, entry: strong[0].entry, confidence: strong[0].confidence, fundingRate: strong[0].fundingRate }
+        signalCount: cand.strong.length,
+        topScore: cand.topScore,
+        rawTopScore: cand.rawTopScore,
+        topSignal: cand.strong[0]
+          ? { direction: cand.strong[0].direction, strength: cand.strong[0].strength, score: cand.strong[0].score, entry: cand.strong[0].entry, confidence: cand.strong[0].confidence, fundingRate: cand.strong[0].fundingRate }
           : null,
-        locked,
-        confluenceMet,
-        agreeTFs,
-        tfsAnalyzed: timeframes.filter(tf => candleCache.has(tf)),
-        regime: symbolRegime,
+        locked: cand.locked,
+        confluenceMet: cand.confluenceMet,
+        agreeTFs: cand.agreeTFs,
+        tfsAnalyzed: cand.tfsAnalyzed,
+        regime: cand.symbolRegime,
         btcRegime: btcState.regime,
-        adx4h: isNaN(symbolAdx) ? null : parseFloat(symbolAdx.toFixed(2)),
-        atrPercentile: symbolAtrPct,
-        suggestedRiskPct,
-        fundingRate: symbolFundingRate,
+        adx4h: isNaN(cand.symbolAdx) ? null : parseFloat(cand.symbolAdx.toFixed(2)),
+        atrPercentile: cand.symbolAtrPct,
+        suggestedRiskPct: cand.suggestedRiskPct,
+        fundingRate: cand.symbolFundingRate,
         event_filter_active: eventFilter.active,
-        ...(skipReason   ? { note: skipReason }
-          : gateNote     ? { note: gateNote }
-          : stratBPaused ? { note: '策略B連虧2筆暫停24h' }
+        ...(skipReason        ? { note: skipReason }
+          : gateNote          ? { note: gateNote }
+          : cand.stratBPaused ? { note: '策略B連虧2筆暫停24h' }
           : {}),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      results.push({ symbol, signalCount: 0, topScore, topSignal: null, locked: false, error: msg });
+      results.push({ symbol, signalCount: 0, topScore: cand.topScore, topSignal: null, locked: false, error: msg });
     }
-
-    await delay(300);
   }
 
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
