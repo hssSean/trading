@@ -1,10 +1,25 @@
 # 待辦清單
 
-> 最後更新：2026-07-26
+> 最後更新：2026-07-27
 > 排序依「該不該現在做」，不是依技術難度。
 > 標 🔬 的是**樣本不足**，動了也分不出是改對還是雜訊——刻意不做。
 
 ---
+
+## 已完成（2026-07-27 這輪）
+
+殭屍單復活、通知靜音、user_id 安全、LINE 拔除全量修正（詳細診斷過程見
+`待修改事項.md`）；另外查出並修掉兩個新問題：
+
+| commit | 內容 |
+|---|---|
+| `52ab0ab` | 推薦單一出現就顯示持倉中——client 端讀不到 status 欄位時不再捏造 'active' |
+| `966b8e8` | 移除手動新增交易功能（未使用），連帶消除其逾期誤刪風險 |
+| `5aaf29e` | 待修改事項.md 全量修正：殭屍單復活(P0-1)、通知靜音(P0-2)、user_id 安全(P1-1)、opened_at 覆寫(P1-2)、SignalCard 建單路徑(P1-3)、webhook fail-open(P2-1)、刪除重試佇列(P2-2)、LINE 全拔除(P2-3)、build 版本顯示(P2-4) |
+| `6c311cf` | 「等待進場」看不到掛單——status=NULL 的列客戶端未比照 waiting；**順帶查明本清單 #3「insert fallback 原因」**：DB 缺 strategy/regime/confidence/funding_rate/suggested_risk_pct/suggested_leverage 欄位，insert 掉進最深層 fallback，把 status/signal_price 一併剝掉，且該分支成功時完全沒有 log。已補 `console.error`，並提供 `ALTER TABLE` 給使用者跑（已跑完） |
+| `55c5bc4` | 監控幣種移除後原地復活——`removeCoin` 只刪本地，DB watchlist 列從未刪除 |
+| `5106df4` | 市價單不再連發兩則推播——移除重複的「市場入場」確認訊息（LINE 時代遺留） |
+| — | cron-job.org 排程被停用超過一週（非程式問題），已在使用者授權下重新啟用 |
 
 ## 已完成（2026-07-26 這輪）
 
@@ -37,15 +52,13 @@
 `3049bc9` 只改了判詞，原提案的「容量關卡與品質關卡分開顯示」沒做。
 避免之後看漏斗時又被容量關卡的 netR 帶著跑。
 
-### 3. 查明 insert fallback 被觸發的原因
-`ecc40e6` 加了防呆（status=NULL 併入 waiting），但**原始觸發原因未查明**。
-Vercel Hobby 的 log 只留約 50 分鐘，事後查不到。
+### ~~3. 查明 insert fallback 被觸發的原因~~ ✅ 已查明並修復（`6c311cf`，2026-07-27）
+根因：DB 缺 `strategy/regime/confidence/funding_rate/suggested_risk_pct/suggested_leverage`
+六個 v2.1 欄位，insert 掉進最深層 fallback，把 `status`/`signal_price` 一併剝掉，
+且該分支成功時完全沒有 log——已無聲觸發好幾週。
 
-下次再發生時要**在同一小時內**去看 `tradding_app` 專案的 Logs，找：
-```
-[analyze] insert ok without v2.1 columns for ... — run: ALTER TABLE ...
-[analyze] trade insert failed for ...: [代碼] 訊息
-```
+已補：fallback 成功時改 `console.error` 印出原始錯誤；使用者已在 Supabase 跑
+`ALTER TABLE` 補齊六個欄位，新單 `signal_price` 已驗證正常寫入（見 `5106df4` 附帶驗證）。
 
 ---
 
