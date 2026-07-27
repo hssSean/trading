@@ -2003,21 +2003,17 @@ export async function GET(req: NextRequest) {
             });
           }
 
-          // ── Step 4: Market-entry confirmation (market orders only) ───────────
-          // Limit orders are confirmed by monitorActiveTrades when the fill candle appears.
-          if (!isLimitOrder) {
-            const dir     = entrySignal.direction === 'LONG' ? '做多▲' : '做空▼';
-            const sym     = entrySignal.symbol.replace('USDT', '/USDT');
-            const effRisk = acctRiskPct * tierRiskMultiplier(entrySignal.symbol, entrySignal.tier);
-            const plan    = calcPositionPlan(acctSize, effRisk, entrySignal.entry, entrySignal.stopLoss, entrySignal.tier === 'B' ? 5 : 10);
-            if (profileId) {
-              await sendWebPushToUser(profileId, {
-                title: `✅ 市場入場 ${sym}${isScalp ? ' ⚡短線' : ''}`,
-                body: `${dir} $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)}${plan ? ` ｜ ${formatPlanLine(plan)}` : ''}`,
-                tag: `entry-${entrySignal.id}`,
-              });
-            }
-          }
+          // 市價單不再另外推一則「✅ 市場入場」確認（2026-07-27 移除）。
+          //
+          // 那是 LINE 時代的遺留：當時 Step 3 送的是 Flex 圖卡、這裡送的是純文字，
+          // 兩者形式不同所以並存合理。LINE 拔除後兩則都變成 Web Push，內容就成了
+          // 純重複——確認訊息的欄位（方向/進場/TP1/SL/倉位）全部已經在 Step 3 裡，
+          // 它甚至比確認訊息多了分數與止損虧損金額。
+          //
+          // 而且它會誤導：市價單本來就是「立刻以市價進場」，不存在「後來才成交」
+          // 這個事件，但連著兩則推播看起來就像「剛推的單秒成交了」。真正有兩段
+          // 生命週期的是限價單——它由 monitorActiveTrades 在成交 K 線出現時才推
+          // 「✅ 掛單成交」，那則保留。
         }
       }
 
