@@ -56,6 +56,15 @@ const REJECT_LABEL: Record<string, string> = {
 // below is misleading for these; show the raw numbers without the judgment.
 const CAPACITY_GATES = new Set(['same_dir_cap', 'total_risk_cap', 'locked']);
 
+interface TimeStopStat {
+  win: number;
+  loss: number;
+  stillOpen: number;
+  live: number;
+  netR: number;      // 「如果不砍會怎樣」的模擬淨R
+  realNetR: number;  // 真實時間止損出場的淨R
+}
+
 interface FunnelStats {
   total: number;
   sent: number;
@@ -67,13 +76,50 @@ interface FunnelStats {
     // Simulated outcome of what this gate rejected: netR < 0 = gate saved money
     shadow?: { win: number; loss: number; other: number; pending: number; netR: number };
   }>;
+  // docs/TODO.md P1 #1：時間止損（8根K線停滯/24-168h到期）強制關單後，
+  // 繼續模擬到真正 TP/SL 的淨R vs 真實出場淨R。
+  timeStopStats?: Partial<Record<'stall' | 'expiry', TimeStopStat>>;
 }
+
+const TIME_STOP_LABEL: Record<string, string> = {
+  stall:  '停滯止損（8根K線）',
+  expiry: '到期平倉（24-168h）',
+};
 
 const BTC_REGIME_LABEL: Record<string, { text: string; cls: string }> = {
   bullish: { text: 'BTC 偏多', cls: 'text-[#0ECB81]' },
   bearish: { text: 'BTC 偏空', cls: 'text-[#F6465D]' },
   chaotic: { text: 'BTC 混沌', cls: 'text-[#2DD4BF]' },
 };
+
+// Shared row for both the quality-gate and capacity-gate funnel groups
+// (docs/TODO.md P1 #2) — same layout, only the caption differs by gate kind.
+function FunnelReasonRow({ r }: { r: FunnelStats['reasons'][number] }) {
+  const sh = r.shadow;
+  const decided = sh ? sh.win + sh.loss + sh.other : 0;
+  return (
+    <div className="text-[10px] leading-4 mb-0.5">
+      <div className="flex items-center gap-2">
+        <span className="text-[#565E6B] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
+        <div className="flex-1 h-1 bg-[#141A21] overflow-hidden">
+          <div className="h-full bg-[#F6465D]/50" style={{ width: `${r.pctOfRejected}%` }} />
+        </div>
+        <span className="text-[#565E6B] w-14 shrink-0 text-right num">{r.count} ({r.pctOfRejected}%)</span>
+      </div>
+      {sh && decided > 0 && (
+        CAPACITY_GATES.has(r.key) ? (
+          <p className="pl-2 num text-[#565E6B]">
+            └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R（容量關卡，非品質判斷，數字僅供參考）
+          </p>
+        ) : (
+          <p className={`pl-2 num ${sh.netR <= 0 ? 'text-[#0ECB81]/70' : 'text-[#C99A2E]/90'}`}>
+            └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R {sh.netR <= 0 ? '（這關擋得對）' : '（擋掉了賺錢單）'}
+          </p>
+        )
+      )}
+    </div>
+  );
+}
 
 function timeAgo(ts: number): string {
   const m = Math.floor((Date.now() - ts) / 60000);
@@ -182,41 +228,59 @@ export function ScanStatusPanel() {
               );
             })}
           </div>
-          {/* v2.1 §0: reject funnel — which gate kills the most candidates */}
-          {funnel && funnel.total > 0 && (
-            <div className="mt-2.5 pt-2 border-t border-[#1B222B]">
-              <p className="tlabel mb-1">
-                近3天訊號漏斗 — 候選 {funnel.total} · 出單 <span className="text-[#0ECB81] num">{funnel.sent}</span>
-              </p>
-              {funnel.reasons.slice(0, 5).map(r => {
-                const sh = r.shadow;
-                const decided = sh ? sh.win + sh.loss + sh.other : 0;
-                return (
-                  <div key={r.key} className="text-[10px] leading-4 mb-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[#565E6B] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
-                      <div className="flex-1 h-1 bg-[#141A21] overflow-hidden">
-                        <div className="h-full bg-[#F6465D]/50" style={{ width: `${r.pctOfRejected}%` }} />
-                      </div>
-                      <span className="text-[#565E6B] w-14 shrink-0 text-right num">{r.count} ({r.pctOfRejected}%)</span>
-                    </div>
-                    {sh && decided > 0 && (
-                      CAPACITY_GATES.has(r.key) ? (
-                        <p className="pl-2 num text-[#565E6B]">
-                          └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R（容量關卡，非品質判斷，數字僅供參考）
-                        </p>
-                      ) : (
-                        <p className={`pl-2 num ${sh.netR <= 0 ? 'text-[#0ECB81]/70' : 'text-[#C99A2E]/90'}`}>
-                          └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R {sh.netR <= 0 ? '（這關擋得對）' : '（擋掉了賺錢單）'}
-                        </p>
-                      )
-                    )}
+          {/* v2.1 §0: reject funnel — which gate kills the most candidates.
+              docs/TODO.md P1 #2: capacity gates (correlated-basket slot limits)
+              and quality gates (signal didn't clear a bar) are split into two
+              groups so a capacity gate's netR — which reflects the same handful
+              of BTC moves counted once per blocked symbol, not independent
+              signal edge — never sits in the same ranked list as quality gates
+              and gets read as "this quality filter is wrong". */}
+          {funnel && funnel.total > 0 && (() => {
+            const qualityReasons  = funnel.reasons.filter(r => !CAPACITY_GATES.has(r.key)).slice(0, 5);
+            const capacityReasons = funnel.reasons.filter(r =>  CAPACITY_GATES.has(r.key));
+            return (
+              <div className="mt-2.5 pt-2 border-t border-[#1B222B]">
+                <p className="tlabel mb-1">
+                  近3天訊號漏斗 — 候選 {funnel.total} · 出單 <span className="text-[#0ECB81] num">{funnel.sent}</span>
+                </p>
+                {qualityReasons.length > 0 && (
+                  <div className="mb-1.5">
+                    <p className="text-[#3A424E] text-[9px] mb-0.5">品質關卡</p>
+                    {qualityReasons.map(r => <FunnelReasonRow key={r.key} r={r} />)}
                   </div>
+                )}
+                {capacityReasons.length > 0 && (
+                  <div>
+                    <p className="text-[#3A424E] text-[9px] mb-0.5">容量關卡（曝險上限，非品質判斷）</p>
+                    {capacityReasons.map(r => <FunnelReasonRow key={r.key} r={r} />)}
+                  </div>
+                )}
+                {funnel.reasons.length === 0 && (
+                  <p className="text-[#3A424E] text-[10px]">尚無被拒紀錄</p>
+                )}
+              </div>
+            );
+          })()}
+          {/* docs/TODO.md P1 #1: 時間止損強制關單後，繼續模擬到真正 TP/SL 的
+              淨R vs 真實出場淨R——正差值代表「讓它走完會更好」，負或接近0
+              代表「砍得對」。樣本不足前只陳述數字，不下判詞。 */}
+          {funnel?.timeStopStats && (Object.keys(funnel.timeStopStats).length > 0) && (
+            <div className="mt-2.5 pt-2 border-t border-[#1B222B]">
+              <p className="tlabel mb-1">時間止損影子模擬</p>
+              {(['stall', 'expiry'] as const).map(trigger => {
+                const s = funnel.timeStopStats?.[trigger];
+                if (!s) return null;
+                const decided = s.win + s.loss + s.stillOpen;
+                return (
+                  <p key={trigger} className="text-[10px] leading-4 mb-0.5 num text-[#565E6B]">
+                    {TIME_STOP_LABEL[trigger]}：真實淨 {s.realNetR >= 0 ? '+' : ''}{s.realNetR}R
+                    {decided > 0 && (
+                      <> · 若不砍模擬淨 {s.netR >= 0 ? '+' : ''}{s.netR}R（賺{s.win} 虧{s.loss}{s.stillOpen > 0 ? ` 未平${s.stillOpen}` : ''}）</>
+                    )}
+                    {s.live > 0 && <span className="text-[#3A424E]"> · {s.live} 筆追蹤中</span>}
+                  </p>
                 );
               })}
-              {funnel.reasons.length === 0 && (
-                <p className="text-[#3A424E] text-[10px]">尚無被拒紀錄</p>
-              )}
             </div>
           )}
           <p className="text-[#3A424E] text-[9px] mt-2 num">

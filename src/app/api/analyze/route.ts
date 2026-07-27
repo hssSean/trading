@@ -6,7 +6,8 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1 } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl } from '@/lib/monitorMath';
+import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 
 export const maxDuration = 60;
 
@@ -274,6 +275,9 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
 
   const now = Date.now();
   let filled = 0, cancelled = 0, closed = 0;
+  // 時間止損影子模擬新開的追蹤（docs/TODO.md P1 #1）——Phase 2 關單時累積，
+  // 函式結尾一次 flush 進 Redis。
+  const timeStopShadowStarts: TimeStopShadow[] = [];
 
   // ── Duplicate cleanup: a symbol should have at most ONE open trade ──────────
   // A stale WAITING limit order alongside a filled ACTIVE/TP1 trade for the same
@@ -847,6 +851,26 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
 
     await unlockSymbol(trade.symbol as string);
 
+    // 時間止損影子模擬：只追蹤「還沒到 TP1 就被時間強制關掉」的兩種情況
+    // （8根K線停滯、24h/72h/168h到期），不追蹤 TP1 後才到期的單——那些已經
+    // 鎖利，不是「可能砍在半路」的問題（docs/TODO.md P1 #1）。
+    if (closeResult === 'MANUAL_CLOSE') {
+      const trigger: TimeStopTrigger = timeStopFired ? 'stall' : 'expiry';
+      timeStopShadowStarts.push(startTimeStopShadow({
+        id:            trade.id as string,
+        symbol:        trade.symbol as string,
+        direction:     trade.direction as 'LONG' | 'SHORT',
+        timeframe:     trade.timeframe as string,
+        entry:         trade.entry as number,
+        stopLoss:      trade.stop_loss as number,
+        tp1:           trade.tp1 as number,
+        tp2:           trade.tp2 as number,
+        trigger,
+        realExitPrice: closePrice,
+        realClosedAt:  now,
+      }));
+    }
+
     // Post-loss cooldown: same symbol+direction blocked for 24h (see helper docs)
     if (closeResult === 'LOSS') {
       await setLossCooldown(trade.symbol as string, trade.direction as string);
@@ -882,8 +906,70 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     closed++;
   }
 
+  await processTimeStopShadows(timeStopShadowStarts);
+
   if (rLock) { try { await rLock.del('monitor-run-lock'); } catch { /* best-effort */ } }
   return { monitored: active.length + waiting.length, closed, filled, cancelled };
+}
+
+// 時間止損影子模擬的 Redis 讀寫（docs/TODO.md P1 #1）。跟 processShadowTrades
+// 同一種模式（合併新單、每輪限量抓K線推進、修剪過舊的已結束項目），但這裡
+// 追蹤的是真實已關閉的交易，不是被拒訊號——1:1 對應 trade id，不需去重合併。
+async function processTimeStopShadows(newStarts: TimeStopShadow[]): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    const raw = (await r.hgetall<Record<string, unknown>>('time_stop_shadows')) ?? {};
+    const shadows = new Map<string, TimeStopShadow>();
+    for (const [id, v] of Object.entries(raw)) {
+      try {
+        const s = (typeof v === 'string' ? JSON.parse(v) : v) as TimeStopShadow;
+        if (s && s.symbol && s.status) shadows.set(id, s);
+      } catch { /* drop malformed entry */ }
+    }
+
+    const writes: Record<string, string> = {};
+    for (const s of newStarts) {
+      if (shadows.has(s.id)) continue; // already tracked (shouldn't happen, guard anyway)
+      shadows.set(s.id, s);
+      writes[s.id] = JSON.stringify(s);
+    }
+
+    const now = Date.now();
+    const live = Array.from(shadows.values()).filter(s => s.status === 'live');
+    const bySymbol = new Map<string, TimeStopShadow[]>();
+    live.forEach(s => {
+      const arr = bySymbol.get(s.symbol) ?? [];
+      arr.push(s);
+      bySymbol.set(s.symbol, arr);
+    });
+
+    let fetches = 0;
+    for (const [symbol, group] of Array.from(bySymbol.entries())) {
+      if (fetches >= 8) break; // rest advance next cron
+      fetches++;
+      let candles: Candle[] = [];
+      try { candles = await fetchCandles(symbol, '1h', 168, 3); } catch { continue; }
+      for (const s of group) {
+        const advanced = advanceTimeStopShadow(s, candles, now);
+        shadows.set(s.id, advanced);
+        writes[s.id] = JSON.stringify(advanced);
+      }
+    }
+
+    // Prune done shadows older than 30 days — long enough to review a week or
+    // two of data (docs/TODO.md #8/#9 cadence) without growing the hash forever.
+    const toDelete: string[] = [];
+    for (const [id, s] of Array.from(shadows.entries())) {
+      if (s.status === 'done' && now - (s.closedAt ?? s.realClosedAt) > 30 * 24 * 3600 * 1000) toDelete.push(id);
+    }
+
+    if (Object.keys(writes).length > 0) await r.hset('time_stop_shadows', writes);
+    if (toDelete.length > 0) await r.hdel('time_stop_shadows', ...toDelete);
+    await r.expire('time_stop_shadows', 30 * 24 * 3600);
+  } catch (e) {
+    console.error('[time-stop-shadow] simulation failed:', String(e).slice(0, 200));
+  }
 }
 
 // ── Confidence score (0-100, Phase 4) ────────────────────────
@@ -1255,19 +1341,18 @@ function simulateShadow(st: ShadowTrade, candles: Candle[], now: number): void {
   }
   if (st.status !== 'active' || !st.filledAt) return;
 
-  for (const c of candles) {
-    if (c.closeTime <= st.filledAt) continue;
-    const hitSL  = isLong ? c.low  <= st.stopLoss : c.high >= st.stopLoss;
-    const hitTP1 = isLong ? c.high >= st.tp1      : c.low  <= st.tp1;
-    const hitTP2 = isLong ? c.high >= st.tp2      : c.low  <= st.tp2;
-    if (st.tp1Hit) {
-      if (hitTP2) { st.status = 'done'; st.result = 'WIN_TP2'; st.exitPrice = st.tp2;      st.closedAt = c.closeTime; return; }
-      if (hitSL)  { st.status = 'done'; st.result = 'WIN_TP1'; st.exitPrice = st.stopLoss; st.closedAt = c.closeTime; return; }
-      continue;
-    }
-    if (hitTP2)      { st.status = 'done'; st.result = 'WIN_TP2'; st.exitPrice = st.tp2; st.closedAt = c.closeTime; return; }
-    else if (hitTP1) { st.tp1Hit = true; continue; } // TP1-before-SL same-candle rule (matches monitor)
-    else if (hitSL)  { st.status = 'done'; st.result = 'LOSS'; st.exitPrice = st.stopLoss; st.closedAt = c.closeTime; return; }
+  const outcome = walkTpSl(
+    candles, st.filledAt,
+    { entry: st.entry, stopLoss: st.stopLoss, tp1: st.tp1, tp2: st.tp2, isLong },
+    !!st.tp1Hit,
+  );
+  st.tp1Hit = outcome.tp1Hit;
+  if (outcome.done) {
+    st.status = 'done';
+    st.result = outcome.result;
+    st.exitPrice = outcome.exitPrice;
+    st.closedAt = outcome.closedAt;
+    return;
   }
   if (now - st.filledAt > activeMs) {
     const lastC  = candles[candles.length - 1];

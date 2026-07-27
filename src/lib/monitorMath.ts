@@ -12,3 +12,56 @@ export function clampAutoCloseAfterTp1(
   const floor = trailingStop > 0 ? trailingStop : entry;
   return isLong ? Math.max(lastClose, floor) : Math.min(lastClose, floor);
 }
+
+// Shared "what happens after this position is live" walk, used by both the
+// reject-funnel shadow simulator (gate-rejected candidates that were never
+// really taken) and the time-stop shadow simulator (real trades force-closed
+// early by the 8-bar stall rule or the 24h/72h/168h expiry, continued forward
+// to see what would have happened — docs/TODO.md P1 #1). Both need identical
+// TP1→TP2/SL sequencing (TP1-before-SL wins on the same candle) so the two
+// simulated numbers are comparable to each other and to real monitor outcomes.
+//
+// Pure: takes the candles + starting state, returns the outcome without
+// mutating anything. Caller applies the result to its own persisted shape.
+export interface WalkCandle { high: number; low: number; close: number; closeTime: number; }
+
+export interface WalkTpSlParams {
+  entry: number;
+  stopLoss: number;
+  tp1: number;
+  tp2: number;
+  isLong: boolean;
+}
+
+export interface WalkTpSlResult {
+  tp1Hit: boolean;
+  done: boolean;
+  result?: 'WIN_TP1' | 'WIN_TP2' | 'LOSS';
+  exitPrice?: number;
+  closedAt?: number;
+}
+
+export function walkTpSl(
+  candles: WalkCandle[],
+  afterMs: number,
+  params: WalkTpSlParams,
+  tp1HitAlready: boolean,
+): WalkTpSlResult {
+  const { stopLoss, tp1, tp2, isLong } = params;
+  let tp1Hit = tp1HitAlready;
+  for (const c of candles) {
+    if (c.closeTime <= afterMs) continue;
+    const hitSL  = isLong ? c.low  <= stopLoss : c.high >= stopLoss;
+    const hitTP1 = isLong ? c.high >= tp1      : c.low  <= tp1;
+    const hitTP2 = isLong ? c.high >= tp2      : c.low  <= tp2;
+    if (tp1Hit) {
+      if (hitTP2) return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2,      closedAt: c.closeTime };
+      if (hitSL)  return { tp1Hit, done: true, result: 'WIN_TP1', exitPrice: stopLoss, closedAt: c.closeTime };
+      continue;
+    }
+    if (hitTP2)      return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2, closedAt: c.closeTime };
+    else if (hitTP1) { tp1Hit = true; continue; } // TP1-before-SL same-candle rule (matches monitor)
+    else if (hitSL)  return { tp1Hit, done: true, result: 'LOSS', exitPrice: stopLoss, closedAt: c.closeTime };
+  }
+  return { tp1Hit, done: false };
+}

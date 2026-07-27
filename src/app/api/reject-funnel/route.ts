@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
+import { aggregateTimeStopShadows, type TimeStopShadow } from '@/lib/timeStopShadow';
 
 export const dynamic = 'force-dynamic';
 
@@ -83,9 +84,10 @@ export async function GET(req: NextRequest) {
 
   try {
     const redis = Redis.fromEnv();
-    const [raw, rawShadows] = await Promise.all([
+    const [raw, rawShadows, rawTimeStopShadows] = await Promise.all([
       redis.lrange('reject_funnel', 0, -1),
       redis.hgetall<Record<string, unknown>>('shadow_trades'),
+      redis.hgetall<Record<string, unknown>>('time_stop_shadows'),
     ]);
     const entries: FunnelEntry[] = raw
       .map(r => { try { return typeof r === 'string' ? JSON.parse(r) : r; } catch { return null; } })
@@ -95,6 +97,13 @@ export async function GET(req: NextRequest) {
       .map(v => { try { return (typeof v === 'string' ? JSON.parse(v) : v) as ShadowEntry; } catch { return null; } })
       .filter((s): s is ShadowEntry => !!s && !!s.rejectedAt);
     const shadowStats = aggregateShadows(shadows);
+
+    // docs/TODO.md P1 #1：時間止損（8根K線停滯/24-168h到期）強制關單後，繼續
+    // 模擬到真正 TP/SL 的淨R，跟真實出場的淨R對比。
+    const timeStopShadows: TimeStopShadow[] = Object.values(rawTimeStopShadows ?? {})
+      .map(v => { try { return (typeof v === 'string' ? JSON.parse(v) : v) as TimeStopShadow; } catch { return null; } })
+      .filter((s): s is TimeStopShadow => !!s && !!s.trigger);
+    const timeStopStats = aggregateTimeStopShadows(timeStopShadows);
 
     const total = entries.length;
     const sent  = entries.filter(e => e.rejectedAt === null).length;
@@ -124,6 +133,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       ok: true, days, total, sent, rejected, reasons, topSymbols,
       shadowStats,
+      timeStopStats,
       recent: entries.slice(0, 20),
     });
   } catch (e) {
