@@ -45,6 +45,10 @@ const STRENGTHS: { value: SignalStrength; label: string; desc: string }[] = [
 
 interface AnalyzeResult {
   ok: boolean;
+  // 2026-07-27 起 cron 改每分鐘一次，跟手動觸發撞鎖（monitor-run-lock/
+  // scan-run-lock）的機率大增。撞鎖時 API 回 { ok:true, skipped: "..." }，
+  // 沒有 notified/results——這不是「分析完成、什麼都沒發現」，是根本沒跑。
+  skipped?: string;
   analyzedAt?: string;
   minScore?: number;
   notified?: string[];
@@ -510,7 +514,13 @@ export default function SettingsPage() {
             ) : '手動觸發分析（查看通知診斷）'}
           </button>
 
-          {diagResult && (
+          {diagResult && diagResult.skipped && (
+            <div className="bg-[#141A21] rounded p-3 text-xs space-y-1 border border-[#C99A2E]/30">
+              <p className="text-[#C99A2E] num">未執行——伺服器排程正在跑（每分鐘一次）</p>
+              <p className="text-[#565E6B]">{diagResult.skipped}，等它跑完再按一次，或直接等下一輪結果自然出現</p>
+            </div>
+          )}
+          {diagResult && !diagResult.skipped && (
             <div className="bg-[#141A21] rounded p-3 text-xs space-y-2">
               <p className="text-[#2DD4BF] num">{diagResult.ok ? '分析完成' : '分析失敗'}</p>
               <p className="text-[#8A94A2]">已通知：{diagResult.notified?.join(', ') || '無'}</p>
