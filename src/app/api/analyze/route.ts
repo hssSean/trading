@@ -479,15 +479,38 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         }
       }
     } else if (isCancelled) {
-      // Atomic cancel: .select('id') returns deleted rows; empty array means a concurrent
-      // cron already deleted this row — skip notification in that case.
-      const { data: delData, error: delErr } = await admin.from('trades').delete().eq('id', trade.id).select('id');
+      // Soft-cancel: keep the row (status='cancelled', result='CANCELLED', closed_at=now)
+      // instead of DELETE. A hard delete left zero trace of "this recommendation never
+      // got filled" — the reject funnel only records signals that never became a trade,
+      // a different population from a limit order that WAS placed and then expired
+      // (待修改事項.md P1 #0b). result='CANCELLED' reuses the exact client finalize
+      // pipeline a real close already goes through (resolveServerOutcome/applyServerOutcome
+      // in tradeSync.ts/StoreHydration.tsx) — no new client sync path needed. Setting
+      // closed_at also drops the row out of checkSameDirectionRisk's `closed_at IS NULL`
+      // count, same as DELETE used to.
+      //
+      // Atomic guard matches the fill-write above: only the cron that actually
+      // transitions the row gets rows back from .select('id').
+      let cancelRes = await admin.from('trades')
+        .update({ status: 'cancelled', result: 'CANCELLED', closed_at: now })
+        .eq('id', trade.id).or('status.eq.waiting,status.is.null').select('id');
+
+      if (cancelRes.error) {
+        // Unknown schema constraint rejected the new 'CANCELLED' value (e.g. a CHECK
+        // on `result` that's never seen a 5th literal) — fall back to the old hard
+        // DELETE so this never regresses into a stuck row, but log loudly since this
+        // path being hit means the soft-cancel isn't actually landing in the DB.
+        console.error(`[monitor] soft-cancel failed ${trade.id}, falling back to delete: [${cancelRes.error.code}] ${cancelRes.error.message}`);
+        cancelRes = await admin.from('trades').delete().eq('id', trade.id).select('id');
+      }
+
+      const { data: delData, error: delErr } = cancelRes;
       if (delErr) {
-        // Delete failed — don't notify; next cron will retry the delete
-        console.error(`[monitor] cancel delete failed ${trade.id}: [${delErr.code}] ${delErr.message}`);
+        // Write failed — don't notify; next cron will retry
+        console.error(`[monitor] cancel write failed ${trade.id}: [${delErr.code}] ${delErr.message}`);
         await touchMonitoredAt(trade.id as string);
       } else if (!delData || delData.length === 0) {
-        // Row already deleted by a concurrent cron — skip notification
+        // Row already transitioned by a concurrent cron — skip notification
         console.log(`[monitor] cancel skipped ${trade.id} — row already gone`);
       } else {
         await unlockSymbol(trade.symbol as string);
@@ -499,7 +522,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
           const holdSec = BIAS_HOLD_BARS * tfBarMinutes(trade.timeframe as string | null) * 60;
           await setBiasHold(trade.symbol as string, trade.direction as string, holdSec);
         }
-        // Notify only after row is confirmed gone — prevents repeat if delete had failed.
+        // Notify only after the write is confirmed to have landed — prevents repeat if it had failed.
         // cancelReason/cancelBody were set during the chronological scan above.
         // muteCancelPush (settings toggle) only suppresses the notification — funnel
         // counter (cancelled++) and bias-hold above still run either way (待修改事項.md P0-2).

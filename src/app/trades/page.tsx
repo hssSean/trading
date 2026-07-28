@@ -13,6 +13,7 @@ const RESULT_LABEL: Record<string, string> = {
   WIN_TP2:      'TP2 達標',
   LOSS:         '止損出場',
   MANUAL_CLOSE: '手動平倉',
+  CANCELLED:    '推薦單失效',
 };
 
 const RESULT_COLOR: Record<string, string> = {
@@ -20,6 +21,7 @@ const RESULT_COLOR: Record<string, string> = {
   WIN_TP2:      '#00A040',
   LOSS:         '#F6465D',
   MANUAL_CLOSE: '#2DD4BF',
+  CANCELLED:    '#565E6B',
 };
 
 function fmtPrice(p: number) {
@@ -65,6 +67,8 @@ function accountPnlPct(t: { entry: number; stopLoss: number; pnlPercent?: number
 // Win/loss is judged by realized PnL, not just the result label: a profitable
 // 時間止損/到期平倉 (MANUAL_CLOSE) counts as a win, a losing one as a loss.
 // WIN_TP*/LOSS keep their explicit meaning; a breakeven MANUAL_CLOSE (pnl 0) is neither.
+// CANCELLED (a limit order that never filled) falls through to false in both —
+// it was never a position, so it can't be a win or a loss.
 type ClosedLike = { result?: TradeResult; pnlPercent?: number };
 function isWinTrade(t: ClosedLike): boolean {
   if (t.result === 'WIN_TP1' || t.result === 'WIN_TP2') return true;
@@ -119,7 +123,11 @@ export default function TradesPage() {
 
   // Memoize derived arrays: prevents filtered from recomputing on every store update.
   const waiting       = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);
+  // 已結束＝真正終局（含 CANCELLED，讓「這張推薦單沒進場」也留得下紀錄可查）。
   const closed        = useMemo(() => trades.filter(isFinallyClosed), [trades]);
+  // 但 CANCELLED 從沒變成過部位，不能算進勝率/損益統計的分母——否則會被稀釋成
+  // 假的低勝率。所有數字類戰績統計改吃這桶，只有列表顯示與 CSV 匯出吃 closed。
+  const closedResults = useMemo(() => closed.filter(t => t.result !== 'CANCELLED'), [closed]);
   // 同步中 = 剛從訊號建立、尚未拿到伺服器權威 status（見 tradeSync.ts）——
   // 不能算「持倉中」（會捏造出不存在的曝險/PnL），要獨立一桶。
   const unconfirmed   = useMemo(() => trades.filter(isUnconfirmedSync), [trades]);
@@ -141,11 +149,11 @@ export default function TradesPage() {
     });
     return { up, down };
   }, [pending, priceOf]);
-  const wins    = closed.filter(isWinTrade);
-  const losses  = closed.filter(isLossTrade);
-  const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
-  const avgPnl  = closed.length > 0
-    ? (closed.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / closed.length).toFixed(2)
+  const wins    = closedResults.filter(isWinTrade);
+  const losses  = closedResults.filter(isLossTrade);
+  const winRate = closedResults.length > 0 ? Math.round((wins.length / closedResults.length) * 100) : null;
+  const avgPnl  = closedResults.length > 0
+    ? (closedResults.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / closedResults.length).toFixed(2)
     : null;
   const totalWin  = wins.reduce((a, t) => a + Math.max(t.pnlPercent ?? 0, 0), 0);
   const totalLoss = Math.abs(losses.reduce((a, t) => a + Math.min(t.pnlPercent ?? 0, 0), 0));
@@ -153,7 +161,7 @@ export default function TradesPage() {
   // ── R-multiple stats (risk-normalized; the honest scorecard) ──
   const { totalR, avgR } = useMemo(() => {
     let rSum = 0, acctSum = 0, n = 0;
-    closed.forEach(t => {
+    closedResults.forEach(t => {
       const r = calcRMultiple(t);
       if (r === null) return;
       rSum += r;
@@ -165,7 +173,7 @@ export default function TradesPage() {
       accountReturn: n > 0 ? acctSum : null,
       avgR:          n > 0 ? rSum / n : null,
     };
-  }, [closed]);
+  }, [closedResults]);
 
   // ── Extended stats ───────────────────────────────────────────
   const avgWin  = wins.length   > 0 ? (wins.reduce((a, t)   => a + (t.pnlPercent ?? 0), 0) / wins.length).toFixed(2)   : null;
@@ -177,10 +185,10 @@ export default function TradesPage() {
     return risk > 0 ? Math.abs(t.tp2 - t.entry) / risk : 0;
   };
   const avgPlannedRR = useMemo(() => {
-    const all = [...pending, ...closed].filter(t => t.status !== 'waiting');
+    const all = [...pending, ...closedResults].filter(t => t.status !== 'waiting');
     if (!all.length) return null;
     return (all.reduce((a, t) => a + calcRR(t), 0) / all.length).toFixed(2);
-  }, [pending, closed]);
+  }, [pending, closedResults]);
   const avgActualRR = useMemo(() => {
     if (!wins.length) return null;
     return (wins.reduce((a, t) => {
@@ -190,15 +198,15 @@ export default function TradesPage() {
   }, [wins]);
   // Expected value per trade = winRate * avgWin + lossRate * avgLoss − trading cost (0.15% round-trip)
   const expectedValue = useMemo(() => {
-    if (!closed.length || avgWin === null || avgLoss === null) return null;
-    const wr = wins.length / closed.length;
+    if (!closedResults.length || avgWin === null || avgLoss === null) return null;
+    const wr = wins.length / closedResults.length;
     const COST_PCT = 0.15; // 0.15% round-trip (entry + exit taker fee)
     const ev = wr * parseFloat(avgWin) + (1 - wr) * parseFloat(avgLoss) - COST_PCT;
     return ev.toFixed(2);
-  }, [closed.length, wins.length, avgWin, avgLoss]);
+  }, [closedResults.length, wins.length, avgWin, avgLoss]);
 
-  const longClosed  = closed.filter(t => t.direction === 'LONG');
-  const shortClosed = closed.filter(t => t.direction === 'SHORT');
+  const longClosed  = closedResults.filter(t => t.direction === 'LONG');
+  const shortClosed = closedResults.filter(t => t.direction === 'SHORT');
   const longWins    = longClosed.filter(isWinTrade);
   const shortWins   = shortClosed.filter(isWinTrade);
   const longWinRate  = longClosed.length  > 0 ? Math.round(longWins.length  / longClosed.length  * 100) : null;
@@ -207,7 +215,7 @@ export default function TradesPage() {
   const maxConsecLoss = useMemo(() => {
     let best = 0; let cur = 0;
     [...trades]
-      .filter(t => t.result)
+      .filter(t => t.result && t.result !== 'CANCELLED')
       .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
       .forEach(t => {
         if (isLossTrade(t)) { cur++; best = Math.max(best, cur); } else cur = 0;
@@ -217,7 +225,7 @@ export default function TradesPage() {
 
   const { bestCoin, worstCoin } = useMemo(() => {
     const map = new Map<string, { total: number; count: number }>();
-    closed.forEach(t => {
+    closedResults.forEach(t => {
       const c = map.get(t.symbol) ?? { total: 0, count: 0 };
       map.set(t.symbol, { total: c.total + (t.pnlPercent ?? 0), count: c.count + 1 });
     });
@@ -225,39 +233,39 @@ export default function TradesPage() {
     if (arr.length === 0) return { bestCoin: null, worstCoin: null };
     const sorted = [...arr].sort((a, b) => b.avg - a.avg);
     return { bestCoin: sorted[0], worstCoin: sorted[sorted.length - 1] };
-  }, [closed]);
+  }, [closedResults]);
 
   // ── 策略分析模組 ─────────────────────────────────────────────
 
   // 累積資產曲線（按平倉時間排序）
   const equityCurve = useMemo(() => {
     let cum = 0;
-    return [...closed]
+    return [...closedResults]
       .filter(t => t.closedAt)
       .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
       .map(t => { cum += t.pnlPercent ?? 0; return parseFloat(cum.toFixed(2)); });
-  }, [closed]);
+  }, [closedResults]);
 
   // 近 7 日累積 R（戰績卡用）
   const weekR = useMemo(() => {
     const since = Date.now() - 7 * 86_400_000;
     let r = 0, n = 0;
-    closed.forEach(t => {
+    closedResults.forEach(t => {
       if ((t.closedAt ?? 0) < since) return;
       const v = calcRMultiple(t);
       if (v !== null) { r += v; n++; }
     });
     return n > 0 ? r : null;
-  }, [closed]);
+  }, [closedResults]);
 
   // 資金曲線 R 化（sparkline 用）：以 R 累積，去掉原始 % 的量級誤導
   const equityR = useMemo(() => {
     let cum = 0;
-    return [...closed]
+    return [...closedResults]
       .filter(t => t.closedAt)
       .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
       .map(t => { cum += calcRMultiple(t) ?? 0; return parseFloat(cum.toFixed(2)); });
-  }, [closed]);
+  }, [closedResults]);
 
   // 最大回撤（從高峰到谷底的最大下跌）
   const maxDrawdown = useMemo(() => {
@@ -274,7 +282,7 @@ export default function TradesPage() {
   // 月度損益（最近 6 個月）
   const monthlyPnl = useMemo(() => {
     const map = new Map<string, { pnl: number; wins: number; total: number }>();
-    closed.filter(t => t.closedAt).forEach(t => {
+    closedResults.filter(t => t.closedAt).forEach(t => {
       const d = new Date(t.closedAt!);
       const key = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`;
       const e = map.get(key) ?? { pnl: 0, wins: 0, total: 0 };
@@ -288,7 +296,7 @@ export default function TradesPage() {
       .sort(([a], [b]) => a.localeCompare(b))
       .slice(-6)
       .map(([key, v]) => ({ key, pnl: parseFloat(v.pnl.toFixed(2)), wins: v.wins, total: v.total }));
-  }, [closed]);
+  }, [closedResults]);
 
   // 評分區間效益（哪個分數段勝率最高）— 對應 v2.1 分級（B級55-64 / A級65+）
   const scoreRanges = useMemo(() => [
@@ -296,7 +304,7 @@ export default function TradesPage() {
     { label: '65–74 (A級)', min: 65, max: 74 },
     { label: '75+ (A級高分)', min: 75, max: 999 },
   ].map(r => {
-    const inRange = closed.filter(t => (t.score ?? 0) >= r.min && (t.score ?? 0) <= r.max);
+    const inRange = closedResults.filter(t => (t.score ?? 0) >= r.min && (t.score ?? 0) <= r.max);
     const ws = inRange.filter(isWinTrade);
     return {
       label: r.label,
@@ -304,24 +312,24 @@ export default function TradesPage() {
       wr: inRange.length ? Math.round(ws.length / inRange.length * 100) : null,
       avgPnl: inRange.length ? parseFloat((inRange.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / inRange.length).toFixed(2)) : null,
     };
-  }).filter(r => r.total > 0), [closed]);
+  }).filter(r => r.total > 0), [closedResults]);
 
   // 信號因子效益（哪些技術條件勝率最高）
   const reasonStats = useMemo(() => {
     const KW = ['看漲 OB', '看跌 OB', 'FVG', 'ChoCH', 'BOS', 'RSI 超賣', 'RSI 超買', 'RSI 看漲背離', 'RSI 看跌背離', 'MACD 黃金交叉', 'MACD 死亡交叉', 'Fib 黃金口袋', 'EQL', 'EQH', '破壞塊'];
     return KW.map(kw => {
-      const m = closed.filter(t => t.reasons?.some(r => r.includes(kw)));
+      const m = closedResults.filter(t => t.reasons?.some(r => r.includes(kw)));
       if (m.length < 2) return null;
       const ws = m.filter(isWinTrade);
       return { label: kw, total: m.length, wr: Math.round(ws.length / m.length * 100) };
     }).filter((x): x is NonNullable<typeof x> => x !== null)
       .sort((a, b) => b.wr - a.wr).slice(0, 8);
-  }, [closed]);
+  }, [closedResults]);
 
   // 時框效益（哪個時間週期勝率最高）
   const tfStats = useMemo(() => {
     const map = new Map<string, { wins: number; total: number; pnl: number }>();
-    closed.forEach(t => {
+    closedResults.forEach(t => {
       const tf = t.timeframe ?? '?';
       const e = map.get(tf) ?? { wins: 0, total: 0, pnl: 0 };
       map.set(tf, {
@@ -333,16 +341,17 @@ export default function TradesPage() {
     return Array.from(map.entries())
       .map(([tf, v]) => ({ tf, wr: Math.round(v.wins / v.total * 100), total: v.total, avgPnl: parseFloat((v.pnl / v.total).toFixed(2)) }))
       .sort((a, b) => b.wr - a.wr);
-  }, [closed]);
+  }, [closedResults]);
 
-  // 平均持倉時間
+  // 平均持倉時間（CANCELLED 排除——它的 openedAt→closedAt 是「等成交多久後過期」，
+  // 不是「部位抱了多久」，混進來會把平均持倉時間往下拉，失真）
   const avgHoldTime = useMemo(() => {
-    const with2 = closed.filter(t => t.openedAt && t.closedAt);
+    const with2 = closedResults.filter(t => t.openedAt && t.closedAt);
     if (!with2.length) return null;
     const avgMs = with2.reduce((a, t) => a + ((t.closedAt ?? 0) - t.openedAt), 0) / with2.length;
     const h = Math.floor(avgMs / 3600000);
     return h < 24 ? `${h}小時` : `${Math.floor(h / 24)}天${h % 24}時`;
-  }, [closed]);
+  }, [closedResults]);
 
   const filtered = useMemo(() => {
     // Base set
@@ -550,7 +559,7 @@ export default function TradesPage() {
           winRate={winRate}
           expectedValue={expectedValue}
           equity={equityR}
-          closedCount={closed.length}
+          closedCount={closedResults.length}
           pendingCount={pending.length}
         />
 

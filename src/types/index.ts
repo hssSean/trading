@@ -158,7 +158,11 @@ export interface AppSettings {
   muteCancelPush?: boolean; // suppress "推薦單失效" push/LINE (funnel/bias tracking unaffected)
 }
 
-export type TradeResult = 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | 'MANUAL_CLOSE';
+// CANCELLED: a recommended limit order that expired/ran away/was skipped before
+// filling. Distinct from the other four (which all mean "a position existed and
+// closed") — never counts as a win or a loss, must be excluded from any
+// performance stat (see trades/page.tsx's `closedResults`).
+export type TradeResult = 'WIN_TP1' | 'WIN_TP2' | 'LOSS' | 'MANUAL_CLOSE' | 'CANCELLED';
 
 export interface TradeRecord {
   id: string;

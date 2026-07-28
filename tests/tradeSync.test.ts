@@ -87,6 +87,22 @@ describe('resolveServerOutcome', () => {
     expect(action.kind).toBe('finalize');
     if (action.kind === 'finalize') expect(action.pnlPercent).toBeCloseTo(8, 6); // (100-92)/100
   });
+
+  // 待修改事項.md P1 #0b：掛單逾期取消改軟刪（status='cancelled' + result='CANCELLED'
+  // + closed_at），不再整列 DELETE。CANCELLED 必須走跟其他 result 一樣的 finalize
+  // 路徑——沒有專屬分支，這條測試就是在鎖定「不需要額外程式碼」這件事本身。
+  it('伺服器取消掛單（result=CANCELLED + closed_at）→ finalize，沒有專屬分支', () => {
+    const l = local({ result: undefined });
+    const action = resolveServerOutcome(l, srv({ result: 'CANCELLED', closedAt: 456, exitPrice: null, pnlPercent: null }));
+    expect(action.kind).toBe('finalize');
+    if (action.kind === 'finalize') {
+      expect(action.result).toBe('CANCELLED');
+      expect(action.closedAt).toBe(456);
+      // 沒有 exitPrice 時 fallback 用 entry → pnl 算出 0，不是缺值
+      expect(action.exitPrice).toBe(100);
+      expect(action.pnlPercent).toBe(0);
+    }
+  });
 });
 
 describe('deriveTp1Status', () => {
@@ -187,5 +203,8 @@ describe('isFinallyClosed', () => {
   });
   it('開倉中（無 result 無 closedAt）→ 未結束', () => {
     expect(isFinallyClosed({ closedAt: undefined, result: undefined, status: 'active' })).toBe(false);
+  });
+  it('CANCELLED（掛單取消）→ 視為結束，不能卡在持倉中', () => {
+    expect(isFinallyClosed({ closedAt: 1, result: 'CANCELLED', status: undefined })).toBe(true);
   });
 });
