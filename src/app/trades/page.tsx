@@ -102,7 +102,7 @@ export default function TradesPage() {
   const [exitPrice,  setExitPrice]  = useState('');
   const [exitResult, setExitResult] = useState<TradeResult>('WIN_TP1');
   const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'WAITING' | 'CLOSED' | 'PROFIT' | 'LOSS_LIVE'>('ALL');
-  const [resultFilter, setResultFilter] = useState<'ALL' | 'WIN' | 'LOSS'>('ALL');
+  const [resultFilter, setResultFilter] = useState<'ALL' | 'WIN' | 'LOSS' | 'CANCELLED'>('ALL');
   const [dirFilter,  setDirFilter]  = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
   const [dateFilter, setDateFilter] = useState<'all' | 'week' | 'month'>('all');
   const [sortBy,     setSortBy]     = useState<'time' | 'pnl' | 'score'>('time');
@@ -128,6 +128,7 @@ export default function TradesPage() {
   // 但 CANCELLED 從沒變成過部位，不能算進勝率/損益統計的分母——否則會被稀釋成
   // 假的低勝率。所有數字類戰績統計改吃這桶，只有列表顯示與 CSV 匯出吃 closed。
   const closedResults = useMemo(() => closed.filter(t => t.result !== 'CANCELLED'), [closed]);
+  const cancelledTrades = useMemo(() => closed.filter(t => t.result === 'CANCELLED'), [closed]);
   // 同步中 = 剛從訊號建立、尚未拿到伺服器權威 status（見 tradeSync.ts）——
   // 不能算「持倉中」（會捏造出不存在的曝險/PnL），要獨立一桶。
   const unconfirmed   = useMemo(() => trades.filter(isUnconfirmedSync), [trades]);
@@ -370,8 +371,9 @@ export default function TradesPage() {
              : [...waiting, ...pending, ...unconfirmed, ...closed];
     // Closed result sub-filter
     if (filter === 'CLOSED' && resultFilter !== 'ALL') {
-      if (resultFilter === 'WIN')  base = base.filter(isWinTrade);
-      if (resultFilter === 'LOSS') base = base.filter(isLossTrade);
+      if (resultFilter === 'WIN')       base = base.filter(isWinTrade);
+      if (resultFilter === 'LOSS')      base = base.filter(isLossTrade);
+      if (resultFilter === 'CANCELLED') base = base.filter(t => t.result === 'CANCELLED');
     }
     // Direction filter
     if (dirFilter !== 'ALL') base = base.filter(t => t.direction === dirFilter);
@@ -823,18 +825,21 @@ export default function TradesPage() {
         {filter === 'CLOSED' && (
           <div className="flex gap-1.5 mb-2">
             {([
-              ['ALL',  '全部'],
-              ['WIN',  `獲利 (${wins.length})`],
-              ['LOSS', `止損 (${losses.length})`],
+              ['ALL',       '全部'],
+              ['WIN',       `獲利 (${wins.length})`],
+              ['LOSS',      `止損 (${losses.length})`],
+              ['CANCELLED', `失效 (${cancelledTrades.length})`],
             ] as const).map(([f, label]) => (
               <button key={f} onClick={() => setResultFilter(f)}
                 className={`text-[11px] px-2.5 py-1 rounded border transition-colors ${
                   resultFilter === f
-                    ? f === 'WIN'  ? 'border-[#0ECB81] text-[#0ECB81]'
-                    : f === 'LOSS' ? 'border-[#F6465D] text-[#F6465D]'
+                    ? f === 'WIN'       ? 'border-[#0ECB81] text-[#0ECB81]'
+                    : f === 'LOSS'      ? 'border-[#F6465D] text-[#F6465D]'
+                    : f === 'CANCELLED' ? 'border-[#565E6B] text-[#565E6B]'
                     : 'bg-[#2DD4BF] border-[#2DD4BF] text-[#0A0D11]'
-                    : f === 'WIN'  ? 'border-[#0ECB81]/25 text-[#0ECB81]/70'
-                    : f === 'LOSS' ? 'border-[#F6465D]/25 text-[#F6465D]/70'
+                    : f === 'WIN'       ? 'border-[#0ECB81]/25 text-[#0ECB81]/70'
+                    : f === 'LOSS'      ? 'border-[#F6465D]/25 text-[#F6465D]/70'
+                    : f === 'CANCELLED' ? 'border-[#565E6B]/25 text-[#565E6B]/70'
                     : 'border-[#1B222B] text-[#565E6B]'
                 }`}>
                 {label}
