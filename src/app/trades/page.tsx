@@ -1,8 +1,8 @@
 'use client';
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
+import { usePriceStore } from '@/store/usePriceStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
-import { fetchCurrentPrice } from '@/api/binance';
 import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
 import { StatsHero } from '@/components/StatsHero';
@@ -79,35 +79,17 @@ function isLossTrade(t: ClosedLike): boolean {
 
 export default function TradesPage() {
   const trades          = useStore(s => s.trades);
-  const coins           = useStore(s => s.coins);
   const accountSize     = useStore(s => s.settings.accountSize);
   const riskPct         = useStore(s => s.settings.riskPctPerTrade ?? 1);
   const closeTrade      = useStore(s => s.closeTrade);
   const updateTrade     = useStore(s => s.updateTrade);
 
-  // Poll prices for active (持倉中) trades so livePnl stays fresh.
-  // Reads directly from store inside the interval to avoid recreating it when trades change.
-  useEffect(() => {
-    const pollPrices = async () => {
-      const seen = new Set<string>();
-      const activeSymbols = useStore.getState().trades
-        .filter(t => (!t.result && t.status !== 'waiting') || (t.status === 'tp1_hit' && !t.closedAt))
-        .map(t => t.symbol)
-        .filter(s => { if (seen.has(s)) return false; seen.add(s); return true; });
-      if (activeSymbols.length === 0) return;
-      for (const sym of activeSymbols) {
-        try {
-          const price = await fetchCurrentPrice(sym);
-          useStore.getState().updateCoin(sym, { currentPrice: price });
-        } catch { /* ignore per-symbol errors — next tick will retry */ }
-        await new Promise(r => setTimeout(r, 120)); // stagger to avoid 429
-      }
-    };
-
-    pollPrices(); // immediate on mount
-    const id = setInterval(pollPrices, 30_000);
-    return () => clearInterval(id);
-  }, []); // empty deps: interval reads store directly, no closure staleness
+  // Live prices come from <PriceFeed> (root layout, 3s). This page used to run
+  // its own 30s poller, and that poller filtered out `status === 'waiting'` —
+  // which is exactly why a fresh limit order's 現價/距進場 sat frozen at
+  // whatever value happened to be in localStorage.
+  const prices = usePriceStore(s => s.prices);
+  const priceOf = useCallback((symbol: string) => prices[symbol]?.price ?? 0, [prices]);
 
   const [closeModal, setCloseModal] = useState<{
     id: string; symbol: string; direction: 'LONG' | 'SHORT';
@@ -135,7 +117,7 @@ export default function TradesPage() {
   // 「真正結束」的判準（closedAt 或非 tp1-watching 的 result）抽到 @/lib/tradeSync 共用，
   // 與同步層 finalize 邏輯用同一套規則（見 tests/tradeSync.test.ts）。
 
-  // Memoize derived arrays: prevents filtered from recomputing on every store update (coins poll).
+  // Memoize derived arrays: prevents filtered from recomputing on every store update.
   const waiting       = useMemo(() => trades.filter(t => t.status === 'waiting'), [trades]);
   const closed        = useMemo(() => trades.filter(isFinallyClosed), [trades]);
   // 同步中 = 剛從訊號建立、尚未拿到伺服器權威 status（見 tradeSync.ts）——
@@ -152,13 +134,13 @@ export default function TradesPage() {
   const liveCounts    = useMemo(() => {
     let up = 0, down = 0;
     pending.forEach(t => {
-      const px = coins.find(c => c.symbol === t.symbol)?.currentPrice ?? 0;
+      const px = priceOf(t.symbol);
       if (!px) return;
       const pnl = t.direction === 'LONG' ? (px - t.entry) / t.entry : (t.entry - px) / t.entry;
       if (pnl > 0) up++; else if (pnl < 0) down++;
     });
     return { up, down };
-  }, [pending, coins]);
+  }, [pending, priceOf]);
   const wins    = closed.filter(isWinTrade);
   const losses  = closed.filter(isLossTrade);
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
@@ -365,7 +347,7 @@ export default function TradesPage() {
   const filtered = useMemo(() => {
     // Base set
     const calcLivePnl = (t: (typeof trades)[0]) => {
-      const livePx = coins.find(c => c.symbol === t.symbol)?.currentPrice ?? 0;
+      const livePx = priceOf(t.symbol);
       if (!livePx) return null;
       return t.direction === 'LONG'
         ? (livePx - t.entry) / t.entry * 100
@@ -402,7 +384,7 @@ export default function TradesPage() {
       return sortDir === 'desc' ? -diff : diff;
     });
     return base;
-  }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, unconfirmed, now, coins]);
+  }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, unconfirmed, now, priceOf]);
 
   const exportCsv = () => {
     // 時間輸出 ISO（含年份）：舊格式「7/17 上午08:00」缺年份，
@@ -930,8 +912,7 @@ export default function TradesPage() {
             const isUnconfirmed = isUnconfirmedSync(trade);
             const isPending     = !trade.result && !isWaiting && !isUnconfirmed;
             const isWin     = isWinTrade(trade);
-            const coinData  = coins.find(c => c.symbol === trade.symbol);
-            const livePx    = coinData?.currentPrice ?? 0;
+            const livePx    = priceOf(trade.symbol);
 
             // 等待進場中的掛單：顯示距進場位的差距
             let distToEntry = 0;
@@ -1336,7 +1317,7 @@ export default function TradesPage() {
 
       {/* Manual close modal */}
       {closeModal && (() => {
-        const livePxClose = coins.find(c => c.symbol === closeModal.symbol)?.currentPrice ?? 0;
+        const livePxClose = priceOf(closeModal.symbol);
         return (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-end" onClick={e => { if (e.target === e.currentTarget) { setCloseModal(null); setActualEntry(''); } }}>
           <div className="w-full max-w-xl mx-auto bg-[#0F141A] rounded-t-md p-6 pb-10 border-t border-[#1B222B]">

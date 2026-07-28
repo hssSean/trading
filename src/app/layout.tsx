@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { BottomNav } from '@/components/BottomNav';
 import { StoreHydration } from '@/components/StoreHydration';
+import { PriceFeed } from '@/components/PriceFeed';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,6 +36,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="bg-[#0A0D11] min-h-dvh" suppressHydrationWarning>
         <div className="max-w-xl mx-auto flex flex-col min-h-dvh">
           <StoreHydration>
+            {/* Lives here, not in a page: price polling must survive navigation. */}
+            <PriceFeed />
             <main className="flex-1 pb-20">{children}</main>
             <BottomNav />
           </StoreHydration>

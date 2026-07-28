@@ -65,6 +65,77 @@ export async function fetchCurrentPrice(symbol: string): Promise<number> {
   return parseFloat(res.data.price);
 }
 
+// Thrown when Binance rate-limits us (429/418). Callers back off instead of
+// hammering — a banned IP takes minutes to clear and kills every other request.
+export class RateLimitedError extends Error {
+  constructor() { super('binance rate limited'); this.name = 'RateLimitedError'; }
+}
+
+function isRateLimit(err: unknown): boolean {
+  const status = (err as { response?: { status?: number } })?.response?.status;
+  if (status === 429 || status === 418) return true;
+  const msg = String(err).toLowerCase();
+  return msg.includes('429') || msg.includes('418') || msg.includes('too many');
+}
+
+// Parallel price fetch for a symbol list. Replaces the old per-page
+// `for (sym of syms) { await fetch; await sleep(100) }` pattern, which cost
+// ~N × (roundtrip + 100ms) per round — 15 coins took 4-5s to refresh one cycle.
+// Here the whole set costs one roundtrip. Weight is 1/symbol, same as before.
+//
+// Not using the no-symbol batch endpoint (`/ticker/price` with no params):
+// it returns all ~500 perpetuals (~25KB) per call, which at a 3s interval is
+// ~500KB/min of mobile data for 15 coins' worth of information.
+//
+// Partial failures are dropped, not thrown — one bad symbol must not blank out
+// the rest. A rate limit is the exception: it means back off entirely.
+export async function fetchPricesFor(symbols: string[]): Promise<Map<string, number>> {
+  const settled = await Promise.allSettled(
+    symbols.map(s => client.get('/ticker/price', { params: { symbol: s } })),
+  );
+  const out = new Map<string, number>();
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i];
+    if (r.status === 'fulfilled') {
+      const px = parseFloat(r.value.data.price);
+      if (Number.isFinite(px) && px > 0) out.set(symbols[i], px);
+    } else if (isRateLimit(r.reason)) {
+      throw new RateLimitedError();
+    }
+  }
+  return out;
+}
+
+export interface Ticker24h {
+  price: number;
+  priceChange: number;
+  priceChangePercent: number;
+}
+
+// Same parallel shape as fetchPricesFor, for the slower 24h-change refresh.
+export async function fetchTickers24hFor(symbols: string[]): Promise<Map<string, Ticker24h>> {
+  const settled = await Promise.allSettled(
+    symbols.map(s => client.get('/ticker/24hr', { params: { symbol: s } })),
+  );
+  const out = new Map<string, Ticker24h>();
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i];
+    if (r.status === 'fulfilled') {
+      const price = parseFloat(r.value.data.lastPrice);
+      if (Number.isFinite(price) && price > 0) {
+        out.set(symbols[i], {
+          price,
+          priceChange:        parseFloat(r.value.data.priceChange),
+          priceChangePercent: parseFloat(r.value.data.priceChangePercent),
+        });
+      }
+    } else if (isRateLimit(r.reason)) {
+      throw new RateLimitedError();
+    }
+  }
+  return out;
+}
+
 export async function validateSymbol(symbol: string): Promise<boolean> {
   try {
     await client.get('/ticker/price', { params: { symbol } });

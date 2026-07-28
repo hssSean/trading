@@ -1,6 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { useStore } from '@/store/useStore';
+import { useTick } from '@/store/usePriceStore';
 import { WatchedCoin } from '@/types';
 
 const STRENGTH_RANK: Record<string, number> = { WEAK: 0, MODERATE: 1, STRONG: 2 };
@@ -8,7 +9,10 @@ const STRENGTH_RANK: Record<string, number> = { WEAK: 0, MODERATE: 1, STRONG: 2 
 // Dense terminal data row (replaces the old rounded card). One coin per line,
 // hairline-divided; numbers right-aligned and monospace.
 export function CoinCard({ coin }: { coin: WatchedCoin }) {
-  const isUp        = (coin.priceChangePercent24h ?? 0) >= 0;
+  // Subscribes to this symbol only, so a price move on another coin doesn't
+  // re-render this row.
+  const tick        = useTick(coin.symbol);
+  const isUp        = tick.changePct24h >= 0;
   const minStrength = useStore((s) => s.settings.minSignalStrength);
   const filtered    = coin.signals.filter((s) => STRENGTH_RANK[s.strength] >= STRENGTH_RANK[minStrength]);
   const latest      = filtered[0];
@@ -16,10 +20,10 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
   const openTrade   = useStore((s) => s.trades.find((t) => t.symbol === coin.symbol && !t.result));
   const activeTrade = !!openTrade;
 
-  const livePnl = openTrade && coin.currentPrice > 0
+  const livePnl = openTrade && tick.price > 0
     ? openTrade.direction === 'LONG'
-      ? (coin.currentPrice - openTrade.entry) / openTrade.entry * 100
-      : (openTrade.entry - coin.currentPrice) / openTrade.entry * 100
+      ? (tick.price - openTrade.entry) / openTrade.entry * 100
+      : (openTrade.entry - tick.price) / openTrade.entry * 100
     : null;
 
   return (
@@ -42,9 +46,9 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
           <div className="w-16 h-3.5 bg-[#141A21] rounded animate-pulse ml-auto" />
         ) : (
           <>
-            <div className="text-[#E8ECF1] text-[13px] num">{fmtPrice(coin.currentPrice)}</div>
+            <div className="text-[#E8ECF1] text-[13px] num">{fmtPrice(tick.price)}</div>
             <div className={`text-[11px] num ${isUp ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
-              {isUp ? '+' : ''}{(coin.priceChangePercent24h ?? 0).toFixed(2)}%
+              {isUp ? '+' : ''}{tick.changePct24h.toFixed(2)}%
             </div>
           </>
         )}

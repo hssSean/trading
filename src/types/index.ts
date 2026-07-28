@@ -138,9 +138,9 @@ export interface WatchedCoin {
   baseAsset: string;
   quoteAsset: string;
   timeframes: Timeframe[];
-  currentPrice: number;
-  priceChange24h: number;
-  priceChangePercent24h: number;
+  // Live price deliberately does NOT live here — see src/store/usePriceStore.ts.
+  // WatchedCoin is persisted to localStorage and drives the Supabase auto-save
+  // debounce, so a field that changes every 3s does not belong on it.
   lastAnalyzed: number;
   signals: TradingSignal[];
   isLoading: boolean;

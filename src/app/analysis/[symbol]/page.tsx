@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
+import { usePriceStore, useTick } from '@/store/usePriceStore';
 import { SignalCard } from '@/components/SignalCard';
 import { CandlestickChart } from '@/components/CandlestickChart';
 import { fetchCandles, fetchTicker24h } from '@/api/binance';
@@ -17,7 +18,7 @@ const TFS: Timeframe[] = ['5m', '15m', '1h', '4h', '1d'];
 export default function AnalysisPage({ params }: { params: { symbol: string } }) {
   const { symbol } = params;
   const router = useRouter();
-  const { coins, updateCoin, addSignals } = useStore();
+  const { coins, addSignals } = useStore();
   const coin = coins.find((c) => c.symbol === symbol);
 
   const [tf, setTf] = useState<Timeframe>('4h');
@@ -98,12 +99,9 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         setHtfBias(bias);
         setHtfLabel(biasLabel);
 
-        // Update price
-        updateCoin(symbol, {
-          currentPrice: ticker.price,
-          priceChange24h: ticker.priceChange,
-          priceChangePercent24h: ticker.priceChangePercent,
-        });
+        // Seed the price store with the ticker we already fetched, so the header
+        // shows a number immediately instead of waiting for PriceFeed's next tick.
+        usePriceStore.getState().setTickers24h(new Map([[symbol, ticker]]));
 
         // Generate signals for all coin timeframes — compute proper HTF bias per TF
         const currentCoins = useStore.getState().coins;
@@ -148,7 +146,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         setLoading(false);
       }
     },
-    [symbol, updateCoin, addSignals],
+    [symbol, addSignals],
   );
 
   useEffect(() => {
@@ -156,8 +154,9 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
     return () => abortRef.current?.abort();
   }, [tf, analyze]);
 
-  const currentPrice = coin?.currentPrice ?? 0;
-  const isUp = (coin?.priceChangePercent24h ?? 0) >= 0;
+  const tick = useTick(symbol);
+  const currentPrice = tick.price;
+  const isUp = tick.changePct24h >= 0;
   const nearbyOBs = orderBlocks.filter(
     (ob) => Math.abs(currentPrice - (ob.type === 'bullish' ? ob.high : ob.low)) / currentPrice < 0.05,
   );
@@ -182,11 +181,11 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           <p className="text-[#565E6B] text-[11px] num">{symbol}</p>
           <div className="flex items-baseline gap-2">
             <span className="text-[#E8ECF1] text-[20px] num">
-              {fmtPrice(coin?.currentPrice ?? 0)}
+              {fmtPrice(currentPrice)}
             </span>
             {coin && (
               <span className={`text-sm num ${isUp ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
-                {isUp ? '+' : ''}{(coin.priceChangePercent24h ?? 0).toFixed(2)}%
+                {isUp ? '+' : ''}{tick.changePct24h.toFixed(2)}%
               </span>
             )}
           </div>

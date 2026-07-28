@@ -1,6 +1,8 @@
 'use client';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useStore } from '@/store/useStore';
+import { usePriceStore } from '@/store/usePriceStore';
+import { pickTp1Hits } from '@/lib/tp1Watch';
 import { CoinCard } from '@/components/CoinCard';
 import { BtcStatusBar } from '@/components/BtcStatusBar';
 import { ScanStatusPanel } from '@/components/ScanStatusPanel';
@@ -9,7 +11,6 @@ import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { computeIndicators } from '@/analysis/indicators';
 import { Candle, Timeframe, TradingSignal } from '@/types';
 import { loadFromSupabase } from '@/components/StoreHydration';
-import { isUnconfirmedSync } from '@/lib/tradeSync';
 
 const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
   '5m': '15m', '15m': '1h', '1h': '4h', '4h': '1d',
@@ -17,49 +18,34 @@ const HTF_MAP: Partial<Record<Timeframe, Timeframe>> = {
 
 const DEFAULT_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 
-// ── Fast: price update + TP1 detection (no candle fetch) ─────────
+// ── One-shot price refresh for a single coin (no candle fetch) ───
+// The continuous 3s price loop lives in <PriceFeed> (mounted in the root
+// layout). This is only the "refresh right now" path used at the start of a
+// full analysis, so the indicators are compared against a fresh price rather
+// than one up to 3s old.
+//
 // All actual trade closes (TP2, SL, TP1 final) are handled by server cron
-// (monitorActiveTrades). Client only marks TP1 locally so the trade card
+// (monitorActiveTrades). The client only marks TP1 locally so the trade card
 // immediately shows "✅ TP1·等TP2" without waiting for the next 2-min sync.
-// Returns false when Binance rate-limits us (caller should stop the loop).
-async function checkCoinPrice(symbol: string): Promise<boolean> {
+async function checkCoinPrice(symbol: string): Promise<void> {
   const store = useStore.getState();
-  if (!store.coins.find((c) => c.symbol === symbol)) return true;
+  if (!store.coins.find((c) => c.symbol === symbol)) return;
   try {
     const ticker = await fetchTicker24h(symbol);
-    const currentPrice = ticker.price;
-    store.updateCoin(symbol, {
-      currentPrice,
-      priceChange24h: ticker.priceChange,
-      priceChangePercent24h: ticker.priceChangePercent,
-    });
+    usePriceStore.getState().setTickers24h(new Map([[symbol, ticker]]));
 
-    // Mark TP1 locally for active (non-waiting, non-tp1_hit) trades. Excludes
-    // isUnconfirmedSync: an unconfirmed trade's real DB status may still be
-    // 'waiting' (limit order not yet filled) — status===undefined here is NOT
-    // proof of an active position, just an unresolved sync gap (see tradeSync.ts).
-    const fresh = useStore.getState();
-    const active = fresh.trades.filter(
-      t => t.symbol === symbol && !t.result && t.status !== 'waiting' && t.status !== 'tp1_hit' && !isUnconfirmedSync(t)
+    const hits = pickTp1Hits(
+      useStore.getState().trades.filter(t => t.symbol === symbol),
+      () => ticker.price,
     );
-    for (const trade of active) {
-      const tp1Reached = trade.direction === 'LONG'
-        ? currentPrice >= trade.tp1
-        : currentPrice <= trade.tp1;
-      if (tp1Reached) {
-        useStore.setState(s => ({
-          trades: s.trades.map(t =>
-            t.id === trade.id ? { ...t, status: 'tp1_hit' as const } : t
-          ),
-        }));
-      }
+    if (hits.length > 0) {
+      const hitSet = new Set(hits);
+      useStore.setState(s => ({
+        trades: s.trades.map(t => (hitSet.has(t.id) ? { ...t, status: 'tp1_hit' as const } : t)),
+      }));
     }
-    return true;
-  } catch (err) {
-    // Detect Binance rate limit (429/418) and signal caller to back off
-    const msg = String(err).toLowerCase();
-    if (msg.includes('429') || msg.includes('418') || msg.includes('too many')) return false;
-    return true;
+  } catch {
+    // Ignore: PriceFeed's 3s loop is the real price source and handles backoff.
   }
 }
 
@@ -178,19 +164,9 @@ export default function HomePage() {
       .forEach((c, i) => setTimeout(() => runCoinAnalysis(c.symbol), i * 400 + 300));
   }, [hasHydrated, loadTopCoins]);
 
-  // ── Fast: price update + TP1 detection every 30s ─────────────
-  useEffect(() => {
-    const checkAll = async () => {
-      const syms = useStore.getState().coins.map((c) => c.symbol);
-      for (const s of syms) {
-        const ok = await checkCoinPrice(s);
-        if (!ok) break; // Binance rate-limited — stop this round, next interval will retry
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    };
-    const id = setInterval(checkAll, 30 * 1000);
-    return () => clearInterval(id);
-  }, []);
+  // Price polling + TP1 detection used to live here as a 30s loop that walked
+  // the coins one at a time (~4-5s per round, and it died whenever the user
+  // navigated away). Both now belong to <PriceFeed> in the root layout.
 
   // ── Full signal analysis (controlled by settings interval) ────
   useEffect(() => {
