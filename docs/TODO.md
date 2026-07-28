@@ -8,11 +8,34 @@
 
 策略相關的項目**全部卡在等數據**（這是本專案自己的紀律，不是拖延）；
 唯一在跑計時器的是 **P0 的 Vercel CPU 額度**，但它的下一步要等 7/29 的完整日數字；
-唯一「沒被擋住、現在就能動」的實作是 **P1 #0b 取消掛單改軟刪**。
+**P1 #0b 取消掛單改軟刪已做完**（`9bd5d61`）；下一個沒被擋住的是自動化交易的「執行引擎放哪」決策點。
 
 ---
 
 ## 已完成（2026-07-28 這輪）
+
+取消掛單改軟刪（`9bd5d61`，docs/TODO.md P1 #0b）：
+
+原本 `route.ts:484` 掛單逾期取消是整列 `.delete()`——DB 完全不留痕跡，「推薦單有多少
+比例根本沒進場」無法回答。改成 `status='cancelled'`、`result='CANCELLED'`、`closed_at=now`
+的軟刪，`result` 新增第 5 種值 `TradeResult`。刻意選 `result`（不是只動 `status`）是因為
+客戶端本來就有一套現成的 finalize 流程（`resolveServerOutcome`/`applyServerOutcome`）只認
+`result`+`closed_at`，這樣接上去零新增同步路徑。寫入失敗（例如未知的 DB CHECK constraint
+擋下新值）會 fallback 回原本的硬刪除，不會卡成孤兒列。
+
+前端影響面：`isFinallyClosed` 讓 CANCELLED 正確落進「已結束」（不再卡在持倉中），但勝率/
+損益/R值/月度/評分區間/信號因子/時框/持倉時間等每一個統計數字都改吃新的 `closedResults`
+桶（`closed.filter(t => t.result !== 'CANCELLED')`）——否則從沒變成部位的單會稀釋進勝率
+分母，把統計做假。列表顯示與 CSV 匯出維持吃原本的 `closed`（含 CANCELLED），這正是這次
+要的可見度。`RESULT_LABEL`/`RESULT_COLOR` 新增 `CANCELLED: '推薦單失效'`。
+
+`checkSameDirectionRisk`/`checkTotalOpenRisk`/hard-stop 重複檢查全部已是
+`closed_at IS NULL` 語意，設定 `closed_at` 後自動跟 DELETE 的舊行為一致，不需要额外改動。
+
+驗證：tsc 0 錯、vitest 247 passed（新增 2 個鎖定 CANCELLED finalize 契約的測試）、
+next build 0 錯。**尚未在真實環境驗證過**——要等第一張掛單真的逾期取消，才知道
+`result='CANCELLED'` 有沒有被某個未知的 DB constraint 擋下（若擋下會 fallback 成
+舊行為並大聲 log，不會是無聲失敗）。
 
 效能與額度（`7eeb821`、`1d1e4a1`）：
 
@@ -94,23 +117,22 @@ Hobby 方案近 30 天已經 106%，99.8% 來自本專案。每日曲線把因�
 
 ## P1 — 值得做，隨時可動
 
-### 0b. 取消掛單改軟刪（`status='cancelled'`），不要 DELETE 整列
+### ~~0b. 取消掛單改軟刪（`status='cancelled'`），不要 DELETE 整列~~ ✅ 已完成（`9bd5d61`，2026-07-28）
 
-原列在 `待修改事項.md` P0-1③，標「接自動化交易前必做」，但它現在就已經在製造
-量測盲區，優先級應該提前。
+原列在 `待修改事項.md` P0-1③，標「接自動化交易前必做」，2026-07-28 重新評估後
+優先級提前——它當時已經在製造量測盲區：拒絕漏斗記的是「從未成為交易的被拒訊號」，
+跟「已經成為掛單、但沒回測到進場價而被取消」是兩個不同母體，後者在 DB 裡完全
+不留痕跡。
 
-**現況**：`route.ts:484` 是 `admin.from('trades').delete().eq('id', trade.id)`。
-掛單逾期取消 = 整列從 DB 消失。
+已改：`route.ts` 的取消分支從 `.delete()` 改成 `.update({ status:'cancelled',
+result:'CANCELLED', closed_at: now })`。選 `result`（不是只動 `status`）是因為
+客戶端本來就有一套只認 `result`+`closed_at` 的 finalize 流程，接上去零新增
+同步路徑。前端每一個勝率/損益類統計都改吃排除 CANCELLED 的 `closedResults`
+桶，列表顯示與 CSV 匯出維持含 CANCELLED（這正是要的可見度）。寫入失敗會
+fallback 回原本的硬刪除，不會卡成孤兒列。
 
-**為什麼是盲區**：拒絕漏斗記的是「從未成為交易的被拒訊號」，跟「已經成為掛單、
-但沒回測到進場價而被取消」是**兩個不同母體**。後者目前在 DB 裡完全不留痕跡，
-所以「我的推薦單有多少比例根本沒進場？那些沒進場的如果掛著會贏嗎？」這個問題
-現在無法從 DB 回答。
-
-**難點不在 schema**（`status` 是 TEXT，直接寫 `'cancelled'` 即可），
-在於所有「未平倉」查詢都是用 `result IS NULL` 判斷——軟刪後 cancelled 列
-沒有 result，會被當成開放單撿進監控池。要逐處補排除條件：monitor 撈單、
-客戶端 `pending`/`waiting` 分類、勝率統計、`isFinallyClosed`。
+驗證：tsc/vitest(247)/build 全過。**尚未在真實環境驗證**——要等第一張掛單
+真的逾期取消，才知道 `result='CANCELLED'` 有沒有被未知的 DB constraint 擋下。
 
 ### ~~1. 時間止損的影子模擬~~ ✅ 已完成（`bc088aa`，2026-07-28）
 **為什麼**：62.5%（15/24）的單走時間止損出場，平均 +0.244R。但**完全沒有數據能回答
