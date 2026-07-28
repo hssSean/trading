@@ -512,6 +512,8 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
       exit_price:   t.exitPrice ?? null,
       pnl_percent:  t.pnlPercent ?? null,
       entry_notes:  t.entryNotes ?? '',
+      // Same rule as saveToSupabase's finalizedRows: only present for a manual close.
+      ...(t.closeReason ? { close_reason: t.closeReason } : {}),
     }));
     await Promise.all(rows.map(({ id, ...patch }) =>
       supabase.from('trades').update(patch).eq('id', id).eq('user_id', userId)
@@ -638,6 +640,11 @@ export async function saveToSupabase(userId: string) {
     result:      t.result ?? null,
     exit_price:  t.exitPrice ?? null,
     pnl_percent: t.pnlPercent ?? null,
+    // Only set for a manual close (useStore.closeTrade sets this locally). Omitted
+    // — not written as null — for every server-auto-closed trade, so this blanket
+    // per-tick push never clobbers the close_reason route.ts already wrote
+    // (tp2/trailing_stop/stop_loss/time_stop_stall/...).
+    ...(t.closeReason ? { close_reason: t.closeReason } : {}),
   }));
 
   const updateTrades = async (rows: { id: string; [k: string]: unknown }[]) => {

@@ -41,6 +41,32 @@ export interface WalkTpSlResult {
   closedAt?: number;
 }
 
+// Why a position closed, distinct from win/loss (closeResult) itself — two WIN_TP1
+// trades can have completely different stories (one rode the ratcheted trailing
+// stop after TP1, another got cut by the age limit right after TP1). Extracted so
+// the branch ordering (autoClosedAfterTp1 must be checked before the generic
+// WIN_TP1 fallback; timeStopFired before the generic MANUAL_CLOSE fallback) is
+// covered by tests instead of only a manual read-through — docs/TODO.md 報表 work.
+export type CloseReason =
+  | 'tp2' | 'trailing_stop' | 'stop_loss'
+  | 'time_stop_stall' | 'time_stop_expiry' | 'time_stop_expiry_post_tp1';
+
+export function deriveCloseReason(params: {
+  closeResult: string;
+  timeStopFired: boolean;
+  autoClosedAfterTp1: boolean;
+}): CloseReason {
+  const { closeResult, timeStopFired, autoClosedAfterTp1 } = params;
+  if (closeResult === 'WIN_TP2') return 'tp2';
+  if (closeResult === 'LOSS') return 'stop_loss';
+  if (closeResult === 'MANUAL_CLOSE') return timeStopFired ? 'time_stop_stall' : 'time_stop_expiry';
+  // WIN_TP1 from here on. autoClosedAfterTp1 (age limit reached post-TP1) must be
+  // checked before the generic fallback — it's also reached via closeResult==='WIN_TP1'
+  // but is NOT a trailing-stop exit.
+  if (autoClosedAfterTp1) return 'time_stop_expiry_post_tp1';
+  return 'trailing_stop'; // ratcheted trailing stop hit, or (rare, ATR unavailable) the original SL floor after TP1
+}
+
 export function walkTpSl(
   candles: WalkCandle[],
   afterMs: number,

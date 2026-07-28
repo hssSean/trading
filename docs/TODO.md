@@ -7,12 +7,46 @@
 ## 現在的狀態一句話
 
 策略相關的項目**全部卡在等數據**（這是本專案自己的紀律，不是拖延）；
-唯一在跑計時器的是 **P0 的 Vercel CPU 額度**，但它的下一步要等 7/29 的完整日數字；
-**P1 #0b 取消掛單改軟刪已做完**（`9bd5d61`）；下一個沒被擋住的是自動化交易的「執行引擎放哪」決策點。
+唯一在跑計時器的是 **P0 的 Vercel CPU 額度**，下一步要等 7/29 的完整日數字；
+**匯出報表已擴充成策略診斷用**，但 `close_reason` 欄位要先跑 ALTER TABLE
+（見下方 SQL）才會有資料；下一個沒被擋住的是自動化交易的「執行引擎放哪」決策點。
 
 ---
 
 ## 已完成（2026-07-28 這輪）
+
+**匯出報表擴充成策略診斷用**（P1 #0c，跟 #0b 同一批動機）：
+
+原本 CSV 的「結果」欄對三種完全不同的事都寫「手動平倉」——8根K線停滯、
+24/72/168h 到期、使用者自己按平倉——分不出關單原因，也沒有反事實資料
+（時間止損若不砍會怎樣，只存在 Redis 影子模擬，不進 CSV）。
+
+新增 DB 欄位 `close_reason`，`route.ts` 六種自動關單結局（`tp2`/`trailing_stop`/
+`stop_loss`/`time_stop_stall`/`time_stop_expiry`/`time_stop_expiry_post_tp1`）與四種
+掛單取消原因（`cancel_expired`/`cancel_ran_away`/`cancel_tp1_direct`/
+`cancel_thesis_invalidated`）都寫入；判斷邏輯抽成純函數 `deriveCloseReason`
+（`src/lib/monitorMath.ts`），8個測試鎖定分支優先序（例如 `autoClosedAfterTp1`
+必須先於通用 WIN_TP1 判斷，否則 TP1 後到期會被誤標成移動止損）。手動平倉
+（App 內按鈕）標記 `close_reason='manual'`，只在客戶端本地設定過才會推送，
+不會覆蓋伺服器自動關單寫入的原因（`useStore.closeTrade`/`StoreHydration.tsx`）。
+
+新增 `/api/trade-export`（service role），CSV 匯出改吃這個端點而非記憶體裡的
+`closed` 陣列——一是不確定 `regime`/`confidence`/`funding_rate`/
+`suggested_risk_pct`/`suggested_leverage`/`close_reason` 這些欄位 authenticated
+role 讀不讀得回來（`/api/trade-status` 已證實 `status`/`signal_price` 有這問題），
+二是本機 Zustand 只留 500 筆，直接查 Supabase 拿完整歷史。CSV 新增欄位：出場原因
+（中文標籤）、R倍數、帳戶R（依tier加權）、regime、confidence、資金費率、建議風險%、
+建議槓桿。
+
+**未跑（需要你在 Supabase SQL Editor 執行）**：
+```sql
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS close_reason TEXT;
+```
+跑之前每次關單會 42703 → 自動 fallback 成不寫 close_reason（大聲 log 提醒），
+不影響原本的關單/取消功能，只是報表那欄空著。
+
+驗證：tsc/vitest(255)/build 全過。**尚未在真實環境驗證**——要等下一次真的有
+單自動關閉，才知道 close_reason 有沒有正確落地（含跑完 ALTER TABLE 之後）。
 
 取消掛單改軟刪（`9bd5d61`，docs/TODO.md P1 #0b）：
 

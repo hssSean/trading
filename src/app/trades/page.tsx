@@ -24,6 +24,24 @@ const RESULT_COLOR: Record<string, string> = {
   CANCELLED:    '#565E6B',
 };
 
+// CSV 匯出用：route.ts 寫入的 close_reason 值 → 中文標籤。
+const CLOSE_REASON_LABEL: Record<string, string> = {
+  tp2:                       'TP2 全部達標',
+  trailing_stop:             '移動止損（TP1後）',
+  stop_loss:                 '原始止損（未達TP1）',
+  time_stop_stall:           '時間止損（盤面停滯）',
+  time_stop_expiry:          '到期平倉（未達TP1）',
+  time_stop_expiry_post_tp1: '到期平倉（TP1已達標）',
+  cancel_expired:            '掛單逾期未成交',
+  cancel_ran_away:           '行情走遠未成交',
+  cancel_tp1_direct:         '直達TP1未成交',
+  cancel_thesis_invalidated: '結構失效未成交',
+  manual:                    '手動平倉',
+};
+const REGIME_LABEL: Record<string, string> = {
+  trending: '趨勢', ranging: '盤整', transitional: '過渡',
+};
+
 function fmtPrice(p: number) {
   if (p >= 1000) return p.toFixed(2);
   if (p >= 1)    return p.toFixed(4);
@@ -397,37 +415,97 @@ export default function TradesPage() {
     return base;
   }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, unconfirmed, now, priceOf]);
 
-  const exportCsv = () => {
-    // 時間輸出 ISO（含年份）：舊格式「7/17 上午08:00」缺年份，
-    // 匯回「績效體檢」或 Excel 排序都會出問題
-    const isoDate = (ts: number) => {
-      const d = new Date(ts);
-      const pad = (n: number) => String(n).padStart(2, '0');
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    };
-    // 策略標籤（tier×時框）：給「績效體檢」的逐策略分析用
-    const header = 'ID,幣種,方向,週期,強度,得分,進場價,止損,TP1,TP2,開倉時間,平倉時間,結果,出場價,損益%,策略,分析依據,個人備註';
-    const rows = closed.map(t =>
-      [
-        t.id, t.symbol, t.direction, t.timeframe, t.strength, t.score,
-        t.entry, t.stopLoss, t.tp1, t.tp2,
-        isoDate(t.openedAt),
-        isoDate(t.closedAt ?? t.openedAt),
-        RESULT_LABEL[t.result ?? 'MANUAL_CLOSE'],
-        t.exitPrice ?? '',
-        t.pnlPercent ?? '',
-        `${t.tier ?? 'A'}級·${t.timeframe}`,
-        `"${(t.reasons ?? []).join(' | ').replace(/"/g, '""')}"`,
-        `"${(t.entryNotes ?? '').replace(/"/g, '""')}"`,
-      ].join(',')
-    );
-    const csv  = [header, ...rows].join('\n');
-    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = `trades-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const [exporting, setExporting] = useState(false);
+
+  // 走 /api/trade-export（service role）而不是直接用記憶體裡的 closed 陣列：
+  // 1. regime/confidence/funding_rate/suggested_risk_pct/suggested_leverage/
+  //    close_reason 這些欄位，authenticated role 能不能讀回來沒有把握
+  //    （/api/trade-status 已證實 status/signal_price 有這問題）——直接走
+  //    service role 端點，不用逐欄位賭。
+  // 2. 本機 Zustand 快取有 500 筆上限，直接查 Supabase 拿完整歷史。
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const { webhookSecret, userId } = useStore.getState();
+      if (!userId) { setSyncMsg('請先登入'); return; }
+
+      const res = await fetch('/api/trade-export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-webhook-secret': webhookSecret },
+        body: JSON.stringify({ userId }),
+      });
+      const { trades: rawRows } = await res.json() as { trades: Record<string, unknown>[] };
+
+      // 時間輸出 ISO（含年份）：舊格式「7/17 上午08:00」缺年份，
+      // 匯回「績效體檢」或 Excel 排序都會出問題
+      const isoDate = (ts: number) => {
+        const d = new Date(ts);
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      };
+      // R倍數＝損益% ÷ 止損距離%（規格慣例：損益一律用 R 衡量，原始價格 % 會因
+      // 止損距離不同而失真——見 CLAUDE.md「調參紀律」）。CANCELLED/尚無 pnl 的列給空值。
+      const calcR = (entry: number, stopLoss: number, pnlPercent: number | null) => {
+        if (pnlPercent === null) return '';
+        const riskPct = Math.abs(entry - stopLoss) / entry * 100;
+        return riskPct > 0 ? (pnlPercent / riskPct).toFixed(2) : '';
+      };
+
+      // 只匯出真正終局的列（closed_at 有值）——還開著的部位沒有結果可分析。
+      const rows = (rawRows ?? [])
+        .filter(r => r.closed_at != null)
+        .map(r => {
+          const entry      = r.entry as number;
+          const stopLoss   = r.stop_loss as number;
+          const pnlPercent = (r.pnl_percent as number | null) ?? null;
+          const tier       = (r.tier as string | null) ?? 'A';
+          const rMultiple  = calcR(entry, stopLoss, pnlPercent);
+          const acctR      = rMultiple === '' ? '' : (parseFloat(rMultiple) * (tier === 'B' ? 0.5 : 1.0)).toFixed(2);
+          const closeReasonKey = (r.close_reason as string | null) ?? null;
+          const resultKey  = (r.result as string | null) ?? 'MANUAL_CLOSE';
+          return [
+            r.id, r.symbol, r.direction, r.timeframe, r.strength, r.score,
+            entry, stopLoss, r.tp1, r.tp2,
+            isoDate(r.opened_at as number),
+            isoDate((r.closed_at as number | null) ?? (r.opened_at as number)),
+            RESULT_LABEL[resultKey] ?? resultKey,
+            closeReasonKey ? (CLOSE_REASON_LABEL[closeReasonKey] ?? closeReasonKey) : '',
+            r.exit_price ?? '',
+            pnlPercent ?? '',
+            rMultiple,
+            acctR,
+            `${tier}級·${r.timeframe}`,
+            r.regime ? (REGIME_LABEL[r.regime as string] ?? r.regime) : '',
+            r.confidence ?? '',
+            r.funding_rate != null ? ((r.funding_rate as number) * 100).toFixed(4) : '',
+            r.suggested_risk_pct ?? '',
+            r.suggested_leverage ?? '',
+            `"${((r.reasons as string[]) ?? []).join(' | ').replace(/"/g, '""')}"`,
+            `"${((r.entry_notes as string) ?? '').replace(/"/g, '""')}"`,
+          ].join(',');
+        });
+
+      const header = [
+        'ID', '幣種', '方向', '週期', '強度', '得分',
+        '進場價', '止損', 'TP1', 'TP2', '開倉時間', '平倉時間',
+        '結果', '出場原因', '出場價', '損益%', 'R倍數', '帳戶R',
+        '策略', '盤勢regime', '信心分數confidence', '資金費率%funding',
+        '建議風險%', '建議槓桿',
+        '分析依據', '個人備註',
+      ].join(',');
+      const csv  = [header, ...rows].join('\n');
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = `trades-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setSyncMsg('匯出失敗，請重試');
+      setTimeout(() => setSyncMsg(''), 4000);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const handleClearClosed = useCallback(async () => {
@@ -532,8 +610,12 @@ export default function TradesPage() {
                 </span>
               ) : '同步紀錄'}
             </button>
-            <button onClick={exportCsv} className="text-[#8A94A2] text-[11px] px-2.5 py-1 border border-[#232B35] rounded active:bg-[#141A21]">
-              匯出
+            <button
+              onClick={exportCsv}
+              disabled={exporting}
+              className="text-[#8A94A2] text-[11px] px-2.5 py-1 border border-[#232B35] rounded disabled:opacity-40 active:bg-[#141A21]"
+            >
+              {exporting ? '匯出中…' : '匯出'}
             </button>
             <button
               onClick={() => { setSelectMode(v => !v); setSelectedIds(new Set()); setEditingNote(null); }}

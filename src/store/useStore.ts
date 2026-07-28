@@ -182,7 +182,7 @@ export const useStore = create<StoreState>()(
             const pnl = t.direction === 'LONG'
               ? ((exitPrice - t.entry) / t.entry) * 100
               : ((t.entry - exitPrice) / t.entry) * 100;
-            return { ...t, result, exitPrice, closedAt: Date.now(), pnlPercent: parseFloat(pnl.toFixed(2)) };
+            return { ...t, result, exitPrice, closedAt: Date.now(), pnlPercent: parseFloat(pnl.toFixed(2)), closeReason: 'manual' };
           }),
         }));
       },

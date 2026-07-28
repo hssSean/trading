@@ -194,6 +194,13 @@ export interface TradeRecord {
   tier?: 'A' | 'B';               // v2.1 signal tier (B = half-risk light position)
   scoreBreakdown?: ScoreBreakdown; // per-group contributions for attribution
   currentStop?: number;           // live trailing stop level (set after TP1)
+  // Set ONLY by the client's own manual-close action (useStore.closeTrade) — never
+  // read back from the server. Auto-closes get their close_reason written straight
+  // to Supabase by route.ts and are never mirrored into this local field, so
+  // saveToSupabase can tell "I need to push close_reason" (this is set) apart from
+  // "leave the server's own close_reason alone" (this is undefined) without an
+  // extra round trip. See StoreHydration.tsx's finalizedRows/toUpdate.
+  closeReason?: string;
 }
 
 export interface AnalysisResult {

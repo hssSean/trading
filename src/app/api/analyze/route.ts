@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason } from '@/lib/monitorMath';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 
 export const maxDuration = 60;
@@ -388,6 +388,9 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     //   opportunity_expired（機會過期）：方向仍成立，只是沒等到進場 → 保留 bias、禁反向
     //   thesis_invalidated（論點失效）：進場理由被推翻 → 不保留 bias、反向照冷卻規則
     let cancelClass: 'opportunity_expired' | 'thesis_invalidated' | null = null;
+    // Finer-grained than cancelClass — feeds the exported report's close_reason column
+    // so "行情走遠" and "逾期未成交" (both opportunity_expired) can be told apart.
+    let cancelReasonKey: 'cancel_thesis_invalidated' | 'cancel_ran_away' | 'cancel_tp1_direct' | 'cancel_expired' | null = null;
     for (const c of evalCandles) {
       const touched = isLong
         ? c.low  <= entry * 1.001 && (sp === 0 || sp > entry * 1.002)
@@ -398,6 +401,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         cancelReason = `價格收盤${isLong ? '跌破' : '突破'}止損位 $${fmtPrice(slPx)}，進場前提已失效，掛單取消`;
         cancelBody   = '結構已突破，setup 失效';
         cancelClass  = 'thesis_invalidated'; // 論點失效 → 反向可依冷卻規則
+        cancelReasonKey = 'cancel_thesis_invalidated';
         break;
       }
       // 行情走遠：自掛單當下（signal_price）朝獲利方向走了 ≥1R —— 回不到進場位。
@@ -407,12 +411,14 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         cancelReason = `價格自掛單當下 $${fmtPrice(sp)} 已朝${isLong ? '上' : '下'}走了 1R 以上，未回測進場位 $${fmtPrice(entry)}，回測機率大減 —— 放棄追進`;
         cancelBody   = '行情已走遠，不追單';
         cancelClass  = 'opportunity_expired'; // 方向對、只是沒進到 → 保留 bias、禁反向
+        cancelReasonKey = 'cancel_ran_away';
         break;
       }
       if (isLong ? c.high >= (trade.tp1 as number) : c.low <= (trade.tp1 as number)) {
         cancelReason = `價格未回測至進場位 $${fmtPrice(entry)}，直接到達 TP1 $${fmtPrice(trade.tp1 as number)}，掛單已自動取消`;
         cancelBody   = 'TP1 直接到達，跳過進場';
         cancelClass  = 'opportunity_expired'; // 方向對到都到 TP1 了 → 保留 bias、禁反向
+        cancelReasonKey = 'cancel_tp1_direct';
         break;
       }
     }
@@ -425,6 +431,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       cancelReason = `掛單超過 ${WAITING_EXPIRY_BARS} 根 ${trade.timeframe ?? '1h'} K 線未成交，已自動取消（規格 §3-A）`;
       cancelBody   = `逾期 ${WAITING_EXPIRY_BARS} 根 K 線未成交`;
       cancelClass  = 'opportunity_expired'; // C1 超時 → 保留 bias、禁反向（v2.4 §1.1 紅線）
+      cancelReasonKey = 'cancel_expired';
     }
     const isCancelled = !isFilled && cancelReason !== null;
 
@@ -492,8 +499,17 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       // Atomic guard matches the fill-write above: only the cron that actually
       // transitions the row gets rows back from .select('id').
       let cancelRes = await admin.from('trades')
-        .update({ status: 'cancelled', result: 'CANCELLED', closed_at: now })
+        .update({ status: 'cancelled', result: 'CANCELLED', closed_at: now, close_reason: cancelReasonKey })
         .eq('id', trade.id).or('status.eq.waiting,status.is.null').select('id');
+
+      if (cancelRes.error?.code === '42703') {
+        // close_reason not migrated yet — retry without it before falling all the way
+        // back to DELETE. Logged loudly: this means the ALTER TABLE hasn't been run.
+        console.error(`[monitor] close_reason column missing for ${trade.id} — cancelling without it. Run: ALTER TABLE trades ADD COLUMN IF NOT EXISTS close_reason TEXT;`);
+        cancelRes = await admin.from('trades')
+          .update({ status: 'cancelled', result: 'CANCELLED', closed_at: now })
+          .eq('id', trade.id).or('status.eq.waiting,status.is.null').select('id');
+      }
 
       if (cancelRes.error) {
         // Unknown schema constraint rejected the new 'CANCELLED' value (e.g. a CHECK
@@ -834,6 +850,11 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       ? ((closePrice - entry) / entry) * 100
       : ((entry - closePrice) / entry) * 100;
 
+    // Why this trade ended, distinct from the win/loss result itself — written to a
+    // new `close_reason` column so exported reports can group by exit mechanism
+    // instead of just tallying wins/losses (docs/TODO.md 報表 work).
+    const closeReason = deriveCloseReason({ closeResult: closeResult as string, timeStopFired, autoClosedAfterTp1 });
+
     // Atomic close guard differs by trade state:
     // - Normal (result null): use .is('result', null) — standard first-write guard.
     // - tp1_hit watching (result='WIN_TP1', closed_at null): use that pair as guard.
@@ -844,15 +865,17 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       ? {
           // Only change result if upgrading to TP2; otherwise leave WIN_TP1 as-is
           ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}),
-          exit_price:  closePrice,
-          closed_at:   now,
-          pnl_percent: parseFloat(pnl.toFixed(2)),
+          exit_price:   closePrice,
+          closed_at:    now,
+          pnl_percent:  parseFloat(pnl.toFixed(2)),
+          close_reason: closeReason,
         }
       : {
-          result:      closeResult,
-          exit_price:  closePrice,
-          closed_at:   now,
-          pnl_percent: parseFloat(pnl.toFixed(2)),
+          result:       closeResult,
+          exit_price:   closePrice,
+          closed_at:    now,
+          pnl_percent:  parseFloat(pnl.toFixed(2)),
+          close_reason: closeReason,
         };
 
     const closeFilter = isFinalClosingTp1
@@ -867,18 +890,39 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
 
     if (closeRes.error) {
       if (closeRes.error.code === '42703') {
-        // exit_price / pnl_percent column missing — write minimal fields
-        const fbUpdate = isFinalClosingTp1
-          ? { ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}), closed_at: now }
-          : { result: closeResult, closed_at: now };
-        const fbFilter = isFinalClosingTp1
-          ? admin.from('trades').update(fbUpdate).eq('id', trade.id).eq('status', 'tp1_hit').is('closed_at', null)
-          : admin.from('trades').update(fbUpdate).eq('id', trade.id).is('result', null);
-        const fallback = await fbFilter.select('id');
-        if (!fallback.error) {
-          closeWriteOk = (fallback.data?.length ?? 0) > 0;
+        // Column(s) missing. Two known tiers, tried in order:
+        //   1. close_reason not migrated yet (new column) — retry with everything else intact.
+        //   2. exit_price/pnl_percent also missing (older schema) — minimal write.
+        // 待修改事項.md pattern: log loudly so a silently-degraded write surfaces immediately.
+        const midUpdate = isFinalClosingTp1
+          ? { ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}), exit_price: closePrice, closed_at: now, pnl_percent: parseFloat(pnl.toFixed(2)) }
+          : { result: closeResult, exit_price: closePrice, closed_at: now, pnl_percent: parseFloat(pnl.toFixed(2)) };
+        const midFilter = isFinalClosingTp1
+          ? admin.from('trades').update(midUpdate).eq('id', trade.id).eq('status', 'tp1_hit').is('closed_at', null)
+          : admin.from('trades').update(midUpdate).eq('id', trade.id).is('result', null);
+        const mid = await midFilter.select('id');
+
+        if (!mid.error) {
+          console.error(`[monitor] close_reason column missing for ${trade.id} — wrote without it. Run: ALTER TABLE trades ADD COLUMN IF NOT EXISTS close_reason TEXT;`);
+          closeWriteOk = (mid.data?.length ?? 0) > 0;
+        } else if (mid.error.code === '42703') {
+          // exit_price / pnl_percent also missing — write minimal fields
+          const fbUpdate = isFinalClosingTp1
+            ? { ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}), closed_at: now }
+            : { result: closeResult, closed_at: now };
+          const fbFilter = isFinalClosingTp1
+            ? admin.from('trades').update(fbUpdate).eq('id', trade.id).eq('status', 'tp1_hit').is('closed_at', null)
+            : admin.from('trades').update(fbUpdate).eq('id', trade.id).is('result', null);
+          const fallback = await fbFilter.select('id');
+          if (!fallback.error) {
+            closeWriteOk = (fallback.data?.length ?? 0) > 0;
+          } else {
+            console.error(`[monitor] close fallback failed ${trade.id}: ${fallback.error.message}`);
+            await touchMonitoredAt(trade.id as string);
+            continue;
+          }
         } else {
-          console.error(`[monitor] close fallback failed ${trade.id}: ${fallback.error.message}`);
+          console.error(`[monitor] close mid-tier failed ${trade.id}: ${mid.error.message}`);
           await touchMonitoredAt(trade.id as string);
           continue;
         }
