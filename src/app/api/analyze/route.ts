@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
-import { fetchCandles, fetchTicker24h, fetchTopCoinsByVolume, fetchFundingRate } from '@/api/binance';
+import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate } from '@/api/binance';
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
@@ -64,6 +64,28 @@ function getRedis(): Redis | null {
 
 // In-memory fallback (lost on cold start, but works when Redis isn't wired)
 const memLock = new Map<string, LockEntry>();
+
+// ── Periodic-work throttle ─────────────────────────────────────
+// The cron fires every minute, but not everything in a scan needs that cadence.
+// Both shadow simulators advance positions against *1-hour* candles, so running
+// them every minute instead of every 10 does identical work 10 times over — and
+// each run costs up to 8 symbols × 96-168 candles of fetch + parse. Their own
+// comments still read "next cron (5 min later)", from when the schedule was 5m.
+//
+// SET key 1 NX EX <period> is one command that both tests and claims the window:
+// null means somebody already ran inside this window, so skip.
+async function claimPeriodicSlot(key: string, periodSec: number): Promise<boolean> {
+  const r = getRedis();
+  if (!r) return true; // no Redis: nothing to throttle against, just run
+  try {
+    const got = await r.set(key, Date.now(), { nx: true, ex: periodSec });
+    return got !== null;
+  } catch {
+    return true; // Redis hiccup must not silently stop the simulators forever
+  }
+}
+
+const SHADOW_ADVANCE_PERIOD_SEC = 600; // 10 min
 
 // ── Post-loss cooldown ─────────────────────────────────────────
 // 2026-07-17 journal review: AKE stopped out, unlocked, and re-longed the same
@@ -936,24 +958,30 @@ async function processTimeStopShadows(newStarts: TimeStopShadow[]): Promise<void
     }
 
     const now = Date.now();
-    const live = Array.from(shadows.values()).filter(s => s.status === 'live');
-    const bySymbol = new Map<string, TimeStopShadow[]>();
-    live.forEach(s => {
-      const arr = bySymbol.get(s.symbol) ?? [];
-      arr.push(s);
-      bySymbol.set(s.symbol, arr);
-    });
 
-    let fetches = 0;
-    for (const [symbol, group] of Array.from(bySymbol.entries())) {
-      if (fetches >= 8) break; // rest advance next cron
-      fetches++;
-      let candles: Candle[] = [];
-      try { candles = await fetchCandles(symbol, '1h', 168, 3); } catch { continue; }
-      for (const s of group) {
-        const advanced = advanceTimeStopShadow(s, candles, now);
-        shadows.set(s.id, advanced);
-        writes[s.id] = JSON.stringify(advanced);
+    // Merging new starts (above) runs every scan — they'd be lost otherwise.
+    // Advancing them is throttled: it simulates against 1h candles, so a
+    // 10-minute cadence produces the same numbers as a 1-minute one.
+    if (await claimPeriodicSlot('time-stop-shadow-advance', SHADOW_ADVANCE_PERIOD_SEC)) {
+      const live = Array.from(shadows.values()).filter(s => s.status === 'live');
+      const bySymbol = new Map<string, TimeStopShadow[]>();
+      live.forEach(s => {
+        const arr = bySymbol.get(s.symbol) ?? [];
+        arr.push(s);
+        bySymbol.set(s.symbol, arr);
+      });
+
+      let fetches = 0;
+      for (const [symbol, group] of Array.from(bySymbol.entries())) {
+        if (fetches >= 8) break; // rest advance next slot
+        fetches++;
+        let candles: Candle[] = [];
+        try { candles = await fetchCandles(symbol, '1h', 168, 3); } catch { continue; }
+        for (const s of group) {
+          const advanced = advanceTimeStopShadow(s, candles, now);
+          shadows.set(s.id, advanced);
+          writes[s.id] = JSON.stringify(advanced);
+        }
       }
     }
 
@@ -1392,26 +1420,30 @@ async function processShadowTrades(newCandidates: ShadowTrade[]): Promise<void> 
       writes[c.id] = JSON.stringify(c);
     }
 
-    // Advance live shadows — one candle fetch per symbol, capped per run
+    // Advance live shadows — one candle fetch per symbol, capped per run.
+    // Merging new candidates (above) stays every scan; only the advance is
+    // throttled, since it resolves against 1h candles (see claimPeriodicSlot).
     const now  = Date.now();
-    const live = Array.from(shadows.values()).filter(s => s.status !== 'done');
-    const bySymbol = new Map<string, ShadowTrade[]>();
-    live.forEach(s => {
-      const arr = bySymbol.get(s.symbol) ?? [];
-      arr.push(s);
-      bySymbol.set(s.symbol, arr);
-    });
+    if (await claimPeriodicSlot('shadow-advance', SHADOW_ADVANCE_PERIOD_SEC)) {
+      const live = Array.from(shadows.values()).filter(s => s.status !== 'done');
+      const bySymbol = new Map<string, ShadowTrade[]>();
+      live.forEach(s => {
+        const arr = bySymbol.get(s.symbol) ?? [];
+        arr.push(s);
+        bySymbol.set(s.symbol, arr);
+      });
 
-    let fetches = 0;
-    for (const [symbol, group] of Array.from(bySymbol.entries())) {
-      if (fetches >= 8) break; // rest advance next cron (5 min later)
-      fetches++;
-      let candles: Candle[] = [];
-      try { candles = await fetchCandles(symbol, '1h', 96); } catch { continue; }
-      for (const st of group) {
-        simulateShadow(st, candles, now);
-        st.lastCheckedAt = now;
-        writes[st.id] = JSON.stringify(st);
+      let fetches = 0;
+      for (const [symbol, group] of Array.from(bySymbol.entries())) {
+        if (fetches >= 8) break; // rest advance next slot
+        fetches++;
+        let candles: Candle[] = [];
+        try { candles = await fetchCandles(symbol, '1h', 96); } catch { continue; }
+        for (const st of group) {
+          simulateShadow(st, candles, now);
+          st.lastCheckedAt = now;
+          writes[st.id] = JSON.stringify(st);
+        }
       }
     }
 
@@ -1662,7 +1694,9 @@ export async function GET(req: NextRequest) {
     let entryTfBias: 'LONG' | 'SHORT' | null = null; // entry TF's 4H EMA200 direction
 
     try {
-      await fetchTicker24h(symbol).catch(() => null);
+      // (Removed: a fetchTicker24h(symbol) whose result was discarded. Present
+      // since the initial commit, it cost one round trip per symbol per scan —
+      // 15 wasted requests every minute — and fed nothing.)
 
       // Candle cache so HTF candles are fetched only once even if reused across TFs
       const candleCache = new Map<string, Candle[]>();
