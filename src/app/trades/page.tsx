@@ -280,7 +280,7 @@ const TradeRow = memo(function TradeRow({
       )}
 
       {/* Progress bar: shown whenever the trade has an active price range to visualize */}
-      {(isPending || isWatchingTp2) && (
+      {(isPending || isWatchingTp2 || isWaiting) && (
         <div className="mb-3">
           <PriceProgressBar
             direction={trade.direction}
