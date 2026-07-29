@@ -7,6 +7,7 @@ import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
 import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason } from '@/lib/monitorMath';
+import { fetchCandlesCached } from '@/lib/candleCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 
 export const maxDuration = 60;
@@ -1544,7 +1545,9 @@ async function fetchBtcRegime(): Promise<BtcRegimeState> {
   const state: BtcRegimeState = { regime: 'chaotic', longPaused: false, shortPaused: false };
   try {
     const [btc4h, btc1h] = await Promise.all([
-      fetchCandles('BTCUSDT', '4h', 250),
+      // Cached for the same reason as the per-symbol 4H series — 250 bars that
+      // only change every 4 hours, re-parsed every minute otherwise.
+      fetchCandlesCached('BTCUSDT', '4h', 250),
       fetchCandles('BTCUSDT', '1h', 20), // 20 bars → enough for ATR(14)
     ]);
     // Only EMA50/EMA200 needed for regime — skip full indicator compute
@@ -1769,6 +1772,13 @@ export async function GET(req: NextRequest) {
       const candleCache = new Map<string, Candle[]>();
 
       // ── Regime determination from 4H ADX (once per symbol) ─────
+      // NOTE: the 540-bar 4H series comes from fetchCandlesCached — it re-fetches
+      // only the last few bars and splices them onto the previous run's array.
+      // A 4H bar changes every 4 hours but this scan runs every minute, so the
+      // uncached path was re-transferring and re-parsing 539 identical bars per
+      // symbol per run. The spliced array is identical to a full fetch (see
+      // mergeCandles' tests), so ADX/ATR values are unchanged — this is purely
+      // the parsing cost coming off Vercel's Fluid Active CPU bill.
       // v2.1 §1.2 hysteresis: ADX ≥23 → trending (until ≤18); ≤18 → ranging
       // (until ≥23); 18-23 holds the previous state — transitional only when
       // a symbol has no prior state (initialization).
@@ -1778,7 +1788,7 @@ export async function GET(req: NextRequest) {
       let regimeDetermined = false;
       try {
         // 540 bars = 90 days of 4H candles — enough for ADX regime + 90-day ATR percentile
-        if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandles(symbol, '4h', 540));
+        if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandlesCached(symbol, '4h', 540));
         const fourHC   = candleCache.get('4h')!;
         // Only ADX is needed here — computing full indicators (EMA200/MACD/BB/…)
         // over 540 bars every scan was the single biggest CPU sink.
