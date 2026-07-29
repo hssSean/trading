@@ -94,7 +94,10 @@ export function SignalCard({ signal, onClick, compact }: Props) {
             {isHighVol  && <PillBadge label="高波動" color="#E6AF5A" />}
           </div>
         </div>
-        <span className="text-accent text-[14px] num shrink-0">{signal.score}</span>
+        <span className="flex items-baseline gap-1 shrink-0">
+          <span className="tlabel">評分</span>
+          <span className="text-accent text-[14px] num">{signal.score}</span>
+        </span>
       </div>
 
       {/* Price grid 2x2 */}
