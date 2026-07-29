@@ -20,6 +20,11 @@ const config: Config = {
         // every existing text-green-400 / bg-red-500/10 picks up the new shades).
         green: { 300: '#3DDC97', 400: '#0ECB81', 500: '#0ECB81', 600: '#0BA36A' },
         red: { 300: '#F87088', 400: '#F6465D', 500: '#F6465D', 600: '#D93A4E' },
+        'card-2': '#141922',
+        'card-2-alt': '#12161C',
+      },
+      borderRadius: {
+        'card-lg': '20px',
       },
       fontFamily: {
         mono: ['ui-monospace', 'SF Mono', 'JetBrains Mono', 'Menlo', 'monospace'],

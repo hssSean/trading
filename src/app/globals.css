@@ -88,4 +88,13 @@ html, body {
   .tlabel {
     @apply text-[#565E6B] text-[10px] tracking-[0.08em];
   }
+  /* Card mount-in animation — Coinbase-calm redesign micro-interaction */
+  .card-enter {
+    animation: card-enter .4s ease-out both;
+  }
+}
+
+@keyframes card-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
