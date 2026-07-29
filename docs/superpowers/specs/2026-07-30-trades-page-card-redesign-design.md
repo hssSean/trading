@@ -1,12 +1,14 @@
-# 交易紀錄頁卡片重設計 — Design Spec
+# 全站視覺改版（Coinbase 柔和風）— Design Spec
 
 日期：2026-07-30
 
 ## 背景
 
-現行交易紀錄頁（`src/app/trades/page.tsx` 的 `TradeRow`）採極簡深色風格：`#0F141A` 底、細邊框、4 格純數字網格顯示進場/TP1/TP2/止損、純文字徽章。使用者反饋三點不滿：視覺風格通用（像預設 Tailwind 深色主題）、版面布局混亂、互動與動畫弱。
+現行介面（各頁面/元件）皆採極簡深色風格：色值大多直接寫死 hex（`#0F141A`、`#1B222B`、`#2DD4BF` 等）在 Tailwind 任意值 class 裡，未走 `tailwind.config.ts` 的 theme token。使用者反饋三點不滿：視覺風格通用（像預設 Tailwind 深色主題）、版面布局混亂、互動與動畫弱。
 
-透過 mockup 反覆對比（Coinbase 柔和風 / Robinhood 大膽風 / Neutral Pro 極簡風三版），使用者選定「Coinbase 柔和風」方向並提供一張截圖作為最終定案樣式參照。本 spec 只涵蓋設計系統 token 更新 + 交易紀錄頁一個範例頁的重做，其餘頁面（首頁/分析頁/設定頁/登入頁）暫不動，待此範例驗證滿意後再擴散。
+透過 mockup 反覆對比（Coinbase 柔和風 / Robinhood 大膽風 / Neutral Pro 極簡風三版），使用者選定「Coinbase 柔和風」方向並提供一張截圖作為交易紀錄頁卡片的最終定案樣式參照。原本規劃先做交易紀錄頁一個範例頁驗證，使用者確認滿意後，追加範圍到全部剩餘頁面：首頁/訊號列表、分析頁、設定頁、登入頁，以及它們共用的 7 個元件（`SignalCard`、`CoinCard`、`BottomNav`、`BtcStatusBar`、`CandlestickChart`、`ScanStatusPanel`、`StatsHero`）。本 spec 現涵蓋整站。
+
+**改版原則（沿用交易紀錄頁已驗證的做法）**：色值就地改（每個檔案內把寫死的 hex 換成新色階的 hex/token），不建立新的全域主題抽象層、不做 codebase 大搜換的機械式重構——保持改動可讀、可個別檢查。密度高的清單（首頁 20+ 幣種列、分析頁指標格、設定頁多區塊）維持現行的緊湊列表/表格結構，只換色彩與間距，不要套用交易紀錄頁那種「大卡片+進場動畫」的重量級樣式（會拖慢掃描效率、增加不必要的重繪面）。
 
 ## 視覺規格（依定案截圖）
 
@@ -40,6 +42,35 @@
 - 等待進場：邊框改 `dashed`，色系換成 amber/warning，內容只顯示「距進場位」文字，無進度軌道
 - TP1 已鎖定/追蹤 TP2：邊框改實線 accent 色調（非 dashed），移動止損資訊改成一個高亮 chip（`background: accent 8%`）取代現行純文字提醒框
 
+## 首頁／訊號列表（`src/app/page.tsx`、`CoinCard.tsx`、`SignalCard.tsx`）
+
+- `CoinCard`（20+ 幣種同時渲染的密集表格列）：**不改結構**，只換色——列背景/hover 用新 `card-2` 色階、分隔線用新邊框透明度、數字維持等寬字體右對齊。既有 `useTick()` 逐幣訂閱的效能設計原封不動。
+- `SignalCard`：形狀與 `TradeCard`（交易紀錄頁）幾乎一致（卡頭幣種+方向+分數、價格區、理由列表），直接套用新的 `TradeCard` 外殼 + `PillBadge`，價格區可視情況換成簡化版 `PriceProgressBar`（無「現價」時只顯示靜態三點：進場/止損/TP）。
+- 幣種搜尋輸入框改用新的 `FormField`（見下）。
+
+## 分析頁（`src/app/analysis/[symbol]/page.tsx`、`CandlestickChart.tsx`）
+
+- 指標格（RSI/MACD/EMA 等 6 格）、SMC 區塊（OB/FVG/S-R）：沿用現有格狀排版，背景/邊框換新色階，不加卡片動畫（資訊密度高，動畫會干擾閱讀）。
+- `CandlestickChart`：**只調色不改結構**——`createChart()` 設定裡的 grid/text/up/down 顏色常數換成新色階對應值（up/down 沿用現有 `#0ECB81`/`#F6465D` 語意色不變，只調格線/背景/文字色以貼合新卡片底色），K棒渲染邏輯、EMA/OB/FVG overlay 邏輯不動。
+- 時框 tabs、解鎖/重整按鈕改用新的按鈕樣式（膠囊/圖示，同交易紀錄頁footer按鈕規格）。
+
+## 設定頁（`src/app/settings/page.tsx`）
+
+表單為主的頁面，需要新增兩個表單元件（原設計只有卡片/徽章/進度條，沒涵蓋輸入框）：
+
+- **`FormField`**：文字/數字/密碼輸入框，label 在上、輸入框用新卡片色階背景 + focus 時 accent 色 ring，取代現行 `.input-field` class 的寫死色值
+- **`ToggleChip`**：分段選擇按鈕（風險%、訊號強度、時框），取代現行 `.chip`/`.chip-active`，選中態用 accent 填色（非現行邊框強調）
+
+各摺疊區塊（帳號/推播/Webhook/倉位計算/訊號強度/時框/幣種列表/資料管理）外殼統一換成新卡片色階，內部欄位改用上述兩元件，互動邏輯（Zustand `updateSettings()` 綁定）不動。
+
+## 登入頁（`src/app/login/page.tsx`）
+
+小範圍：卡片外殼換新色階＋圓角，email/password 欄位改用 `FormField`，登入/註冊按鈕改新按鈕樣式，登入/註冊 tab 切換改用 `ToggleChip`。Supabase 驗證邏輯完全不動。
+
+## 共用小元件（只重上色，不重排版）
+
+`BottomNav`、`BtcStatusBar`、`ScanStatusPanel`、`StatsHero` 四個元件維持現有版面結構（導覽列/狀態條/展開式診斷面板/戰績橫幅），只把寫死的舊 hex 換成新色階對應值，`ScanStatusPanel` 內的密集表格不套卡片動畫。`StatsHero` 的 SVG sparkline 顏色比照新 accent 色微調。
+
 ## 色彩／圓角 Token（新增，不動舊值）
 
 在 `tailwind.config.ts` 的 `theme.extend` 新增（保留現有 `app/surface/border/accent/up/down` 供其他頁沿用）：
@@ -64,8 +95,10 @@ borderRadius: {
 | `PriceProgressBar` | 接收 `stopLoss, entry, tp1, tp2, current` 算 thumb 位置與填色比例，畫軌道+thumb+四個標籤 |
 | `PillBadge` | 狀態/方向徽章，接收 `color` + `pulse?: boolean`（呼吸動畫開關） |
 | `StatChip` | icon + label + value 的資訊 chip |
+| `FormField` | 文字/數字/密碼輸入框，label+input，focus accent ring |
+| `ToggleChip` | 分段選擇按鈕，選中態 accent 填色 |
 
-`TradeRow`（`src/app/trades/page.tsx`）改用上述元件組裝，資料邏輯（filter/sort/計算/R值/倉位計算）完全不動，只換渲染層。
+`TradeRow`（`src/app/trades/page.tsx`）、`SignalCard`、設定頁各表單欄位、登入頁表單改用上述元件組裝，資料邏輯（filter/sort/計算/R值/倉位計算/表單送出）完全不動，只換渲染層。
 
 ## 動畫
 
@@ -83,13 +116,16 @@ borderRadius: {
 
 ## 範圍界線
 
-**這次做**：`tailwind.config.ts` 新 token、`src/components/ui/` 四個新元件、`TradeRow` 改用新元件重繪五種狀態（等待進場/持倉中/追蹤TP2/已結束獲利/已結束虧損）。
+**這次做**：
+- `tailwind.config.ts` 新 token（`card-2`/`card-2-alt`/`card-lg`）
+- `src/components/ui/` 六個新元件：`TradeCard`、`PriceProgressBar`、`PillBadge`、`StatChip`、`FormField`、`ToggleChip`
+- `src/app/trades/page.tsx`（`TradeRow`）、`src/app/page.tsx` + `CoinCard.tsx` + `SignalCard.tsx`、`src/app/analysis/[symbol]/page.tsx` + `CandlestickChart.tsx`、`src/app/settings/page.tsx`、`src/app/login/page.tsx`、`BottomNav.tsx`、`BtcStatusBar.tsx`、`ScanStatusPanel.tsx`、`StatsHero.tsx` 全部重上色/重排版（依上述各節規格，密集列表類只換色不換結構）
 
-**這次不做**：首頁/分析頁/設定頁/登入頁改版、資料邏輯變動、新增 npm 套件、`StatsHero`/篩選列的重設計（維持現狀，之後若對整體滿意再排下一輪）。
+**這次不做**：資料邏輯變動（filter/sort/計算/表單驗證/API 呼叫皆不動）、新增 npm 套件（不裝 framer-motion 等）、`CandlestickChart` 的圖表庫或指標運算邏輯重寫（只調顏色常數）、CSV 匯出格式或任何後端/API route 改動。
 
 ## 驗收標準
 
-- 交易紀錄頁五種卡片狀態的視覺與提供的截圖及 mockup 一致
+- 交易紀錄頁五種卡片狀態、首頁訊號/幣種列表、分析頁、設定頁、登入頁的視覺都套上新色階與新元件，風格與定案截圖／mockup 一致
 - `npx tsc --noEmit` 通過
-- 本機 `npm run dev` 用瀏覽器預覽確認：卡片渲染正確、進度條 thumb 位置隨即時價變動、按鈕可點擊、40+ 筆紀錄時捲動流暢無明顯重繪卡頓
-- 其餘頁面未受影響（`tailwind.config.ts` 只新增 token，未修改既有色值）
+- 本機 `npm run dev` 用瀏覽器逐頁預覽確認：卡片/表單渲染正確、進度條 thumb 位置隨即時價變動、按鈕與表單可正常互動、首頁 20+ 幣種與分析頁圖表捲動/更新流暢無明顯重繪卡頓
+- 登入（Supabase 驗證）、設定頁儲存（Zustand `updateSettings`）、交易紀錄操作（關閉/刪除/同步）等既有功能行為不變
