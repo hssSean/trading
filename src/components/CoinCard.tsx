@@ -29,25 +29,25 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
   return (
     <Link
       href={`/analysis/${coin.symbol}`}
-      className="flex items-center px-3 py-2.5 border-b border-[#141A21] active:bg-[#12181F]"
+      className="flex items-center px-3 py-2.5 border-b border-white/[0.05] active:bg-white/[0.03]"
     >
       {/* Symbol + timeframe */}
       <div className="w-[96px] shrink-0">
         <div className="flex items-center gap-1.5">
-          <span className="text-[#E8ECF1] text-[13px] num">{coin.baseAsset}</span>
-          {activeTrade && <span className="w-1.5 h-1.5 rounded-full bg-[#2DD4BF] shrink-0" />}
+          <span className="text-text-p text-[13px] num">{coin.baseAsset}</span>
+          {activeTrade && <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />}
         </div>
-        <div className="text-[#565E6B] text-[10px] mt-0.5 truncate">{coin.timeframes.join(' · ')}</div>
+        <div className="text-text-m text-[10px] mt-0.5 truncate">{coin.timeframes.join(' · ')}</div>
       </div>
 
       {/* Price + 24h change */}
       <div className="flex-1 text-right">
         {coin.isLoading ? (
-          <div className="w-16 h-3.5 bg-[#141A21] rounded animate-pulse ml-auto" />
+          <div className="w-16 h-3.5 bg-white/[0.04] rounded animate-pulse ml-auto" />
         ) : (
           <>
-            <div className="text-[#E8ECF1] text-[13px] num">{fmtPrice(tick.price)}</div>
-            <div className={`text-[11px] num ${isUp ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+            <div className="text-text-p text-[13px] num">{fmtPrice(tick.price)}</div>
+            <div className={`text-[11px] num ${isUp ? 'text-up' : 'text-down'}`}>
               {isUp ? '+' : ''}{tick.changePct24h.toFixed(2)}%
             </div>
           </>
@@ -58,21 +58,21 @@ export function CoinCard({ coin }: { coin: WatchedCoin }) {
       <div className="w-[76px] text-right shrink-0">
         {activeTrade && livePnl !== null ? (
           <>
-            <div className={`text-[12px] num ${livePnl >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+            <div className={`text-[12px] num ${livePnl >= 0 ? 'text-up' : 'text-down'}`}>
               {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
             </div>
-            <div className="text-[#565E6B] text-[10px]">持倉</div>
+            <div className="text-text-m text-[10px]">持倉</div>
           </>
         ) : latest ? (
           <div className="flex items-center justify-end gap-1.5">
-            <span className={latest.direction === 'LONG' ? 'text-[#0ECB81] text-[11px]' : 'text-[#F6465D] text-[11px]'}>
+            <span className={latest.direction === 'LONG' ? 'text-up text-[11px]' : 'text-down text-[11px]'}>
               {latest.direction === 'LONG' ? '做多' : '做空'}
             </span>
-            <span className="text-[#2DD4BF] text-[12px] num">{latest.score}</span>
-            {unread > 0 && <span className="w-1.5 h-1.5 rounded-full bg-[#2DD4BF]" />}
+            <span className="text-accent text-[12px] num">{latest.score}</span>
+            {unread > 0 && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
           </div>
         ) : (
-          <span className="text-[#565E6B] text-[12px]">—</span>
+          <span className="text-text-m text-[12px]">—</span>
         )}
       </div>
     </Link>
