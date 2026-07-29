@@ -7,6 +7,11 @@ import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
 import { StatsHero } from '@/components/StatsHero';
 import { TradeResult, TradeRecord } from '@/types';
+import { TradeCard } from '@/components/ui/TradeCard';
+import { PillBadge } from '@/components/ui/PillBadge';
+import { StatChip } from '@/components/ui/StatChip';
+import { PriceProgressBar } from '@/components/ui/PriceProgressBar';
+import { Wallet, ShieldAlert, LineChart, FileText } from 'lucide-react';
 
 const RESULT_LABEL: Record<string, string> = {
   WIN_TP1:      'TP1 達標',
@@ -178,16 +183,18 @@ const TradeRow = memo(function TradeRow({
       : (livePx - trade.tp2) / livePx * 100;
   }
 
+  const cardVariant = isWaiting ? 'waiting' : (isPending || isWatchingTp2 || isUnconfirmed) ? 'active' : 'closed';
+  const displayPrice = livePx > 0 ? livePx : trade.entry;
+
   return (
-    <div
+    <TradeCard
+      variant={cardVariant}
       onClick={selectMode ? () => toggleSelect(trade.id) : undefined}
-      className={`relative rounded-md p-3.5 mb-2.5 border${selectMode ? ' cursor-pointer select-none' : ''} ${
-        selectMode && selected
-          ? 'border-[#2DD4BF]/50 bg-[#2DD4BF]/5'
-          : isWaiting      ? 'bg-[#0F141A] border-[#3A2F14] border-dashed'
-          : isPending && nearSL ? 'bg-[#0F141A] border-[#F6465D]/50'
-          : 'bg-[#0F141A] border-[#1B222B]'
-      }`}
+      className={
+        (selectMode ? 'cursor-pointer select-none ' : '') +
+        (selectMode && selected ? '!border-accent/50 !bg-accent/5 ' : '') +
+        (isPending && nearSL ? '!border-down/40' : '')
+      }
     >
       {selectMode && (
         <div
@@ -197,195 +204,143 @@ const TradeRow = memo(function TradeRow({
           {selected && <span className="text-[#0A0D11] text-[9px] leading-none">✓</span>}
         </div>
       )}
-      {/* Top row */}
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={`text-[12px] ${trade.direction === 'LONG' ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
-            {trade.direction === 'LONG' ? 'LONG' : 'SHORT'}
-          </span>
-          <span className={`num text-[13px] ${isWaiting ? 'text-[#8A94A2]' : 'text-[#E8ECF1]'}`}>
-            {trade.symbol.replace('USDT', '')}
-          </span>
-          <span className="text-[#565E6B] text-[11px] num">{trade.timeframe}</span>
-          {trade.tier === 'B' && (
-            <Tag text="B 輕倉 0.5%" />
-          )}
-          {(isPending || isWaiting || isUnconfirmed) && (
-            <span className="text-[11px] text-[#3A424E] num">{fmtDuration(now - trade.openedAt)}</span>
-          )}
+
+      {/* Header: coin avatar + name + status badge */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div
+            className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-[12px] font-medium"
+            style={{
+              background: `${trade.direction === 'LONG' ? '#1D9E75' : '#E24B4A'}24`,
+              color: trade.direction === 'LONG' ? '#5DCAA5' : '#F09595',
+            }}
+          >
+            {trade.symbol.replace('USDT', '').slice(0, 1)}
+          </div>
+          <div className="min-w-0">
+            <div className="text-[14px] font-medium text-text-p flex items-center gap-1.5 flex-wrap">
+              {trade.symbol.replace('USDT', '')}/USDT
+              {trade.tier === 'B' && <Tag text="B 輕倉 0.5%" />}
+            </div>
+            <div className="text-[11px] text-text-s truncate">
+              {trade.timeframe} · {trade.direction === 'LONG' ? '做多' : '做空'}
+              {(isPending || isWaiting || isUnconfirmed) && ` · ${fmtDuration(now - trade.openedAt)}`}
+            </div>
+          </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {isWaiting ? (
-            <span className="text-[11px] text-[#8A94A2] border border-[#3A2F14] px-1.5 py-0.5 rounded">
-              等待進場
-            </span>
+            <PillBadge label="等待進場" color="#E6AF5A" />
           ) : isUnconfirmed ? (
-            <span className="text-[11px] text-[#565E6B] border border-[#1B222B] px-1.5 py-0.5 rounded">
-              同步中
-            </span>
+            <PillBadge label="同步中" color="#565E6B" />
           ) : isPending ? (
-            <>
-              {livePx > 0 && (
-                <span className={`text-[11px] num ${livePnl >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
-                  {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
-                </span>
-              )}
-              {isTp1Hit ? (
-                <span className="text-[11px] text-[#0ECB81] border border-[#0ECB81]/40 px-1.5 py-0.5 rounded">TP1·等TP2</span>
-              ) : (
-                <span className="text-[11px] text-[#2DD4BF] border border-[#2DD4BF]/40 px-1.5 py-0.5 rounded">持倉中</span>
-              )}
-            </>
+            <PillBadge label={isTp1Hit ? 'TP1·等TP2' : '持倉中'} color="#5DCAA5" pulse={!isTp1Hit} />
           ) : isWatchingTp2 ? (
-            <span className="text-[11px] text-[#0ECB81] border border-[#0ECB81]/40 px-1.5 py-0.5 rounded">TP1·等TP2</span>
+            <PillBadge label="TP1·等TP2" color="#5DCAA5" />
           ) : (() => {
-            // MANUAL_CLOSE (時間止損/到期平倉) colored by realized PnL so a
-            // profitable one reads as a win, not the neutral yellow default.
             const isManual = trade.result === 'MANUAL_CLOSE';
             const color = isManual
-              ? (isWin ? '#0ECB81' : isLossTrade(trade) ? '#F6465D' : '#2DD4BF')
+              ? (isWin ? '#5DCAA5' : isLossTrade(trade) ? '#F09595' : '#2DD4BF')
               : RESULT_COLOR[trade.result!];
-            return (
-              <span className="text-[11px] px-1.5 py-0.5 rounded border" style={{ borderColor: `${color}55`, color }}>
-                {RESULT_LABEL[trade.result!]}
-              </span>
-            );
+            return <PillBadge label={RESULT_LABEL[trade.result!]} color={color} />;
           })()}
-          <span className="text-[#2DD4BF] text-[12px] num">{trade.score}</span>
+          <span className="text-accent text-[12px] num">{trade.score}</span>
         </div>
-      </div>
-
-      {/* Price grid */}
-      <div className="grid grid-cols-4 gap-px bg-[#1B222B] border border-[#1B222B] rounded mb-2 overflow-hidden">
-        <PriceCell label="進場" value={fmtPrice(trade.entry)} />
-        <PriceCell label="TP1"  value={fmtPrice(trade.tp1)}      color="#0ECB81" />
-        <PriceCell label="TP2"  value={fmtPrice(trade.tp2)}      color="#0ECB81" />
-        <PriceCell label="止損" value={fmtPrice(trade.stopLoss)} color="#F6465D" />
       </div>
 
       {/* Waiting: distance to entry */}
-      {isWaiting && livePx > 0 && (
-        <div className="grid grid-cols-2 gap-1.5 mb-2">
-          <div className="border border-[#3A2F14] rounded p-2 text-center">
-            <div className="tlabel">距進場位</div>
-            <div className={`text-[12px] num mt-0.5 ${distToEntry > 0 ? 'text-[#C99A2E]' : 'text-[#0ECB81]'}`}>
-              {distToEntry > 0 ? `還差 ${distToEntry.toFixed(2)}%` : '已達進場 等待確認'}
-            </div>
-          </div>
-          <div className="border border-[#1B222B] rounded p-2 text-center">
-            <div className="tlabel">現價</div>
-            <div className="text-[#8A94A2] text-[12px] num mt-0.5">{fmtPrice(livePx)}</div>
-          </div>
-        </div>
-      )}
-
-      {/* Distance bars for active pending trades */}
-      {isPending && livePx > 0 && (
-        <div className="grid grid-cols-2 gap-1.5 mb-2">
-          {isTp1Hit ? (
-            <div className="border border-[#0ECB81]/25 rounded p-2 text-center">
-              <div className="text-[#0ECB81] text-[10px]">TP1 已達標</div>
-              <div className="text-[#0ECB81] text-[12px] num mt-0.5">
-                {distTP1 > 0 ? `距TP2 還差 ${distTP1.toFixed(2)}%` : `已超過 TP2 ${Math.abs(distTP1).toFixed(2)}%`}
-              </div>
-            </div>
+      {isWaiting && (
+        <div className="text-[12px] mb-3">
+          {livePx > 0 ? (
+            <>
+              <span className={distToEntry > 0 ? 'text-[#E6AF5A]' : 'text-accent'}>
+                {distToEntry > 0 ? `距進場位 還差 ${distToEntry.toFixed(2)}%` : '已達進場 等待確認'}
+              </span>
+              <span className="text-text-s ml-2 num">現價 {fmtPrice(livePx)}</span>
+            </>
           ) : (
-            <div className="border border-[#1B222B] rounded p-2 text-center">
-              <div className="tlabel">距 TP1</div>
-              <div className={`text-[12px] num mt-0.5 ${distTP1 > 0 ? 'text-[#0ECB81]/80' : 'text-[#0ECB81]'}`}>
-                {distTP1 > 0 ? `還差 ${distTP1.toFixed(2)}%` : `超過 ${Math.abs(distTP1).toFixed(2)}%`}
-              </div>
-            </div>
+            <span className="text-text-s">等待即時價格…</span>
           )}
-          <div className={`rounded p-2 text-center border ${nearSL ? 'border-[#F6465D]/40' : 'border-[#1B222B]'}`}>
-            <div className={`text-[10px] ${nearSL ? 'text-[#F6465D]' : 'tlabel'}`}>{nearSL ? '接近止損' : '距 SL'}</div>
-            <div className={`text-[12px] num mt-0.5 ${nearSL ? 'text-[#F6465D]' : 'text-[#8A94A2]'}`}>
-              {distSL >= 0 ? `緩衝 ${distSL.toFixed(2)}%` : `穿越 ${Math.abs(distSL).toFixed(2)}%`}
-            </div>
+        </div>
+      )}
+
+      {/* Pending: PnL + live price */}
+      {isPending && livePx > 0 && (
+        <div className="flex items-baseline justify-between mb-3">
+          <div className="flex items-baseline gap-1.5">
+            <span className={`text-[22px] font-medium num ${livePnl >= 0 ? 'text-accent' : 'text-down'}`}>
+              {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
+            </span>
+          </div>
+          <div className="text-right">
+            <div className="text-[11px] text-text-s">現價</div>
+            <div className="text-[13px] text-text-p num">{fmtPrice(livePx)}</div>
           </div>
         </div>
       )}
 
-      {/* TP2 distance bar for trades that hit TP1 and are watching for TP2 */}
-      {isWatchingTp2 && livePx > 0 && (
-        <div className="grid grid-cols-2 gap-1.5 mb-2">
-          <div className="border border-[#0ECB81]/25 rounded p-2 text-center">
-            <div className="text-[#0ECB81] text-[10px]">TP1 已鎖定 · 追蹤TP2</div>
-            <div className="text-[#0ECB81] text-[12px] num mt-0.5">
-              {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過TP2 ${Math.abs(distTP2).toFixed(2)}%`}
-            </div>
-          </div>
-          <div className="border border-[#1B222B] rounded p-2 text-center">
-            <div className="tlabel">現價</div>
-            <div className="text-[#8A94A2] text-[12px] num mt-0.5">{fmtPrice(livePx)}</div>
-          </div>
+      {/* Progress bar: shown whenever the trade has an active price range to visualize */}
+      {(isPending || isWatchingTp2) && (
+        <div className="mb-3">
+          <PriceProgressBar
+            direction={trade.direction}
+            stopLoss={trade.stopLoss}
+            entry={trade.entry}
+            tp1={trade.tp1}
+            tp2={trade.tp2}
+            current={displayPrice}
+            formatPrice={fmtPrice}
+          />
         </div>
       )}
 
-      {/* Live trailing stop for TP1-watching trades — where to move your stop */}
+      {isWatchingTp2 && (
+        <div className="flex items-baseline gap-2 mb-2 text-[12px]">
+          <span className="text-accent text-[15px] font-medium num">
+            {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過TP2 ${Math.abs(distTP2).toFixed(2)}%`}
+          </span>
+        </div>
+      )}
+
+      {/* Live trailing stop for TP1-watching trades */}
       {isWatchingTp2 && (() => {
         const stopLvl = trade.currentStop && trade.currentStop > 0 ? trade.currentStop : trade.entry;
         const lockedR = Math.abs(trade.entry - trade.stopLoss) > 0
           ? (trade.direction === 'LONG' ? stopLvl - trade.entry : trade.entry - stopLvl) / Math.abs(trade.entry - trade.stopLoss)
           : 0;
         return (
-          <div className="mb-2 border border-[#2DD4BF]/25 rounded px-3 py-2 flex items-center justify-between">
-            <div>
-              <div className="tlabel">移動止損（請移到這）</div>
-              <div className="text-[#2DD4BF] text-[14px] num mt-0.5">{fmtPrice(stopLvl)}</div>
-            </div>
-            <p className="text-[10px] text-right leading-4 text-[#565E6B]">
-              {lockedR >= 0.05 ? `已鎖 +${lockedR.toFixed(1)}R` : '保本（無虧損風險）'}<br/>
-              碰到即以此價出場
-            </p>
+          <div className="flex items-center justify-between bg-accent/[0.08] rounded-[10px] px-3 py-2 mb-3">
+            <span className="text-[11px] text-text-s">移動止損（請移到這）</span>
+            <span className="text-[12px] text-accent num">
+              {fmtPrice(stopLvl)} · {lockedR >= 0.05 ? `已鎖 +${lockedR.toFixed(1)}R` : '保本'}
+            </span>
           </div>
         );
       })()}
 
-      {/* Position sizing (user risk%, tier B halved) for pending trades */}
+      {/* Position sizing */}
       {isPending && (() => {
         const effRisk = riskPct * tierRiskMultiplier(trade.symbol, trade.tier);
         const plan = calcPositionPlan(accountSize, effRisk, trade.entry, trade.stopLoss, trade.tier === 'B' ? 5 : 10);
         if (!plan) return null;
-        const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
         return (
-          <div className="mb-2 border border-[#1B222B] rounded px-3 py-2">
-            <div className="tlabel mb-1.5">倉位計算（{effRisk}% 風險）</div>
-            <div className="grid grid-cols-4 gap-1">
-              <div className="text-center">
-                <div className="text-[#3A424E] text-[10px]">建議倉位</div>
-                <div className="text-[#E8ECF1] text-[12px] num mt-0.5">{plan.positionUSDT}U</div>
-              </div>
-              <div className="text-center">
-                <div className="text-[#3A424E] text-[10px]">本金×槓桿</div>
-                <div className="text-[#2DD4BF] text-[12px] num mt-0.5">{plan.marginUSDT}U×{plan.leverage}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-[#3A424E] text-[10px]">止損虧損</div>
-                <div className="text-[#8A94A2] text-[12px] num mt-0.5">{plan.riskUSDT}U</div>
-              </div>
-              <div className="text-center">
-                <div className="text-[#3A424E] text-[10px]">止損幅度</div>
-                <div className={`text-[12px] num mt-0.5 ${slPct > 5 ? 'text-[#F6465D]' : 'text-[#8A94A2]'}`}>{slPct.toFixed(2)}%</div>
-              </div>
-            </div>
-            {plan.belowMinNotional && (
-              <p className="text-[#C99A2E] text-[10px] mt-1">低於交易所最低下單額 5U</p>
-            )}
+          <div className="flex gap-2 mb-3">
+            <StatChip icon={<Wallet className="w-4 h-4" />} label="建議倉位" value={`${plan.positionUSDT}U`} />
+            <StatChip icon={<ShieldAlert className="w-4 h-4" />} label="止損風險" value={`${plan.riskUSDT}U · ${effRisk}%`} />
           </div>
         );
       })()}
 
       {/* TP1 hit: breakeven reminder */}
       {isTp1Hit && (
-        <div className="mb-2 border border-[#0ECB81]/20 rounded px-3 py-2">
-          <p className="text-[#0ECB81]/85 text-[11px]">TP1 已達標，建議將止損移至成本 <span className="num text-[#0ECB81]">{fmtPrice(trade.entry)}</span>，繼續持有等待 TP2</p>
+        <div className="mb-3 bg-accent/[0.06] rounded-[10px] px-3 py-2">
+          <p className="text-accent/85 text-[11px]">TP1 已達標，建議將止損移至成本 <span className="num text-accent">{fmtPrice(trade.entry)}</span>，繼續持有等待 TP2</p>
         </div>
       )}
 
-      {/* Auto-generated entry reasons from signal analysis */}
+      {/* Auto-generated entry reasons */}
       {trade.reasons && trade.reasons.length > 0 && (
-        <div className="mt-2 border-t border-[#1B222B] pt-2">
+        <div className="mb-2 border-t border-white/[0.06] pt-2">
           <p className="tlabel mb-1">分析依據</p>
           {trade.scoreBreakdown && (
             <p className="text-[#5A7A8A] text-[10px] leading-[1.5] mb-1 num">
@@ -407,27 +362,27 @@ const TradeRow = memo(function TradeRow({
             onChange={e => setNoteText(e.target.value)}
             placeholder="個人備註、市場觀察…"
             rows={2}
-            className="w-full bg-[#141A21] border border-[#1B222B] rounded px-3 py-2 text-xs text-[#E8ECF1] resize-none outline-none mb-2"
+            className="w-full bg-card-2 border border-white/[0.06] rounded-[10px] px-3 py-2 text-xs text-text-p resize-none outline-none mb-2"
           />
           <div className="flex gap-2">
             <button onClick={() => { updateTrade(trade.id, { entryNotes: noteText }); setEditingNote(null); }}
-              className="flex-1 py-1.5 rounded bg-[#2DD4BF] text-[#0A0D11] text-xs font-medium">儲存</button>
+              className="flex-1 py-1.5 rounded-full bg-accent text-[#0A0D11] text-xs font-medium">儲存</button>
             <button onClick={() => setEditingNote(null)}
-              className="px-3 py-1.5 rounded border border-[#232B35] text-[#565E6B] text-xs">取消</button>
+              className="px-3 py-1.5 rounded-full border border-white/[0.08] text-text-s text-xs">取消</button>
           </div>
         </div>
       ) : (
         <div className="mt-1.5 flex items-start gap-2">
           <div className="flex-1 min-w-0">
             {trade.entryNotes
-              ? <p className="text-[#8A94A2] text-xs leading-5 border-l border-[#232B35] pl-2">{trade.entryNotes}</p>
+              ? <p className="text-text-s text-xs leading-5 border-l border-white/[0.08] pl-2">{trade.entryNotes}</p>
               : !selectMode && <button onClick={() => { setEditingNote(trade.id); setNoteText(''); }}
-                  className="text-[#3A424E] text-xs">＋ 個人備註</button>
+                  className="text-text-m text-xs">＋ 個人備註</button>
             }
           </div>
           {trade.entryNotes && !selectMode && (
             <button onClick={() => { setEditingNote(trade.id); setNoteText(trade.entryNotes ?? ''); }}
-              className="text-[#3A424E] text-[11px] shrink-0">編輯</button>
+              className="text-text-m text-[11px] shrink-0">編輯</button>
           )}
         </div>
       )}
@@ -437,14 +392,14 @@ const TradeRow = memo(function TradeRow({
         const r    = calcRMultiple(trade);
         const acct = accountPnlPct(trade);
         return (
-          <div className="flex items-center justify-between mt-1 pt-2 border-t border-[#1B222B]">
-            <span className="text-[#565E6B] text-[11px] num">出場 {fmtPrice(trade.exitPrice)}</span>
+          <div className="flex items-center justify-between mt-1 pt-2 border-t border-white/[0.05]">
+            <span className="text-text-m text-[11px] num">出場 {fmtPrice(trade.exitPrice)}</span>
             <span className="text-right">
-              <span className={`text-[13px] num ${isWin ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+              <span className={`text-[13px] num ${isWin ? 'text-accent' : 'text-down'}`}>
                 {trade.pnlPercent !== undefined ? `${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent}%` : '—'}
               </span>
               {r !== null && (
-                <span className="block text-[10px] text-[#565E6B] num">
+                <span className="block text-[10px] text-text-m num">
                   {r >= 0 ? '+' : ''}{r.toFixed(1)}R{acct !== null ? ` · 帳戶 ${acct >= 0 ? '+' : ''}${acct.toFixed(2)}%` : ''}
                 </span>
               )}
@@ -454,25 +409,25 @@ const TradeRow = memo(function TradeRow({
       })()}
 
       {/* Timestamp + actions */}
-      <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#1B222B]">
-        <span className="text-[#3A424E] text-[11px] num">{fmtDate(trade.openedAt)}</span>
+      <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/[0.06]">
+        <span className="text-text-m text-[11px] num">{fmtDate(trade.openedAt)}</span>
         {!selectMode && <div className="flex gap-2 flex-wrap justify-end">
           <a
             href={`https://www.tradingview.com/chart/?symbol=BINANCE:${trade.symbol}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-[11px] px-2 py-1 rounded text-[#2DD4BF] border border-[#2DD4BF]/25 active:opacity-70"
+            className="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full text-accent border border-accent/25 active:opacity-70"
           >
-            圖表
+            <LineChart className="w-3.5 h-3.5" />圖表
           </a>
           {isWaiting && (
             <button
               onClick={() => handleManualUnlock(trade.symbol)}
               title="手動取消掛單並解鎖推播"
-              className={`text-[11px] px-2 py-1 rounded border transition-colors ${
+              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
                 unlocked
-                  ? 'text-[#0ECB81] border-[#0ECB81]/30'
-                  : 'text-[#C99A2E] border-[#3A2F14] active:opacity-70'
+                  ? 'text-accent border-accent/30'
+                  : 'text-[#E6AF5A] border-[#E6AF5A]/30 active:opacity-70'
               }`}
             >
               {unlocked ? '已取消' : '取消掛單'}
@@ -483,10 +438,10 @@ const TradeRow = memo(function TradeRow({
               <button
                 onClick={() => handleManualUnlock(trade.symbol)}
                 title="解除 LINE 推播鎖定"
-                className={`text-[11px] px-2 py-1 rounded border transition-colors ${
+                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
                   unlocked
-                    ? 'text-[#0ECB81] border-[#0ECB81]/30'
-                    : 'text-[#3A424E] border-[#1B222B] active:opacity-70'
+                    ? 'text-accent border-accent/30'
+                    : 'text-text-m border-white/[0.08] active:opacity-70'
                 }`}
               >
                 {unlocked ? '已解鎖' : '解鎖推播'}
@@ -496,9 +451,9 @@ const TradeRow = memo(function TradeRow({
                   id: trade.id, symbol: trade.symbol, direction: trade.direction,
                   entry: trade.entry, tp1: trade.tp1, tp2: trade.tp2, sl: trade.stopLoss,
                 })}
-                className="text-[11px] px-3 py-1 rounded border border-[#1B222B] text-[#8A94A2] active:opacity-70"
+                className="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full border border-white/[0.08] text-text-s active:opacity-70"
               >
-                手動記錄
+                <FileText className="w-3.5 h-3.5" />手動記錄
               </button>
             </>
           )}
@@ -509,13 +464,13 @@ const TradeRow = memo(function TradeRow({
                 deleteTradePermanently(trade.id);
               }
             }}
-            className="text-[11px] px-2 py-1 rounded text-[#3A424E] active:opacity-70"
+            className="text-[11px] px-2 py-1 rounded-full text-text-m active:opacity-70"
           >
             刪除
           </button>
         </div>}
       </div>
-    </div>
+    </TradeCard>
   );
 });
 
@@ -1555,15 +1510,6 @@ function EquityCurve({ data }: { data: number[] }) {
       <path d={path} stroke={col} strokeWidth="2" fill="none" strokeLinejoin="round" />
       <circle cx={sx(data.length - 1)} cy={sy(last)} r="3.5" fill={col} />
     </svg>
-  );
-}
-
-function PriceCell({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="bg-[#0F141A] p-2 text-center">
-      <div className="tlabel">{label}</div>
-      <div className="text-[12px] num mt-0.5" style={{ color: color ?? '#E8ECF1' }}>{value}</div>
-    </div>
   );
 }
 
