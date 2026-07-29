@@ -6,6 +6,7 @@ import { pickTp1Hits } from '@/lib/tp1Watch';
 import { CoinCard } from '@/components/CoinCard';
 import { BtcStatusBar } from '@/components/BtcStatusBar';
 import { ScanStatusPanel } from '@/components/ScanStatusPanel';
+import { FormField } from '@/components/ui/FormField';
 import { fetchCandles, fetchTicker24h, validateSymbol, fetchTopCoinsByVolume, searchSymbols } from '@/api/binance';
 import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { computeIndicators } from '@/analysis/indicators';
@@ -279,10 +280,10 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center px-3 pt-14 pb-2.5 safe-top border-b border-[#1B222B]">
+      <div className="flex items-center px-3 pt-14 pb-2.5 safe-top border-b border-white/[0.06]">
         <div>
-          <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">幣種監控</h1>
-          <p className="text-[#565E6B] text-[10px] mt-0.5 num">
+          <h1 className="text-text-p text-[15px] font-medium tracking-[0.05em]">幣種監控</h1>
+          <p className="text-text-m text-[10px] mt-0.5 num">
             {coins.length} 監控 · {coins.filter((c) => c.signals.length > 0).length} 訊號
           </p>
         </div>
@@ -291,11 +292,11 @@ export default function HomePage() {
           <button
             onClick={() => loadTopCoins(false)}
             disabled={autoLoading || refreshing}
-            className="text-[#8A94A2] text-[11px] px-2.5 py-1 border border-[#232B35] rounded disabled:opacity-40 active:bg-[#141A21]"
+            className="text-text-s text-[11px] px-2.5 py-1 rounded-full border border-white/[0.08] disabled:opacity-40 active:bg-white/[0.04]"
           >
             {autoLoading ? (
               <span className="flex items-center gap-1">
-                <span className="w-2.5 h-2.5 border-[1.5px] border-[#8A94A2] border-t-transparent rounded-full animate-spin inline-block" />
+                <span className="w-2.5 h-2.5 border-[1.5px] border-text-s border-t-transparent rounded-full animate-spin inline-block" />
                 載入
               </span>
             ) : '熱門'}
@@ -303,16 +304,16 @@ export default function HomePage() {
           <button
             onClick={analyzeAll}
             disabled={refreshing || autoLoading}
-            className="text-[#2DD4BF] text-[11px] px-2.5 py-1 border border-[#2DD4BF]/40 rounded disabled:opacity-40 active:bg-[#141A21]"
+            className="text-accent text-[11px] px-2.5 py-1 rounded-full border border-accent/40 disabled:opacity-40 active:bg-white/[0.04]"
           >
             {refreshing ? (
               <span className="flex items-center gap-1">
-                <span className="w-2.5 h-2.5 border-[1.5px] border-[#2DD4BF] border-t-transparent rounded-full animate-spin inline-block" />
+                <span className="w-2.5 h-2.5 border-[1.5px] border-accent border-t-transparent rounded-full animate-spin inline-block" />
                 掃描中
               </span>
             ) : '掃描'}
           </button>
-          <button onClick={() => setShowAdd(true)} className="bg-[#2DD4BF] text-[#0A0D11] text-[11px] font-medium px-2.5 py-1 rounded active:opacity-80">
+          <button onClick={() => setShowAdd(true)} className="bg-accent text-[#0A0D11] text-[11px] font-medium px-2.5 py-1 rounded-full active:opacity-80">
             +
           </button>
         </div>
@@ -323,32 +324,32 @@ export default function HomePage() {
 
       <div className="px-3 pt-2 space-y-2">
         {autoLoading && (
-          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-md flex items-center gap-2">
-            <span className="w-3 h-3 border-[1.5px] border-[#2DD4BF] border-t-transparent rounded-full animate-spin shrink-0" />
-            <p className="text-[#8A94A2] text-xs">正在從 Binance 抓取熱門幣種…</p>
+          <div className="mt-2 px-3 py-2 bg-card-2 border border-white/[0.06] rounded-md flex items-center gap-2">
+            <span className="w-3 h-3 border-[1.5px] border-accent border-t-transparent rounded-full animate-spin shrink-0" />
+            <p className="text-text-s text-xs">正在從 Binance 抓取熱門幣種…</p>
           </div>
         )}
         {autoMsg && !autoLoading && (
-          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-md text-[#8A94A2] text-xs">
+          <div className="mt-2 px-3 py-2 bg-card-2 border border-white/[0.06] rounded-md text-text-s text-xs">
             {autoMsg}
           </div>
         )}
         {/* Auto-close alerts */}
         {autoCloseAlerts.map(alert => (
           <div key={alert.id}
-            className={`mt-2 px-3 py-2 rounded-md flex items-center justify-between border bg-[#0F141A] ${
-              alert.result === 'LOSS' ? 'border-[#F6465D]/30' : 'border-[#0ECB81]/30'
+            className={`mt-2 px-3 py-2 rounded-md flex items-center justify-between border bg-card-2 ${
+              alert.result === 'LOSS' ? 'border-down/30' : 'border-up/30'
             }`}
           >
             <div className="flex items-center gap-2 min-w-0">
-              <span className={`text-[10px] shrink-0 ${alert.result === 'LOSS' ? 'text-[#F6465D]' : 'text-[#0ECB81]'}`}>●</span>
-              <p className={`text-xs truncate ${alert.result === 'LOSS' ? 'text-[#F6465D]' : 'text-[#0ECB81]'}`}>
+              <span className={`text-[10px] shrink-0 ${alert.result === 'LOSS' ? 'text-down' : 'text-up'}`}>●</span>
+              <p className={`text-xs truncate ${alert.result === 'LOSS' ? 'text-down' : 'text-up'}`}>
                 {alert.symbol.replace('USDT', '/USDT')} 自動平倉 ·{' '}
                 {alert.result === 'WIN_TP2' ? 'TP2 達標' : alert.result === 'WIN_TP1' ? 'TP1 達標' : '止損出場'}{' '}
                 <span className="num">{alert.pnlPercent >= 0 ? '+' : ''}{alert.pnlPercent}%</span>
               </p>
             </div>
-            <button onClick={() => dismissAutoClose(alert.id)} className="text-[#565E6B] text-sm ml-2 shrink-0">✕</button>
+            <button onClick={() => dismissAutoClose(alert.id)} className="text-text-m text-sm ml-2 shrink-0">✕</button>
           </div>
         ))}
 
@@ -357,22 +358,22 @@ export default function HomePage() {
 
         {/* Market sentiment bar */}
         {(sentiment.longs + sentiment.shorts) > 0 && (
-          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-md flex items-center gap-3">
-            <span className="text-[#0ECB81] text-xs num shrink-0">▲ {sentiment.longs}</span>
-            <div className="flex-1 h-1 bg-[#141A21] overflow-hidden">
-              <div className="h-full bg-[#0ECB81]" style={{ width: `${Math.round(sentiment.longs / (sentiment.longs + sentiment.shorts) * 100)}%` }} />
+          <div className="mt-2 px-3 py-2 bg-card-2 border border-white/[0.06] rounded-md flex items-center gap-3">
+            <span className="text-up text-xs num shrink-0">▲ {sentiment.longs}</span>
+            <div className="flex-1 h-1 bg-white/[0.06] overflow-hidden">
+              <div className="h-full bg-up" style={{ width: `${Math.round(sentiment.longs / (sentiment.longs + sentiment.shorts) * 100)}%` }} />
             </div>
-            <div className="flex-1 h-1 bg-[#141A21] overflow-hidden flex justify-end">
-              <div className="h-full bg-[#F6465D]" style={{ width: `${Math.round(sentiment.shorts / (sentiment.longs + sentiment.shorts) * 100)}%` }} />
+            <div className="flex-1 h-1 bg-white/[0.06] overflow-hidden flex justify-end">
+              <div className="h-full bg-down" style={{ width: `${Math.round(sentiment.shorts / (sentiment.longs + sentiment.shorts) * 100)}%` }} />
             </div>
-            <span className="text-[#F6465D] text-xs num shrink-0">{sentiment.shorts} ▼</span>
+            <span className="text-down text-xs num shrink-0">{sentiment.shorts} ▼</span>
           </div>
         )}
 
         {unread > 0 && (
-          <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#2DD4BF]/30 rounded-md flex items-center gap-2">
-            <span className="text-[#2DD4BF] text-[10px]">●</span>
-            <p className="text-[#2DD4BF] text-xs"><span className="num">{unread}</span> 個未讀交易信號</p>
+          <div className="mt-2 px-3 py-2 bg-card-2 border border-accent/30 rounded-md flex items-center gap-2">
+            <span className="text-accent text-[10px]">●</span>
+            <p className="text-accent text-xs"><span className="num">{unread}</span> 個未讀交易信號</p>
           </div>
         )}
       </div>
@@ -383,7 +384,7 @@ export default function HomePage() {
         ) : (
           <>
             {/* Column header — terminal table */}
-            <div className="flex items-center px-3 py-1.5 border-y border-[#1B222B] bg-[#0C1116]">
+            <div className="flex items-center px-3 py-1.5 border-y border-white/[0.06] bg-white/[0.02]">
               <span className="w-[96px] tlabel">幣種</span>
               <span className="flex-1 text-right tlabel">最新價 / 24H</span>
               <span className="w-[76px] text-right tlabel">訊號</span>
@@ -399,39 +400,39 @@ export default function HomePage() {
           className="fixed inset-0 bg-black/70 z-50 flex items-end"
           onClick={(e) => e.target === e.currentTarget && closeAdd()}
         >
-          <div className="w-full max-w-xl mx-auto bg-[#0F141A] rounded-t-3xl p-6 pb-10 border-t border-[#1B222B]">
-            <div className="w-12 h-1 bg-[#1B222B] rounded-full mx-auto mb-5" />
-            <h2 className="text-[#E8ECF1] text-lg font-extrabold mb-1">新增監控幣種</h2>
-            <p className="text-[#565E6B] text-sm mb-4">輸入代號，輸入時自動搜尋</p>
+          <div className="w-full max-w-xl mx-auto bg-card-2 rounded-t-3xl p-6 pb-10 border-t border-white/[0.06]">
+            <div className="w-12 h-1 bg-white/[0.06] rounded-full mx-auto mb-5" />
+            <h2 className="text-text-p text-lg font-extrabold mb-1">新增監控幣種</h2>
+            <p className="text-text-m text-sm mb-4">輸入代號，輸入時自動搜尋</p>
             <div className="flex gap-2 mb-4 flex-wrap">
               {['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','DOT','MATIC'].map((c) => (
                 <button key={c} onClick={() => setInput(c)} className="chip text-xs py-1">{c}</button>
               ))}
             </div>
-            <input
-              autoFocus
-              value={input}
-              onChange={(e) => { setInput(e.target.value.toUpperCase()); setAddError(''); }}
-              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-              placeholder="輸入代號，例如：BTC、SOL"
-              className="input-field mb-2"
-            />
+            <div className="mb-2" onKeyDown={(e) => e.key === 'Enter' && handleAdd()}>
+              <FormField
+                label="幣種代號"
+                value={input}
+                onChange={(v) => { setInput(v.toUpperCase()); setAddError(''); }}
+                placeholder="輸入代號，例如：BTC、SOL"
+              />
+            </div>
             {searchResults.length > 0 && (
-              <div className="bg-[#141A21] rounded-xl border border-[#1B222B] mb-2 overflow-hidden">
+              <div className="bg-white/[0.04] rounded-xl border border-white/[0.06] mb-2 overflow-hidden">
                 {searchResults.map((s) => (
                   <button
                     key={s}
                     onClick={() => handleAdd(s)}
-                    className="w-full text-left px-4 py-2.5 text-sm text-[#E8ECF1] border-b border-[#1B222B] last:border-0 font-mono active:bg-[#252535]"
+                    className="w-full text-left px-4 py-2.5 text-sm text-text-p border-b border-white/[0.06] last:border-0 font-mono active:bg-white/[0.08]"
                   >
                     {s.replace('USDT', '/USDT')}
                   </button>
                 ))}
               </div>
             )}
-            {addError && <p className="text-red-400 text-xs mb-2">{addError}</p>}
+            {addError && <p className="text-down text-xs mb-2">{addError}</p>}
             <div className="flex gap-3 mt-2">
-              <button onClick={closeAdd} className="flex-1 py-3 rounded-xl bg-[#141A21] text-[#8A94A2] font-semibold border border-[#1B222B]">
+              <button onClick={closeAdd} className="flex-1 py-3 rounded-xl bg-white/[0.04] text-text-s font-semibold border border-white/[0.06]">
                 取消
               </button>
               <button onClick={() => handleAdd()} disabled={!input.trim() || adding} className="flex-1 py-3 rounded-xl btn-primary disabled:opacity-50">
@@ -453,13 +454,13 @@ export default function HomePage() {
 function EmptyState({ onAuto, onManual, autoLoading }: { onAuto: () => void; onManual: () => void; autoLoading: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center h-64 gap-4 text-center px-8">
-      <div className="text-[#2A323D] text-3xl num">[ ]</div>
+      <div className="text-text-m text-3xl num">[ ]</div>
       <div>
-        <p className="text-[#8A94A2] font-medium text-base">還沒有監控幣種</p>
-        <p className="text-[#565E6B] text-sm mt-1">自動載入 Binance 熱門幣種，或手動新增</p>
+        <p className="text-text-s font-medium text-base">還沒有監控幣種</p>
+        <p className="text-text-m text-sm mt-1">自動載入 Binance 熱門幣種，或手動新增</p>
       </div>
       <div className="flex gap-3">
-        <button onClick={onAuto} disabled={autoLoading} className="px-5 py-2 rounded border border-[#232B35] text-[#8A94A2] text-sm disabled:opacity-40 active:bg-[#141A21]">
+        <button onClick={onAuto} disabled={autoLoading} className="px-5 py-2 rounded border border-white/[0.08] text-text-s text-sm disabled:opacity-40 active:bg-white/[0.04]">
           {autoLoading ? '載入中…' : '自動載入熱門'}
         </button>
         <button onClick={onManual} className="btn-primary px-5 py-2 text-sm">
