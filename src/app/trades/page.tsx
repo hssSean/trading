@@ -11,7 +11,7 @@ import { TradeCard } from '@/components/ui/TradeCard';
 import { PillBadge } from '@/components/ui/PillBadge';
 import { StatChip } from '@/components/ui/StatChip';
 import { PriceProgressBar } from '@/components/ui/PriceProgressBar';
-import { Wallet, ShieldAlert, LineChart, FileText } from 'lucide-react';
+import { Wallet, ShieldAlert, LineChart, FileText, Layers, Percent } from 'lucide-react';
 
 const RESULT_LABEL: Record<string, string> = {
   WIN_TP1:      'TP1 達標',
@@ -184,7 +184,9 @@ const TradeRow = memo(function TradeRow({
   }
 
   const cardVariant = isWaiting ? 'waiting' : (isPending || isWatchingTp2 || isUnconfirmed) ? 'active' : 'closed';
-  const displayPrice = livePx > 0 ? livePx : trade.entry;
+  // Marker basis: live price when we have one, else the trade's exit price for
+  // closed trades (shows where it actually landed in the SL→TP2 range), else entry.
+  const displayPrice = livePx > 0 ? livePx : (trade.exitPrice ?? trade.entry);
 
   return (
     <TradeCard
@@ -279,26 +281,58 @@ const TradeRow = memo(function TradeRow({
         </div>
       )}
 
-      {/* Progress bar: shown whenever the trade has an active price range to visualize */}
-      {(isPending || isWatchingTp2 || isWaiting) && (
-        <div className="mb-3">
-          <PriceProgressBar
-            direction={trade.direction}
-            stopLoss={trade.stopLoss}
-            entry={trade.entry}
-            tp1={trade.tp1}
-            tp2={trade.tp2}
-            current={displayPrice}
-            formatPrice={fmtPrice}
-          />
+      {/* Distance-to-TP1 / distance-to-SL, shown for active pending trades */}
+      {isPending && livePx > 0 && (
+        <div className="grid grid-cols-2 gap-1.5 mb-3">
+          {isTp1Hit ? (
+            <div className="border border-up/25 rounded-[10px] p-2 text-center">
+              <div className="text-up text-[10px]">TP1 已達標</div>
+              <div className="text-up text-[12px] num mt-0.5">
+                {distTP1 > 0 ? `距TP2 還差 ${distTP1.toFixed(2)}%` : `已超過 TP2 ${Math.abs(distTP1).toFixed(2)}%`}
+              </div>
+            </div>
+          ) : (
+            <div className="border border-white/[0.06] rounded-[10px] p-2 text-center">
+              <div className="tlabel">距 TP1</div>
+              <div className={`text-[12px] num mt-0.5 ${distTP1 > 0 ? 'text-up/80' : 'text-up'}`}>
+                {distTP1 > 0 ? `還差 ${distTP1.toFixed(2)}%` : `超過 ${Math.abs(distTP1).toFixed(2)}%`}
+              </div>
+            </div>
+          )}
+          <div className={`rounded-[10px] p-2 text-center border ${nearSL ? 'border-down/40' : 'border-white/[0.06]'}`}>
+            <div className={`text-[10px] ${nearSL ? 'text-down' : 'tlabel'}`}>{nearSL ? '接近止損' : '距 SL'}</div>
+            <div className={`text-[12px] num mt-0.5 ${nearSL ? 'text-down' : 'text-text-s'}`}>
+              {distSL >= 0 ? `緩衝 ${distSL.toFixed(2)}%` : `穿越 ${Math.abs(distSL).toFixed(2)}%`}
+            </div>
+          </div>
         </div>
       )}
 
-      {isWatchingTp2 && (
-        <div className="flex items-baseline gap-2 mb-2 text-[12px]">
-          <span className="text-accent text-[15px] font-medium num">
-            {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過TP2 ${Math.abs(distTP2).toFixed(2)}%`}
-          </span>
+      {/* Progress bar: shown for every trade so entry/TP1/TP2/SL are always visible */}
+      <div className="mb-3">
+        <PriceProgressBar
+          direction={trade.direction}
+          stopLoss={trade.stopLoss}
+          entry={trade.entry}
+          tp1={trade.tp1}
+          tp2={trade.tp2}
+          current={displayPrice}
+          formatPrice={fmtPrice}
+        />
+      </div>
+
+      {isWatchingTp2 && livePx > 0 && (
+        <div className="grid grid-cols-2 gap-1.5 mb-2">
+          <div className="border border-up/25 rounded-[10px] p-2 text-center">
+            <div className="text-up text-[10px]">TP1 已鎖定 · 追蹤TP2</div>
+            <div className="text-up text-[12px] num mt-0.5">
+              {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過TP2 ${Math.abs(distTP2).toFixed(2)}%`}
+            </div>
+          </div>
+          <div className="border border-white/[0.06] rounded-[10px] p-2 text-center">
+            <div className="tlabel">現價</div>
+            <div className="text-text-s text-[12px] num mt-0.5">{fmtPrice(livePx)}</div>
+          </div>
         </div>
       )}
 
@@ -310,10 +344,14 @@ const TradeRow = memo(function TradeRow({
           : 0;
         return (
           <div className="flex items-center justify-between bg-accent/[0.08] rounded-[10px] px-3 py-2 mb-3">
-            <span className="text-[11px] text-text-s">移動止損（請移到這）</span>
-            <span className="text-[12px] text-accent num">
-              {fmtPrice(stopLvl)} · {lockedR >= 0.05 ? `已鎖 +${lockedR.toFixed(1)}R` : '保本'}
-            </span>
+            <div>
+              <div className="text-[11px] text-text-s">移動止損（請移到這）</div>
+              <div className="text-[15px] text-accent num mt-0.5">{fmtPrice(stopLvl)}</div>
+            </div>
+            <p className="text-[10px] text-right leading-4 text-text-m">
+              {lockedR >= 0.05 ? `已鎖 +${lockedR.toFixed(1)}R` : '保本（無虧損風險）'}<br/>
+              碰到即以此價出場
+            </p>
           </div>
         );
       })()}
@@ -323,11 +361,20 @@ const TradeRow = memo(function TradeRow({
         const effRisk = riskPct * tierRiskMultiplier(trade.symbol, trade.tier);
         const plan = calcPositionPlan(accountSize, effRisk, trade.entry, trade.stopLoss, trade.tier === 'B' ? 5 : 10);
         if (!plan) return null;
+        const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
         return (
           <div className="mb-3">
-            <div className="flex gap-2">
+            <p className="tlabel mb-1.5">倉位計算（{effRisk}% 風險）</p>
+            <div className="grid grid-cols-2 gap-2">
               <StatChip icon={<Wallet className="w-4 h-4" />} label="建議倉位" value={`${plan.positionUSDT}U`} />
-              <StatChip icon={<ShieldAlert className="w-4 h-4" />} label="止損風險" value={`${plan.riskUSDT}U · ${effRisk}%`} />
+              <StatChip icon={<Layers className="w-4 h-4" />} label="本金×槓桿" value={`${plan.marginUSDT}U×${plan.leverage}`} />
+              <StatChip icon={<ShieldAlert className="w-4 h-4" />} label="止損虧損" value={`${plan.riskUSDT}U`} />
+              <StatChip
+                icon={<Percent className="w-4 h-4" />}
+                label="止損幅度"
+                value={`${slPct.toFixed(2)}%`}
+                valueClassName={slPct > 5 ? 'text-down' : 'text-text-p'}
+              />
             </div>
             {plan.belowMinNotional && (
               <p className="text-[#E6AF5A] text-[10px] mt-1.5">低於交易所最低下單額 5U</p>
