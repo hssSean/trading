@@ -324,9 +324,14 @@ const TradeRow = memo(function TradeRow({
         const plan = calcPositionPlan(accountSize, effRisk, trade.entry, trade.stopLoss, trade.tier === 'B' ? 5 : 10);
         if (!plan) return null;
         return (
-          <div className="flex gap-2 mb-3">
-            <StatChip icon={<Wallet className="w-4 h-4" />} label="建議倉位" value={`${plan.positionUSDT}U`} />
-            <StatChip icon={<ShieldAlert className="w-4 h-4" />} label="止損風險" value={`${plan.riskUSDT}U · ${effRisk}%`} />
+          <div className="mb-3">
+            <div className="flex gap-2">
+              <StatChip icon={<Wallet className="w-4 h-4" />} label="建議倉位" value={`${plan.positionUSDT}U`} />
+              <StatChip icon={<ShieldAlert className="w-4 h-4" />} label="止損風險" value={`${plan.riskUSDT}U · ${effRisk}%`} />
+            </div>
+            {plan.belowMinNotional && (
+              <p className="text-[#E6AF5A] text-[10px] mt-1.5">低於交易所最低下單額 5U</p>
+            )}
           </div>
         );
       })()}
