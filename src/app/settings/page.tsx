@@ -362,9 +362,9 @@ export default function SettingsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 pt-14 pb-3 safe-top border-b border-[#1B222B]">
-        <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">設定</h1>
-        <p className="text-[#565E6B] text-xs mt-0.5">通知、分析週期、幣種管理</p>
+      <div className="px-4 pt-14 pb-3 safe-top border-b border-white/[0.06]">
+        <h1 className="text-text-p text-[15px] font-medium tracking-[0.05em]">設定</h1>
+        <p className="text-text-m text-xs mt-0.5">通知、分析週期、幣種管理</p>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pt-4 scroll-container space-y-4">
@@ -373,13 +373,13 @@ export default function SettingsPage() {
         <Section title="帳號">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-[#E8ECF1] text-sm font-medium">{userEmail || '載入中…'}</p>
-              <p className="text-[#565E6B] text-xs mt-0.5">已登入</p>
+              <p className="text-text-p text-sm font-medium">{userEmail || '載入中…'}</p>
+              <p className="text-text-m text-xs mt-0.5">已登入</p>
             </div>
             <button
               onClick={handleLogout}
               disabled={loggingOut}
-              className="px-4 py-2 rounded border border-[#F6465D]/30 text-[#F6465D] text-sm disabled:opacity-40"
+              className="px-4 py-2 rounded-full border border-down/30 text-down text-sm disabled:opacity-40"
             >
               {loggingOut ? '登出中…' : '登出'}
             </button>
@@ -389,25 +389,25 @@ export default function SettingsPage() {
         {/* Web Push */}
         <Section title="手機推播（Web Push）">
           {pushStatus === 'unknown' && (
-            <p className="text-[#565E6B] text-xs">偵測中…</p>
+            <p className="text-text-m text-xs">偵測中…</p>
           )}
 
           {pushStatus === 'unsupported' && (
-            <div className="border border-[#C99A2E]/30 rounded px-4 py-3">
+            <div className="border border-[#C99A2E]/30 rounded-[10px] px-4 py-3">
               <p className="text-[#C99A2E] text-sm">此瀏覽器不支援推播</p>
-              <p className="text-[#565E6B] text-xs mt-1">請使用 iOS 16.4+ Safari（已加入主畫面）或 Android Chrome</p>
+              <p className="text-text-m text-xs mt-1">請使用 iOS 16.4+ Safari（已加入主畫面）或 Android Chrome</p>
             </div>
           )}
 
           {pushStatus === 'ios-hint' && (
-            <div className="border border-[#2DD4BF]/30 rounded px-4 py-3 space-y-2">
-              <p className="text-[#2DD4BF] text-sm">iOS 需先加入主畫面</p>
-              <p className="text-[#8A94A2] text-xs leading-5">
+            <div className="border border-accent/30 rounded-[10px] px-4 py-3 space-y-2">
+              <p className="text-accent text-sm">iOS 需先加入主畫面</p>
+              <p className="text-text-s text-xs leading-5">
                 iOS 16.4+ 才支援 Web Push，且必須以 Standalone App 模式開啟：
               </p>
-              <ol className="text-[#8A94A2] text-xs leading-6 list-decimal list-inside space-y-1">
-                <li>點 Safari 底部的 <span className="text-[#2DD4BF]">分享</span> 按鈕</li>
-                <li>選擇「<span className="text-[#2DD4BF]">加入主畫面</span>」</li>
+              <ol className="text-text-s text-xs leading-6 list-decimal list-inside space-y-1">
+                <li>點 Safari 底部的 <span className="text-accent">分享</span> 按鈕</li>
+                <li>選擇「<span className="text-accent">加入主畫面</span>」</li>
                 <li>從主畫面的 App 圖示重新開啟</li>
                 <li>回到此頁面啟用推播</li>
               </ol>
@@ -415,26 +415,26 @@ export default function SettingsPage() {
           )}
 
           {pushStatus === 'denied' && (
-            <div className="border border-[#F6465D]/30 rounded px-4 py-3">
-              <p className="text-[#F6465D] text-sm">推播權限已被封鎖</p>
-              <p className="text-[#565E6B] text-xs mt-1">請到瀏覽器設定 → 網站設定 → 通知 → 允許此網站</p>
+            <div className="border border-down/30 rounded-[10px] px-4 py-3">
+              <p className="text-down text-sm">推播權限已被封鎖</p>
+              <p className="text-text-m text-xs mt-1">請到瀏覽器設定 → 網站設定 → 通知 → 允許此網站</p>
             </div>
           )}
 
           {(pushStatus === 'disabled' || pushStatus === 'loading') && (
             <div className="space-y-3">
-              <div className="bg-[#141A21] rounded px-4 py-3">
-                <p className="text-[#E8ECF1] text-sm">狀態：<span className="text-[#565E6B]">未啟用</span></p>
-                <p className="text-[#565E6B] text-xs mt-1">啟用後，信號、成交、止盈/止損通知將直接推送到此裝置</p>
+              <div className="bg-card-2 rounded-[10px] px-4 py-3">
+                <p className="text-text-p text-sm">狀態：<span className="text-text-m">未啟用</span></p>
+                <p className="text-text-m text-xs mt-1">啟用後，信號、成交、止盈/止損通知將直接推送到此裝置</p>
               </div>
               <button
                 onClick={enablePush}
                 disabled={pushStatus === 'loading'}
-                className="w-full py-3 rounded border border-[#2DD4BF]/40 text-[#2DD4BF] text-sm disabled:opacity-40"
+                className="w-full py-3 rounded-full border border-accent/40 text-accent text-sm disabled:opacity-40"
               >
                 {pushStatus === 'loading' ? (
                   <span className="flex items-center justify-center gap-2">
-                    <span className="w-4 h-4 border-2 border-[#2DD4BF] border-t-transparent rounded-full animate-spin" />
+                    <span className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />
                     啟用中…
                   </span>
                 ) : '啟用手機推播'}
@@ -444,16 +444,16 @@ export default function SettingsPage() {
 
           {pushStatus === 'enabled' && (
             <div className="space-y-3">
-              <div className="border border-[#0ECB81]/30 rounded px-4 py-3">
-                <p className="text-[#0ECB81] text-sm">推播已啟用</p>
-                <p className="text-[#565E6B] text-xs mt-1 break-all">
+              <div className="border border-up/30 rounded-[10px] px-4 py-3">
+                <p className="text-up text-sm">推播已啟用</p>
+                <p className="text-text-m text-xs mt-1 break-all">
                   {pushSub?.endpoint.slice(0, 60)}…
                 </p>
               </div>
               <button
                 onClick={sendTestPush}
                 disabled={pushTestStatus === 'loading'}
-                className="w-full py-2.5 rounded border border-[#2DD4BF]/30 text-[#2DD4BF] text-sm disabled:opacity-40"
+                className="w-full py-2.5 rounded-full border border-accent/30 text-accent text-sm disabled:opacity-40"
               >
                 {pushTestStatus === 'loading' ? '發送中…'
                   : pushTestStatus === 'ok'   ? '測試推播已送出'
@@ -461,18 +461,18 @@ export default function SettingsPage() {
                   : '發送測試推播'}
               </button>
               {pushTestError && (
-                <p className="text-[#F6465D] text-xs border border-[#F6465D]/30 rounded px-3 py-2 break-all">{pushTestError}</p>
+                <p className="text-down text-xs border border-down/30 rounded-[10px] px-3 py-2 break-all">{pushTestError}</p>
               )}
               <button
                 onClick={disablePush}
-                className="w-full py-2.5 rounded bg-[#141A21] border border-[#1B222B] text-[#565E6B] text-sm"
+                className="w-full py-2.5 rounded-full bg-card-2 border border-white/[0.06] text-text-m text-sm"
               >
                 關閉推播
               </button>
             </div>
           )}
 
-          <p className="text-[#3A424E] text-xs mt-3 leading-5">
+          <p className="text-text-m text-xs mt-3 leading-5">
             推播從伺服器每小時自動掃描後觸發至此裝置
           </p>
         </Section>
@@ -816,7 +816,7 @@ export default function SettingsPage() {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="card">
+    <div className="bg-card-2 border border-white/[0.06] rounded-xl p-3.5">
       <h2 className="tlabel mb-4">{title}</h2>
       {children}
     </div>
