@@ -23,9 +23,9 @@ interface Scan {
 }
 
 const REGIME_LABEL: Record<string, { text: string; cls: string }> = {
-  trending:     { text: '趨勢', cls: 'text-[#0ECB81]' },
-  ranging:      { text: '震盪', cls: 'text-[#2DD4BF]' },
-  transitional: { text: '過渡', cls: 'text-[#565E6B]' },
+  trending:     { text: '趨勢', cls: 'text-up' },
+  ranging:      { text: '震盪', cls: 'text-accent' },
+  transitional: { text: '過渡', cls: 'text-text-m' },
 };
 
 // v2.1 §0: reject-funnel gate id → human label
@@ -87,9 +87,9 @@ const TIME_STOP_LABEL: Record<string, string> = {
 };
 
 const BTC_REGIME_LABEL: Record<string, { text: string; cls: string }> = {
-  bullish: { text: 'BTC 偏多', cls: 'text-[#0ECB81]' },
-  bearish: { text: 'BTC 偏空', cls: 'text-[#F6465D]' },
-  chaotic: { text: 'BTC 混沌', cls: 'text-[#2DD4BF]' },
+  bullish: { text: 'BTC 偏多', cls: 'text-up' },
+  bearish: { text: 'BTC 偏空', cls: 'text-down' },
+  chaotic: { text: 'BTC 混沌', cls: 'text-accent' },
 };
 
 // Shared row for both the quality-gate and capacity-gate funnel groups
@@ -100,19 +100,19 @@ function FunnelReasonRow({ r }: { r: FunnelStats['reasons'][number] }) {
   return (
     <div className="text-[10px] leading-4 mb-0.5">
       <div className="flex items-center gap-2">
-        <span className="text-[#565E6B] w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
-        <div className="flex-1 h-1 bg-[#141A21] overflow-hidden">
-          <div className="h-full bg-[#F6465D]/50" style={{ width: `${r.pctOfRejected}%` }} />
+        <span className="text-text-m w-24 shrink-0 truncate">{REJECT_LABEL[r.key] ?? r.key}</span>
+        <div className="flex-1 h-1 bg-white/[0.06] overflow-hidden">
+          <div className="h-full bg-down/50" style={{ width: `${r.pctOfRejected}%` }} />
         </div>
-        <span className="text-[#565E6B] w-14 shrink-0 text-right num">{r.count} ({r.pctOfRejected}%)</span>
+        <span className="text-text-m w-14 shrink-0 text-right num">{r.count} ({r.pctOfRejected}%)</span>
       </div>
       {sh && decided > 0 && (
         CAPACITY_GATES.has(r.key) ? (
-          <p className="pl-2 num text-[#565E6B]">
+          <p className="pl-2 num text-text-m">
             └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R（容量關卡，非品質判斷，數字僅供參考）
           </p>
         ) : (
-          <p className={`pl-2 num ${sh.netR <= 0 ? 'text-[#0ECB81]/70' : 'text-[#C99A2E]/90'}`}>
+          <p className={`pl-2 num ${sh.netR <= 0 ? 'text-up/70' : 'text-[#C99A2E]/90'}`}>
             └ 模擬被擋訊號：賺{sh.win} 虧{sh.loss}{sh.other > 0 ? ` 其他${sh.other}` : ''} · 淨 {sh.netR >= 0 ? '+' : ''}{sh.netR}R {sh.netR <= 0 ? '（這關擋得對）' : '（擋掉了賺錢單）'}
           </p>
         )
@@ -169,59 +169,59 @@ export function ScanStatusPanel() {
 
   if (!scan) {
     return errMsg ? (
-      <div className="mt-2 px-3 py-2 bg-[#0F141A] border border-[#1B222B] rounded-md">
-        <p className="text-[#565E6B] text-xs">{errMsg}</p>
+      <div className="mt-2 px-3 py-2 bg-card-2 border border-white/[0.06] rounded-xl">
+        <p className="text-text-m text-xs">{errMsg}</p>
       </div>
     ) : null;
   }
 
-  const btc = BTC_REGIME_LABEL[scan.btcRegime] ?? { text: scan.btcRegime, cls: 'text-[#565E6B]' };
+  const btc = BTC_REGIME_LABEL[scan.btcRegime] ?? { text: scan.btcRegime, cls: 'text-text-m' };
   const blockers = [
     scan.circuitBreaker ? '熔斷中' : null,
     scan.eventFilter ? '事件窗口' : null,
   ].filter(Boolean);
 
   return (
-    <div className="mt-2 bg-[#0F141A] border border-[#1B222B] rounded-md overflow-hidden">
+    <div className="mt-2 bg-card-2 border border-white/[0.06] rounded-xl overflow-hidden">
       {/* Summary row — always visible */}
       <button onClick={() => { setExpanded(e => !e); if (!expanded) fetchStatus(); }}
         className="w-full px-3 py-2 flex items-center gap-2 text-left">
-        <span className="text-[#8A94A2] text-[11px] shrink-0">伺服器掃描</span>
-        <span className="text-[#3A424E] text-[10px] shrink-0 num">{timeAgo(scan.at)}</span>
+        <span className="text-text-s text-[11px] shrink-0">伺服器掃描</span>
+        <span className="text-text-m text-[10px] shrink-0 num">{timeAgo(scan.at)}</span>
         <span className={`text-[10px] shrink-0 ${btc.cls}`}>{btc.text}</span>
         {blockers.length > 0 && (
-          <span className="text-[#F6465D] text-[10px] shrink-0">{blockers.join(' ')}</span>
+          <span className="text-down text-[10px] shrink-0">{blockers.join(' ')}</span>
         )}
         <span className="flex-1" />
         {scan.notified.length > 0 && (
-          <span className="text-[#0ECB81] text-[10px] shrink-0 num">{scan.notified.length} 訊號</span>
+          <span className="text-up text-[10px] shrink-0 num">{scan.notified.length} 訊號</span>
         )}
-        <span className="text-[#3A424E] text-xs shrink-0">{expanded ? '▲' : '▼'}</span>
+        <span className="text-text-m text-xs shrink-0">{expanded ? '▲' : '▼'}</span>
       </button>
 
       {/* Expanded: per-coin table */}
       {expanded && (
-        <div className="px-3 pb-2.5 border-t border-[#1B222B]">
+        <div className="px-3 pb-2.5 border-t border-white/[0.06]">
           {(scan.circuitBreaker || scan.eventFilter) && (
-            <p className="text-[#F6465D]/80 text-[10px] mt-2">
+            <p className="text-down/80 text-[10px] mt-2">
               {typeof scan.circuitBreaker === 'string' ? scan.circuitBreaker : ''}
               {typeof scan.eventFilter === 'string' ? ` ${scan.eventFilter}` : ''}
             </p>
           )}
           <div className="mt-2 space-y-1">
             {scan.coins.map(c => {
-              const reg = c.regime ? (REGIME_LABEL[c.regime] ?? { text: c.regime, cls: 'text-[#565E6B]' }) : null;
+              const reg = c.regime ? (REGIME_LABEL[c.regime] ?? { text: c.regime, cls: 'text-text-m' }) : null;
               const isNotified = scan.notified.includes(c.symbol);
               return (
                 <div key={c.symbol} className="flex items-center gap-2 text-[10px] leading-4">
-                  <span className="text-[#E8ECF1] w-16 shrink-0 truncate num">{c.symbol.replace('USDT', '')}</span>
-                  <span className={`w-10 shrink-0 num ${c.topScore >= 65 ? 'text-[#2DD4BF]' : 'text-[#3A424E]'}`}>
+                  <span className="text-text-p w-16 shrink-0 truncate num">{c.symbol.replace('USDT', '')}</span>
+                  <span className={`w-10 shrink-0 num ${c.topScore >= 65 ? 'text-accent' : 'text-text-m'}`}>
                     {c.topScore > 0 ? `${c.topScore}分`
                       : (c.rawTopScore ?? 0) > 0 ? `${c.rawTopScore}未達` : '—'}
                   </span>
                   {reg && <span className={`w-7 shrink-0 ${reg.cls}`}>{reg.text}</span>}
-                  <span className="text-[#3A424E] w-14 shrink-0 num">ADX {c.adx4h ?? '?'}</span>
-                  <span className="flex-1 text-[#565E6B] truncate">
+                  <span className="text-text-m w-14 shrink-0 num">ADX {c.adx4h ?? '?'}</span>
+                  <span className="flex-1 text-text-s truncate">
                     {isNotified ? '已發訊號' : (c.note ?? '無合格訊號')}
                   </span>
                 </div>
@@ -239,24 +239,24 @@ export function ScanStatusPanel() {
             const qualityReasons  = funnel.reasons.filter(r => !CAPACITY_GATES.has(r.key)).slice(0, 5);
             const capacityReasons = funnel.reasons.filter(r =>  CAPACITY_GATES.has(r.key));
             return (
-              <div className="mt-2.5 pt-2 border-t border-[#1B222B]">
+              <div className="mt-2.5 pt-2 border-t border-white/[0.06]">
                 <p className="tlabel mb-1">
-                  近3天訊號漏斗 — 候選 {funnel.total} · 出單 <span className="text-[#0ECB81] num">{funnel.sent}</span>
+                  近3天訊號漏斗 — 候選 {funnel.total} · 出單 <span className="text-up num">{funnel.sent}</span>
                 </p>
                 {qualityReasons.length > 0 && (
                   <div className="mb-1.5">
-                    <p className="text-[#3A424E] text-[9px] mb-0.5">品質關卡</p>
+                    <p className="text-text-m text-[9px] mb-0.5">品質關卡</p>
                     {qualityReasons.map(r => <FunnelReasonRow key={r.key} r={r} />)}
                   </div>
                 )}
                 {capacityReasons.length > 0 && (
                   <div>
-                    <p className="text-[#3A424E] text-[9px] mb-0.5">容量關卡（曝險上限，非品質判斷）</p>
+                    <p className="text-text-m text-[9px] mb-0.5">容量關卡（曝險上限，非品質判斷）</p>
                     {capacityReasons.map(r => <FunnelReasonRow key={r.key} r={r} />)}
                   </div>
                 )}
                 {funnel.reasons.length === 0 && (
-                  <p className="text-[#3A424E] text-[10px]">尚無被拒紀錄</p>
+                  <p className="text-text-m text-[10px]">尚無被拒紀錄</p>
                 )}
               </div>
             );
@@ -265,25 +265,25 @@ export function ScanStatusPanel() {
               淨R vs 真實出場淨R——正差值代表「讓它走完會更好」，負或接近0
               代表「砍得對」。樣本不足前只陳述數字，不下判詞。 */}
           {funnel?.timeStopStats && (Object.keys(funnel.timeStopStats).length > 0) && (
-            <div className="mt-2.5 pt-2 border-t border-[#1B222B]">
+            <div className="mt-2.5 pt-2 border-t border-white/[0.06]">
               <p className="tlabel mb-1">時間止損影子模擬</p>
               {(['stall', 'expiry'] as const).map(trigger => {
                 const s = funnel.timeStopStats?.[trigger];
                 if (!s) return null;
                 const decided = s.win + s.loss + s.stillOpen;
                 return (
-                  <p key={trigger} className="text-[10px] leading-4 mb-0.5 num text-[#565E6B]">
+                  <p key={trigger} className="text-[10px] leading-4 mb-0.5 num text-text-m">
                     {TIME_STOP_LABEL[trigger]}：真實淨 {s.realNetR >= 0 ? '+' : ''}{s.realNetR}R
                     {decided > 0 && (
                       <> · 若不砍模擬淨 {s.netR >= 0 ? '+' : ''}{s.netR}R（賺{s.win} 虧{s.loss}{s.stillOpen > 0 ? ` 未平${s.stillOpen}` : ''}）</>
                     )}
-                    {s.live > 0 && <span className="text-[#3A424E]"> · {s.live} 筆追蹤中</span>}
+                    {s.live > 0 && <span className="text-text-m"> · {s.live} 筆追蹤中</span>}
                   </p>
                 );
               })}
             </div>
           )}
-          <p className="text-[#3A424E] text-[9px] mt-2 num">
+          <p className="text-text-m text-[9px] mt-2 num">
             總持倉風險 {scan.totalOpenRisk}% · 每 5 分鐘自動掃描 · 點擊標題可收合
           </p>
         </div>
