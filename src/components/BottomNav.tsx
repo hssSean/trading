@@ -18,11 +18,11 @@ export function BottomNav() {
   const pendingTrades = useStore((s) => s.trades.filter((t) => !t.result).length);
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-[#0C1116] border-t border-[#1B222B] flex safe-bottom z-50">
+    <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-[#0C1116] border-t border-white/[0.06] flex safe-bottom z-50">
       {NAV.map(({ href, label, Icon }) => {
         const active   = href === '/' ? pathname === '/' || pathname.startsWith('/analysis') : pathname.startsWith(href);
         const badge    = href === '/signals' ? unread : href === '/trades' ? pendingTrades : 0;
-        const badgeCls = href === '/signals' ? 'bg-[#F6465D] text-white' : 'bg-[#2DD4BF] text-[#08110F]';
+        const badgeCls = href === '/signals' ? 'bg-down text-white' : 'bg-accent text-[#08110F]';
         return (
           <Link
             key={href}
@@ -37,7 +37,7 @@ export function BottomNav() {
                 </span>
               )}
             </span>
-            <span className={`text-[11px] ${active ? 'text-[#2DD4BF] font-medium' : 'text-[#59616E]'}`}>
+            <span className={`text-[11px] ${active ? 'text-accent font-medium' : 'text-text-m'}`}>
               {label}
             </span>
           </Link>
