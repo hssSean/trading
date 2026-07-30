@@ -633,17 +633,13 @@ export default function SettingsPage() {
               { v: false, label: '推播（預設）' },
               { v: true,  label: '靜音' },
             ].map(({ v, label }) => (
-              <button
-                key={String(v)}
-                onClick={() => updateSettings({ muteCancelPush: v })}
-                className={`flex-1 py-2.5 rounded text-sm border transition-all ${
-                  (settings.muteCancelPush ?? false) === v
-                    ? 'border-[#2DD4BF] text-[#2DD4BF]'
-                    : 'border-[#1B222B] bg-[#141A21] text-[#565E6B]'
-                }`}
-              >
-                {label}
-              </button>
+              <div key={String(v)} className="flex-1">
+                <ToggleChip
+                  label={label}
+                  active={(settings.muteCancelPush ?? false) === v}
+                  onClick={() => updateSettings({ muteCancelPush: v })}
+                />
+              </div>
             ))}
           </div>
         </Section>
@@ -655,14 +651,14 @@ export default function SettingsPage() {
               <button
                 key={value}
                 onClick={() => updateSettings({ minSignalStrength: value })}
-                className={`w-full text-left px-4 py-3 rounded border transition-all ${
+                className={`w-full text-left px-4 py-3 rounded-[10px] border transition-all ${
                   settings.minSignalStrength === value
-                    ? 'border-[#2DD4BF] text-[#2DD4BF]'
-                    : 'border-[#1B222B] bg-[#141A21] text-[#8A94A2]'
+                    ? 'border-accent text-accent'
+                    : 'border-white/[0.06] bg-card-2 text-text-s'
                 }`}
               >
                 <p className="text-sm">{label}</p>
-                <p className={`text-xs mt-0.5 ${settings.minSignalStrength === value ? 'text-[#2DD4BF]/70' : 'text-[#565E6B]'}`}>{desc}</p>
+                <p className={`text-xs mt-0.5 ${settings.minSignalStrength === value ? 'text-accent/70' : 'text-text-m'}`}>{desc}</p>
               </button>
             ))}
           </div>
@@ -675,17 +671,13 @@ export default function SettingsPage() {
           </p>
           <div className="flex gap-2">
             {INTERVALS.map((v) => (
-              <button
-                key={v}
-                onClick={() => updateSettings({ analysisIntervalMinutes: v })}
-                className={`flex-1 py-2.5 rounded text-sm num border transition-all ${
-                  settings.analysisIntervalMinutes === v
-                    ? 'border-[#2DD4BF] text-[#2DD4BF]'
-                    : 'border-[#1B222B] bg-[#141A21] text-[#565E6B]'
-                }`}
-              >
-                {v}m
-              </button>
+              <div key={v} className="flex-1">
+                <ToggleChip
+                  label={`${v}m`}
+                  active={settings.analysisIntervalMinutes === v}
+                  onClick={() => updateSettings({ analysisIntervalMinutes: v })}
+                />
+              </div>
             ))}
           </div>
         </Section>
@@ -694,17 +686,16 @@ export default function SettingsPage() {
         <Section title="預設分析週期">
           <div className="flex gap-2">
             {TFS.map((t) => (
-              <button
+              <ToggleChip
                 key={t}
+                label={t}
+                active={settings.defaultTimeframes.includes(t)}
                 onClick={() => {
                   const cur = settings.defaultTimeframes;
                   const next = cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t];
                   if (next.length > 0) updateSettings({ defaultTimeframes: next });
                 }}
-                className={`chip num ${settings.defaultTimeframes.includes(t) ? 'chip-active' : ''}`}
-              >
-                {t}
-              </button>
+              />
             ))}
           </div>
         </Section>
