@@ -703,18 +703,18 @@ export default function SettingsPage() {
         {/* Coins */}
         <Section title="監控幣種">
           {coins.length === 0 ? (
-            <p className="text-[#565E6B] text-sm text-center py-4">無監控幣種，請到首頁新增</p>
+            <p className="text-text-m text-sm text-center py-4">無監控幣種，請到首頁新增</p>
           ) : (
             <div className="space-y-2">
               {coins.map((coin) => (
-                <div key={coin.symbol} className="flex items-center justify-between bg-[#141A21] rounded px-4 py-3">
+                <div key={coin.symbol} className="flex items-center justify-between bg-white/[0.04] rounded-[10px] px-4 py-3">
                   <div>
-                    <p className="text-[#E8ECF1] text-sm num">{coin.displayName}</p>
-                    <p className="text-[#565E6B] text-xs mt-0.5">{coin.timeframes.join(' · ')}{coin.signals.length > 0 && ` · ${coin.signals.length} 個信號`}</p>
+                    <p className="text-text-p text-sm num">{coin.displayName}</p>
+                    <p className="text-text-m text-xs mt-0.5">{coin.timeframes.join(' · ')}{coin.signals.length > 0 && ` · ${coin.signals.length} 個信號`}</p>
                   </div>
                   <button
                     onClick={() => { if (confirm('確定移除 ' + coin.displayName + '？')) removeCoinPermanently(coin.symbol); }}
-                    className="text-[#F6465D] text-xs px-3 py-1.5 rounded border border-[#F6465D]/20"
+                    className="text-down text-xs px-3 py-1.5 rounded-full border border-down/20"
                   >
                     移除
                   </button>
@@ -726,14 +726,14 @@ export default function SettingsPage() {
 
         {/* Cloud Sync */}
         <Section title="雲端同步（Supabase）">
-          <div className="border border-[#0ECB81]/20 rounded px-4 py-3 mb-3">
-            <p className="text-[#0ECB81] text-xs mb-1">自動同步已啟用</p>
-            <p className="text-[#565E6B] text-xs leading-5">
+          <div className="border border-up/20 rounded-[10px] px-4 py-3 mb-3">
+            <p className="text-up text-xs mb-1">自動同步已啟用</p>
+            <p className="text-text-m text-xs leading-5">
               交易紀錄、自選幣種、通知設定均自動同步至 Supabase。<br />
               任何裝置登入同一帳號，資料即時一致。
             </p>
           </div>
-          <p className="text-[#3A424E] text-xs leading-5">
+          <p className="text-text-m text-xs leading-5">
             同步時機：資料變動後 4 秒自動儲存，以及每 10 分鐘定期備份。<br />
             首次登入新裝置時自動從雲端載入所有紀錄。
           </p>
@@ -743,59 +743,59 @@ export default function SettingsPage() {
         <Section title="資料管理">
           {/* Reset all signal notification locks */}
           {resetMsg && (
-            <div className={`mb-3 px-3 py-2 rounded text-xs ${
-              resetMsg.includes('失敗') ? 'border border-[#F6465D]/30 text-[#F6465D]' : 'border border-[#0ECB81]/30 text-[#0ECB81]'
+            <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
+              resetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
             }`}>{resetMsg}</div>
           )}
           <button
             onClick={handleResetAllLocks}
             disabled={resetting}
-            className="w-full py-3 rounded border border-[#C99A2E]/30 text-[#C99A2E] text-sm mb-3 disabled:opacity-40"
+            className="w-full py-3 rounded-full border border-[#C99A2E]/30 text-[#C99A2E] text-sm mb-3 disabled:opacity-40"
           >
             {resetting ? '重置中…' : '重置所有推播鎖定'}
           </button>
-          <p className="text-[#3A424E] text-xs mb-4 -mt-1">解除所有幣種的 24 小時推播鎖定，讓下次分析可以重新推播</p>
+          <p className="text-text-m text-xs mb-4 -mt-1">解除所有幣種的 24 小時推播鎖定，讓下次分析可以重新推播</p>
           <button
             onClick={() => { if (confirm('確定清除所有歷史信號？')) clearSignals(); }}
-            className="w-full py-3 rounded border border-[#F6465D]/30 text-[#F6465D] text-sm"
+            className="w-full py-3 rounded-full border border-down/30 text-down text-sm"
           >
             清除所有歷史信號
           </button>
 
           {/* Full atomic reset */}
-          <div className="mt-5 pt-4 border-t border-[#1B222B]">
+          <div className="mt-5 pt-4 border-t border-white/[0.06]">
             {fullResetMsg && (
-              <div className={`mb-3 px-3 py-2 rounded text-xs ${
-                fullResetMsg.includes('失敗') ? 'border border-[#F6465D]/30 text-[#F6465D]' : 'border border-[#0ECB81]/30 text-[#0ECB81]'
+              <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
+                fullResetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
               }`}>{fullResetMsg}</div>
             )}
             <button
               onClick={handleFullReset}
               disabled={fullResetting}
-              className="w-full py-3 rounded border border-[#F6465D]/50 text-[#F6465D] text-sm disabled:opacity-40"
+              className="w-full py-3 rounded-full border border-down/50 text-down text-sm disabled:opacity-40"
             >
               {fullResetting ? (
                 <span className="flex items-center justify-center gap-2">
-                  <span className="w-4 h-4 border-2 border-[#F6465D] border-t-transparent rounded-full animate-spin" />
+                  <span className="w-4 h-4 border-2 border-down border-t-transparent rounded-full animate-spin" />
                   重置中…
                 </span>
               ) : '清空所有紀錄並重置'}
             </button>
-            <p className="text-[#3A424E] text-xs mt-2 leading-5">
+            <p className="text-text-m text-xs mt-2 leading-5">
               永久刪除全部交易紀錄、推薦單與 Redis 鎖定，所有裝置同步清空，無法復原
             </p>
           </div>
 
-          <p className="text-[#565E6B] text-xs mt-4 text-center leading-6">
+          <p className="text-text-m text-xs mt-4 text-center leading-6">
             資料來源：Binance API（僅讀取，不交易）<br />
             分析引擎：SMC · SNR · RSI · MACD · EMA<br />
-            <span className="text-[#F6465D]/70">本 App 僅供參考，不構成投資建議</span>
+            <span className="text-down/70">本 App 僅供參考，不構成投資建議</span>
           </p>
         </Section>
 
         {/* Build version — a PWA tab can sit open on a stale bundle for days;
             this makes it obvious whether you're actually looking at the latest deploy. */}
-        <p className="text-[#3A424E] text-[10px] text-center num pb-2">
+        <p className="text-text-m text-[10px] text-center num pb-2">
           build {process.env.NEXT_PUBLIC_BUILD_SHA ? process.env.NEXT_PUBLIC_BUILD_SHA.slice(0, 7) : 'dev'}
         </p>
 
