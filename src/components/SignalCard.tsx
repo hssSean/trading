@@ -67,7 +67,7 @@ export function SignalCard({ signal, onClick, compact }: Props) {
     <TradeCard
       variant="active"
       onClick={onClick}
-      className={`${onClick ? 'cursor-pointer' : ''} ${!signal.isRead ? '!border-accent/45' : ''}`}
+      className={`${onClick ? 'cursor-pointer active:bg-white/[0.03]' : ''} ${!signal.isRead ? '!border-accent/45' : ''}`}
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 mb-3">
