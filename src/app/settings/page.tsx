@@ -5,6 +5,8 @@ import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
 import { setIsResetting, clearSessionDeletedIds, removeCoinPermanently } from '@/components/StoreHydration';
 import { SignalStrength, Timeframe } from '@/types';
+import { FormField } from '@/components/ui/FormField';
+import { ToggleChip } from '@/components/ui/ToggleChip';
 
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
 
@@ -479,23 +481,27 @@ export default function SettingsPage() {
 
         {/* Monitor URL + Diag */}
         <Section title="自動監控設定">
-          <div className="mb-3">
-            <p className="text-[#565E6B] text-xs mb-1.5">Webhook 密鑰（要和 Vercel 環境變數一致）</p>
-            <div className="flex gap-2">
-              <input value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="WEBHOOK_SECRET" className="input-field flex-1" />
-              <button onClick={saveWebhookSecret} className="btn-primary px-4 rounded text-sm shrink-0">存</button>
+          <div className="mb-3 flex items-end gap-2">
+            <div className="flex-1">
+              <FormField
+                label="Webhook 密鑰（要和 Vercel 環境變數一致）"
+                value={secret}
+                onChange={setSecret}
+                placeholder="WEBHOOK_SECRET"
+              />
             </div>
+            <button onClick={saveWebhookSecret} className="btn-primary px-4 py-2.5 rounded-[10px] text-sm shrink-0">存</button>
           </div>
 
-          <p className="text-[#565E6B] text-xs mb-2 leading-5">
+          <p className="text-text-m text-xs mb-2 leading-5">
             Vercel 每小時自動觸發。若需更高頻率，可將下方 URL 加到{' '}
-            <span className="text-[#2DD4BF]">cron-job.org</span>（免費）：
+            <span className="text-accent">cron-job.org</span>（免費）：
           </p>
-          <div className="bg-[#141A21] rounded p-3 mb-2">
-            <p className="text-[#8A94A2] text-xs font-mono break-all leading-5 num">{monitorUrl || '請先部署到 Vercel'}</p>
+          <div className="bg-card-2 rounded-[10px] p-3 mb-2">
+            <p className="text-text-s text-xs font-mono break-all leading-5 num">{monitorUrl || '請先部署到 Vercel'}</p>
           </div>
           {appUrl && (
-            <button onClick={copyUrl} className="w-full py-2.5 rounded bg-[#141A21] border border-[#1B222B] text-sm text-[#8A94A2] mb-3">
+            <button onClick={copyUrl} className="w-full py-2.5 rounded-full bg-card-2 border border-white/[0.06] text-sm text-text-s mb-3">
               {copied ? '已複製' : '複製 URL'}
             </button>
           )}
@@ -504,79 +510,79 @@ export default function SettingsPage() {
           <button
             onClick={runDiag}
             disabled={diagLoading}
-            className="w-full py-2.5 rounded border border-[#0ECB81]/30 text-[#0ECB81] text-sm mb-3"
+            className="w-full py-2.5 rounded-full border border-up/30 text-up text-sm mb-3"
           >
             {diagLoading ? (
               <span className="flex items-center justify-center gap-2">
-                <span className="w-4 h-4 border-2 border-[#0ECB81] border-t-transparent rounded-full animate-spin" />
+                <span className="w-4 h-4 border-2 border-up border-t-transparent rounded-full animate-spin" />
                 分析中…
               </span>
             ) : '手動觸發分析（查看通知診斷）'}
           </button>
 
           {diagResult && diagResult.skipped && (
-            <div className="bg-[#141A21] rounded p-3 text-xs space-y-1 border border-[#C99A2E]/30">
+            <div className="bg-card-2 rounded-[10px] p-3 text-xs space-y-1 border border-[#C99A2E]/30">
               <p className="text-[#C99A2E] num">未執行——伺服器排程正在跑（每分鐘一次）</p>
-              <p className="text-[#565E6B]">{diagResult.skipped}，等它跑完再按一次，或直接等下一輪結果自然出現</p>
+              <p className="text-text-m">{diagResult.skipped}，等它跑完再按一次，或直接等下一輪結果自然出現</p>
             </div>
           )}
           {diagResult && !diagResult.skipped && (
-            <div className="bg-[#141A21] rounded p-3 text-xs space-y-2">
-              <p className="text-[#2DD4BF] num">{diagResult.ok ? '分析完成' : '分析失敗'}</p>
-              <p className="text-[#8A94A2]">已通知：{diagResult.notified?.join(', ') || '無'}</p>
+            <div className="bg-card-2 rounded-[10px] p-3 text-xs space-y-2">
+              <p className="text-accent num">{diagResult.ok ? '分析完成' : '分析失敗'}</p>
+              <p className="text-text-s">已通知：{diagResult.notified?.join(', ') || '無'}</p>
               {diagResult.results?.map((r) => (
-                <div key={r.symbol} className={`rounded px-3 py-2 border ${
-                  diagResult.notified?.includes(r.symbol) ? 'border-[#0ECB81]/30' :
+                <div key={r.symbol} className={`rounded-[10px] px-3 py-2 border ${
+                  diagResult.notified?.includes(r.symbol) ? 'border-up/30' :
                   r.locked                                ? 'border-[#C99A2E]/30' :
-                  'border-[#1B222B]'
+                  'border-white/[0.06]'
                 }`}>
                   <div className="flex items-center justify-between">
-                    <span className="text-[#E8ECF1] num">{r.symbol.replace('USDT', '')}</span>
-                    <span className={diagResult.notified?.includes(r.symbol) ? 'text-[#0ECB81]' : r.locked ? 'text-[#C99A2E]' : 'text-[#565E6B]'}>
+                    <span className="text-text-p num">{r.symbol.replace('USDT', '')}</span>
+                    <span className={diagResult.notified?.includes(r.symbol) ? 'text-up' : r.locked ? 'text-[#C99A2E]' : 'text-text-m'}>
                       {diagResult.notified?.includes(r.symbol) ? '已通知' : r.locked ? '持倉鎖定' : '—'}
                     </span>
                   </div>
                   {r.topSignal && (
-                    <p className="text-[#8A94A2] mt-1">
+                    <p className="text-text-s mt-1">
                       {r.topSignal.direction === 'LONG' ? 'LONG' : 'SHORT'} ·{' '}
-                      <span className={`num ${r.topScore >= 16 ? 'text-[#0ECB81]' : 'text-[#C99A2E]'}`}>{r.topScore}分</span>
+                      <span className={`num ${r.topScore >= 16 ? 'text-up' : 'text-[#C99A2E]'}`}>{r.topScore}分</span>
                       {r.agreeTFs !== undefined && (
-                        <span className={r.confluenceMet ? ' text-[#0ECB81]' : ''}>
+                        <span className={r.confluenceMet ? ' text-up' : ''}>
                           {' '}· {r.agreeTFs}/2 TF 同向{r.confluenceMet ? '（達標）' : '（未達）'}
                         </span>
                       )}
                     </p>
                   )}
-                  {!r.topSignal && <p className="text-[#565E6B] mt-1">無信號（得分 {r.topScore}）</p>}
+                  {!r.topSignal && <p className="text-text-m mt-1">無信號（得分 {r.topScore}）</p>}
                   {r.note && <p className="text-[#C99A2E]/80 mt-1">{r.note}</p>}
-                  {r.error && <p className="text-[#F6465D] mt-1">錯誤：{r.error}</p>}
+                  {r.error && <p className="text-down mt-1">錯誤：{r.error}</p>}
                 </div>
               ))}
             </div>
           )}
 
-          <div className="mt-3 border border-[#2DD4BF]/20 rounded px-4 py-3">
-            <p className="text-[#2DD4BF] text-xs mb-1">Vercel 環境變數</p>
-            <p className="text-[#8A94A2] text-xs font-mono leading-6 num">
+          <div className="mt-3 border border-accent/20 rounded-[10px] px-4 py-3">
+            <p className="text-accent text-xs mb-1">Vercel 環境變數</p>
+            <p className="text-text-s text-xs font-mono leading-6 num">
               WEBHOOK_SECRET={secret || 'abc123'}<br />
               CRON_SECRET=任意密碼<br />
               ANALYSIS_TIMEFRAMES=4h,1h<br />
               MIN_SCORE=5<br />
-              <span className="text-[#2DD4BF]">NEXT_PUBLIC_SUPABASE_URL=你的url</span><br />
-              <span className="text-[#2DD4BF]">NEXT_PUBLIC_SUPABASE_ANON_KEY=你的key</span><br />
-              <span className="text-[#2DD4BF]">SUPABASE_SERVICE_ROLE_KEY=你的key</span><br />
-              <span className="text-[#2DD4BF]">SUPABASE_PROFILE_ID=你的 profiles.id</span><br />
-              <span className="text-[#0ECB81]">NEXT_PUBLIC_VAPID_PUBLIC_KEY=（見部署說明）</span><br />
-              <span className="text-[#0ECB81]">VAPID_PRIVATE_KEY=（見部署說明）</span>
+              <span className="text-accent">NEXT_PUBLIC_SUPABASE_URL=你的url</span><br />
+              <span className="text-accent">NEXT_PUBLIC_SUPABASE_ANON_KEY=你的key</span><br />
+              <span className="text-accent">SUPABASE_SERVICE_ROLE_KEY=你的key</span><br />
+              <span className="text-accent">SUPABASE_PROFILE_ID=你的 profiles.id</span><br />
+              <span className="text-up">NEXT_PUBLIC_VAPID_PUBLIC_KEY=（見部署說明）</span><br />
+              <span className="text-up">VAPID_PRIVATE_KEY=（見部署說明）</span>
             </p>
-            <p className="text-[#565E6B] text-[10px] mt-2">藍色為 Supabase 必填；綠色為 Web Push 必填</p>
+            <p className="text-text-m text-[10px] mt-2">藍色為 Supabase 必填；綠色為 Web Push 必填</p>
           </div>
         </Section>
 
         {/* Account Size + per-trade risk */}
         <Section title="帳戶資金（倉位計算用）">
-          <p className="text-[#565E6B] text-xs mb-2 leading-5">
-            設定後，每張信號會根據 <span className="text-[#2DD4BF] num">{settings.riskPctPerTrade ?? 1}% 風險原則</span> 自動計算建議倉位、本金與槓桿
+          <p className="text-text-m text-xs mb-2 leading-5">
+            設定後，每張信號會根據 <span className="text-accent num">{settings.riskPctPerTrade ?? 1}% 風險原則</span> 自動計算建議倉位、本金與槓桿
           </p>
           <div className="flex items-center gap-2">
             <input
@@ -590,26 +596,20 @@ export default function SettingsPage() {
               }}
               onBlur={() => setAcctInput(null)} // snap display back to committed value
               placeholder="1000"
-              className="input-field flex-1"
+              className="w-full bg-card-2 border border-white/[0.06] rounded-[10px] px-3 py-2.5 text-[13px] text-text-p outline-none focus:border-accent focus:ring-1 focus:ring-accent/40 transition-colors flex-1"
             />
-            <span className="text-[#565E6B] text-sm shrink-0">USDT</span>
+            <span className="text-text-m text-sm shrink-0">USDT</span>
           </div>
 
-          <p className="text-[#565E6B] text-xs mt-3 mb-1.5">每筆風險比例（A 級單；B 級輕倉自動減半）</p>
+          <p className="text-text-m text-xs mt-3 mb-1.5">每筆風險比例（A 級單；B 級輕倉自動減半）</p>
           <div className="flex gap-1.5 flex-wrap">
             {[0.5, 1, 2, 3].map(p => (
-              <button
+              <ToggleChip
                 key={p}
+                label={`${p}%`}
+                active={(settings.riskPctPerTrade ?? 1) === p}
                 onClick={() => updateSettings({ riskPctPerTrade: p })}
-                className={`text-xs px-3 py-1.5 rounded num border transition-colors ${
-                  (settings.riskPctPerTrade ?? 1) === p
-                    ? p >= 2 ? 'border-[#C99A2E]/50 text-[#C99A2E]'
-                    :          'border-[#2DD4BF]/50 text-[#2DD4BF]'
-                    : 'border-[#1B222B] text-[#565E6B]'
-                }`}
-              >
-                {p}%
-              </button>
+              />
             ))}
           </div>
           {(settings.riskPctPerTrade ?? 1) >= 2 && (
@@ -617,7 +617,7 @@ export default function SettingsPage() {
               高風險模式：連續虧損時資金回撤會很快，小資金滾倉建議搭配嚴格停損紀律
             </p>
           )}
-          <p className="text-[#3A424E] text-xs mt-2 num">
+          <p className="text-text-m text-xs mt-2 num">
             每筆最大虧損 = {(settings.accountSize * (settings.riskPctPerTrade ?? 1) / 100).toFixed(2)} USDT（帳戶 {settings.riskPctPerTrade ?? 1}%）
           </p>
         </Section>
