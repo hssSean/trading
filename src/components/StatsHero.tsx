@@ -37,7 +37,7 @@ function Spark({ data }: { data: number[] }) {
 
 function Cell({ label, value, color, border }: { label: string; value: string; color: string; border?: boolean }) {
   return (
-    <div className={`flex-1 px-3 ${border ? 'border-l border-[#1B222B]' : ''}`}>
+    <div className={`flex-1 px-3 ${border ? 'border-l border-white/[0.06]' : ''}`}>
       <div className="tlabel">{label}</div>
       <div className="text-[15px] font-medium num mt-1" style={{ color }}>{value}</div>
     </div>
@@ -47,11 +47,11 @@ function Cell({ label, value, color, border }: { label: string; value: string; c
 export function StatsHero({ totalR, avgR, weekR, winRate, expectedValue, equity, closedCount, pendingCount }: Props) {
   const ev = expectedValue == null ? null : parseFloat(expectedValue);
   return (
-    <div className="bg-[#0F141A] border border-[#1B222B] rounded-md px-3.5 py-3 mb-2.5">
+    <div className="bg-card-2 border border-white/[0.06] rounded-xl px-3.5 py-3 mb-2.5">
       <div className="flex items-center">
         <span className="tlabel">累積績效</span>
         <span className="flex-1" />
-        <span className="text-[#565E6B] text-[10px] num">{closedCount} 結束 · {pendingCount} 持倉</span>
+        <span className="text-text-m text-[10px] num">{closedCount} 結束 · {pendingCount} 持倉</span>
       </div>
 
       <div className="flex items-end gap-3 mt-2">
@@ -59,13 +59,13 @@ export function StatsHero({ totalR, avgR, weekR, winRate, expectedValue, equity,
           {totalR == null ? '—' : `${sign(totalR)}${totalR.toFixed(1)}R`}
         </span>
         {avgR != null && (
-          <span className="text-[12px] num pb-0.5 text-[#8A94A2]">每筆 {sign(avgR)}{avgR.toFixed(2)}R</span>
+          <span className="text-[12px] num pb-0.5 text-text-s">每筆 {sign(avgR)}{avgR.toFixed(2)}R</span>
         )}
         <span className="flex-1" />
         <Spark data={equity} />
       </div>
 
-      <div className="flex mt-3 pt-3 border-t border-[#1B222B] -mx-3.5">
+      <div className="flex mt-3 pt-3 border-t border-white/[0.06] -mx-3.5">
         <Cell label="近 7 日" value={weekR == null ? '—' : `${sign(weekR)}${weekR.toFixed(1)}R`} color={col(weekR)} />
         <Cell label="勝率" value={winRate == null ? '—' : `${winRate}%`} color="#E8ECF1" border />
         <Cell label="每筆期望" value={ev == null ? '—' : `${ev >= 0 ? '+' : ''}${expectedValue}%`} color={ev == null ? '#E8ECF1' : ev >= 0 ? '#0ECB81' : '#F6465D'} border />
