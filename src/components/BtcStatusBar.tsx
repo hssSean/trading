@@ -42,19 +42,19 @@ export function BtcStatusBar() {
   const blocked = !!scan.circuitBreaker || !!scan.eventFilter;
 
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 bg-[#0C1116] border-b border-[#1B222B] text-[11px]">
+    <div className="flex items-center gap-2 px-3 py-1.5 bg-[#0C1116] border-b border-white/[0.06] text-[11px]">
       <span style={{ color: info.color }}>●</span>
       <span className="font-medium" style={{ color: info.color }}>{info.label}</span>
-      <span className="text-[#2A323D]">|</span>
-      <span className="text-[#8A94A2] truncate">{info.hint}</span>
+      <span className="text-text-m">|</span>
+      <span className="text-text-s truncate">{info.hint}</span>
       <span className="flex-1" />
       {blocked ? (
-        <span className="text-[#F6465D] font-medium">{scan.circuitBreaker ? '熔斷中' : '事件窗口'}</span>
+        <span className="text-down font-medium">{scan.circuitBreaker ? '熔斷中' : '事件窗口'}</span>
       ) : (
         <>
-          <span className="text-[#8A94A2] num">{scan.notified.length} 訊號</span>
-          <span className="text-[#2A323D]">|</span>
-          <span className="text-[#565E6B] num">RISK {scan.totalOpenRisk}%</span>
+          <span className="text-text-s num">{scan.notified.length} 訊號</span>
+          <span className="text-text-m">|</span>
+          <span className="text-text-m num">RISK {scan.totalOpenRisk}%</span>
         </>
       )}
     </div>
