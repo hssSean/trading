@@ -8,6 +8,7 @@ import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
 import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
+import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 
 export const maxDuration = 60;
@@ -1774,11 +1775,17 @@ export async function GET(req: NextRequest) {
       // ── Regime determination from 4H ADX (once per symbol) ─────
       // NOTE: the 540-bar 4H series comes from fetchCandlesCached — it re-fetches
       // only the last few bars and splices them onto the previous run's array.
-      // A 4H bar changes every 4 hours but this scan runs every minute, so the
-      // uncached path was re-transferring and re-parsing 539 identical bars per
-      // symbol per run. The spliced array is identical to a full fetch (see
-      // mergeCandles' tests), so ADX/ATR values are unchanged — this is purely
-      // the parsing cost coming off Vercel's Fluid Active CPU bill.
+      // That cut the fetch/parse cost, but calcAdx/calcAtrHistory are Wilder
+      // recursions that still re-ran over the full 540-bar window every single
+      // scan regardless of where the array came from — the cache never touched
+      // that cost, which turned out to be the actual dominant one (2026-07-30:
+      // measured no real reduction in Vercel Fluid Active CPU from candle
+      // caching alone). A 4H bar only changes every 4 hours; this scan runs
+      // every minute. `regimeCache` memoizes the computed adx/atrPct against the
+      // newest bar's openTime, so the expensive part below only actually runs
+      // once per 4h window instead of ~240 times — see regimeCache.ts for why
+      // this is memoization of the full computation rather than a truly
+      // incremental recursion (same CPU win, none of the drift risk).
       // v2.1 §1.2 hysteresis: ADX ≥23 → trending (until ≤18); ≤18 → ranging
       // (until ≥23); 18-23 holds the previous state — transitional only when
       // a symbol has no prior state (initialization).
@@ -1786,13 +1793,20 @@ export async function GET(req: NextRequest) {
       let symbolRegime: Regime = 'ranging';
       let symbolAdx    = NaN;
       let regimeDetermined = false;
+      let symbolAtrPct = 50; // default: mid-volatility
+      let fourHC: Candle[] | undefined;
+      let cacheHit: RegimeCacheEntry | undefined;
       try {
         // 540 bars = 90 days of 4H candles — enough for ADX regime + 90-day ATR percentile
         if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandlesCached(symbol, '4h', 540));
-        const fourHC   = candleCache.get('4h')!;
+        fourHC = candleCache.get('4h')!;
+        const cached = getRegimeCache(symbol);
+        if (is4hBarUnchanged(cached, fourHC)) cacheHit = cached;
+
         // Only ADX is needed here — computing full indicators (EMA200/MACD/BB/…)
-        // over 540 bars every scan was the single biggest CPU sink.
-        symbolAdx = calcAdx(fourHC, 14).adx ?? NaN;
+        // over 540 bars every scan was already trimmed in an earlier pass;
+        // cacheHit trims the ADX calc itself down to once per 4H bar.
+        symbolAdx = cacheHit ? cacheHit.adx : (calcAdx(fourHC, 14).adx ?? NaN);
         if (!isNaN(symbolAdx)) {
           regimeDetermined = true;
           if (symbolAdx >= 23)      symbolRegime = 'trending';
@@ -1810,11 +1824,13 @@ export async function GET(req: NextRequest) {
       } catch { /* keep 'ranging' / regimeDetermined=false — Strategy A fallback */ }
 
       // ── Phase 5: 90-day ATR percentile → suggested position sizing ──
-      // Uses the 540-bar 4H cache already populated above.
-      let symbolAtrPct = 50; // default: mid-volatility
+      // Uses the 540-bar 4H cache already populated above. Separate try/catch
+      // from the ADX block on purpose (unchanged from before this cache): a
+      // failure here must not lose an already-determined regime, and vice versa.
       try {
-        const fourHC = candleCache.get('4h');
-        if (fourHC && fourHC.length >= 30) {
+        if (cacheHit) {
+          symbolAtrPct = cacheHit.atrPct;
+        } else if (fourHC && fourHC.length >= 30) {
           const atrHistory = calcAtrHistory(fourHC);
           if (atrHistory.length >= 2) {
             const currentAtr4h = atrHistory[atrHistory.length - 1];
@@ -1822,6 +1838,15 @@ export async function GET(req: NextRequest) {
           }
         }
       } catch { /* keep default 50 */ }
+
+      // Memoize once both values are known from a fresh computation. Skipped
+      // entirely on a cache hit (nothing changed, no point rewriting the same
+      // entry) and when ADX came back NaN (not enough bars yet — let the next
+      // scan retry the full computation rather than caching a non-value).
+      if (!cacheHit && fourHC && fourHC.length > 0 && !isNaN(symbolAdx)) {
+        setRegimeCache(symbol, { lastBarOpenTime: fourHC[fourHC.length - 1].openTime, adx: symbolAdx, atrPct: symbolAtrPct });
+      }
+
       // >80th pct = high volatility → smaller risk; <30th = low vol → larger risk
       const suggestedRiskPct = symbolAtrPct > 80 ? 0.5 : symbolAtrPct < 30 ? 1.5 : 1.0;
 
