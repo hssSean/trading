@@ -127,7 +127,8 @@ export interface TradingSignal {
   // Phase 5: position sizing guidance — informational, user applies manually
   suggestedRiskPct?: number;  // 0.5 | 1.0 | 1.5 — from ATR percentile
   suggestedLeverage?: number; // risk% / SL-distance%, capped 10x
-  // v2.1 §2: signal tier — A (65+, ≥3 groups, 1% risk) | B (55-64, ≥2 groups, 0.5% risk)
+  // v2.1 §2: signal tier — A (65+, ≥3 groups, 1% risk) | B (60-64, ≥2 groups, 0.5% risk)
+  // B floor raised 55→60 on 2026-07-30; historical trades may still carry 55-59 scores.
   tier?: 'A' | 'B';
   scoreBreakdown?: ScoreBreakdown;
 }

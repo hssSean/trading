@@ -137,9 +137,16 @@ function detectRsiDivergence(
 // ════════════════════════════════════════════════════════════════
 // §4.2 v2: Group-capped scoring. Base 40 + 5 groups (max 100).
 // v2.1 §1.5 two-tier gate: A = ≥65 & ≥3 groups (risk 1%);
-//                          B = 55-64 & ≥2 groups (risk 0.5%); <55 no signal.
+//                          B = 60-64 & ≥2 groups (risk 0.5%); <60 no signal.
 const MIN_SCORE          = 65; // tier A threshold
-const MIN_SCORE_TIER_B   = 55; // tier B threshold (light position)
+// 2026-07-30 raised 55 → 60 on live data (19 closed B-tier trades vs 16 A-tier):
+//   A 級 (65+):    16 筆 +0.399R/筆，最大單筆 +2.00R，不靠極端值
+//   B 級 (55-64):  19 筆 +0.514R/筆 —— 但三筆 TP2 達標 (+3.50R 各) 全部落在 B 級，
+//                  扣掉後剩 16 筆 −0.044R/筆，扣手續費 (~0.14R/筆) 後明確為負
+// 也就是 B 級的正期望值完全由 3 個極端值撐著，中位數 (+0.24R) 撐不起手續費。
+// docs/TODO.md 🔬#8 當初以 10 筆樣本記下這個疑慮並要求「再跑一週」；樣本翻倍到
+// 19 筆後結論不變，才動手。55-59 這段是純虧損區，60-64 保留（樣本還不足以判定）。
+const MIN_SCORE_TIER_B   = 60; // tier B threshold (light position)
 const MIN_SCORE_LONGTF   = 67; // 4h/1d tier A needs 2 extra points
 const MIN_RR_INTRADAY    = 1.2;
 const MIN_RR_SWING       = 2.0;
@@ -555,7 +562,7 @@ export function generateSignals(
   );
 
   // ── LONG signal ──────────────────────────────────────────────
-  // v2.1 §1.5 tier: A = 65+/≥3 groups (1% risk) | B = 55-64/≥2 groups (0.5% risk)
+  // v2.1 §1.5 tier: A = 65+/≥3 groups (1% risk) | B = 60-64/≥2 groups (0.5% risk)
   // B-tier additionally requires normal volatility (ATR ≤3%): 2026-07-17 review —
   // all 3 losses were B-tier and the two big ones were high-vol coins. Marginal
   // score + wild coin is the worst combination; only A-tier may absorb high vol.
@@ -600,7 +607,7 @@ export function generateSignals(
         penalties: longScore - 40 - longTrend - longMom - longStruct - longVol - longPAction,
       },
     });
-    if (longTier === 'B') longReasons.push('🅱 B級輕倉訊號（55-64分）— 建議風險 0.5%');
+    if (longTier === 'B') longReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');
   }
 
   // ── SHORT signal ─────────────────────────────────────────────
@@ -642,7 +649,7 @@ export function generateSignals(
         penalties: shortScore - 40 - shortTrend - shortMom - shortStruct - shortVol - shortPAction,
       },
     });
-    if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（55-64分）— 建議風險 0.5%');
+    if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');
   }
 
   return signals;

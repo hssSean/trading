@@ -2091,6 +2091,10 @@ export async function GET(req: NextRequest) {
 
       // ── v2.1 §0: reject funnel — log every candidate regardless of outcome ──
       // Candidate = any qualifying signal existed OR raw score reached tier-B floor.
+      // 55 is deliberately kept BELOW the tier-B floor (raised to 60 on 2026-07-30):
+      // 55-59 no longer produces a signal at all, but still gets logged here as
+      // score_gate — that count is the only way to measure what the raise costs.
+      // Do not "fix" this to match MIN_SCORE_TIER_B or the measurement disappears.
       // !deferredToPass2: a parked candidate's funnel/results entry is built in
       // pass 2 once its same_dir_cap outcome is actually known — building it here
       // would wrongly log it as accepted (notified is still empty at this point

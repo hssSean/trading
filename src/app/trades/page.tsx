@@ -744,9 +744,13 @@ export default function TradesPage() {
       .map(([key, v]) => ({ key, pnl: parseFloat(v.pnl.toFixed(2)), wins: v.wins, total: v.total }));
   }, [closedResults]);
 
-  // 評分區間效益（哪個分數段勝率最高）— 對應 v2.1 分級（B級55-64 / A級65+）
+  // 評分區間效益（哪個分數段勝率最高）— 對應 v2.1 分級（B級60-64 / A級65+）
+  // 55–59 獨立成一段而非併入 B 級：2026-07-30 起 B 級底線從 55 升到 60，這段不再
+  // 產生新單。留著是為了讓「當初為什麼要升門檻」的歷史證據看得見——併回 B 級會
+  // 稀釋掉判斷依據，直接砍掉則會讓舊單從所有區間中消失（落在 min 之外）。
   const scoreRanges = useMemo(() => [
-    { label: '55–64 (B級)', min: 55, max: 64 },
+    { label: '55–59 (已停用)', min: 55, max: 59 },
+    { label: '60–64 (B級)', min: 60, max: 64 },
     { label: '65–74 (A級)', min: 65, max: 74 },
     { label: '75+ (A級高分)', min: 75, max: 999 },
   ].map(r => {
