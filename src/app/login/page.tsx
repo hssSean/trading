@@ -2,6 +2,8 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import { FormField } from '@/components/ui/FormField';
+import { ToggleChip } from '@/components/ui/ToggleChip';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -32,52 +34,52 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-dvh bg-[#0A0D11] flex items-center justify-center px-6">
+    <div className="min-h-dvh bg-app flex items-center justify-center px-6">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="text-4xl mb-3">📈</div>
-          <h1 className="text-[#E8ECF1] text-2xl font-extrabold">Crypto Trader</h1>
-          <p className="text-[#565E6B] text-sm mt-1">加密貨幣交易信號分析</p>
+          <h1 className="text-text-p text-2xl font-extrabold">Crypto Trader</h1>
+          <p className="text-text-m text-sm mt-1">加密貨幣交易信號分析</p>
         </div>
 
-        <div className="card">
+        <div className="bg-card-2 border border-white/[0.06] rounded-xl p-4">
           <div className="flex gap-2 mb-5">
             {(['login', 'signup'] as const).map(m => (
-              <button key={m} onClick={() => { setMode(m); setErr(''); }}
-                className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${
-                  mode === m ? 'bg-[#2DD4BF] text-[#0A0D11]' : 'bg-[#141A21] text-[#565E6B]'
-                }`}>
-                {m === 'login' ? '登入' : '註冊'}
-              </button>
+              <ToggleChip
+                key={m}
+                label={m === 'login' ? '登入' : '註冊'}
+                active={mode === m}
+                onClick={() => { setMode(m); setErr(''); }}
+              />
             ))}
           </div>
 
-          <p className="text-[#565E6B] text-xs mb-1">Email</p>
-          <input
-            value={email}
-            onChange={e => setEmail(e.target.value)}
-            type="email"
-            placeholder="your@email.com"
-            className="input-field mb-3"
-            onKeyDown={e => e.key === 'Enter' && handle()}
-          />
+          <div onKeyDown={e => e.key === 'Enter' && handle()} className="mb-1">
+            <FormField
+              label="Email"
+              type="email"
+              value={email}
+              onChange={setEmail}
+              placeholder="your@email.com"
+            />
+          </div>
 
-          <p className="text-[#565E6B] text-xs mb-1">密碼{mode === 'signup' ? '（至少 6 位）' : ''}</p>
-          <input
-            value={pass}
-            onChange={e => setPass(e.target.value)}
-            type="password"
-            placeholder="••••••••"
-            className="input-field mb-4"
-            onKeyDown={e => e.key === 'Enter' && handle()}
-          />
+          <div onKeyDown={e => e.key === 'Enter' && handle()} className="mt-3 mb-1">
+            <FormField
+              label={`密碼${mode === 'signup' ? '（至少 6 位）' : ''}`}
+              type="password"
+              value={pass}
+              onChange={setPass}
+              placeholder="••••••••"
+            />
+          </div>
 
-          {err && <p className="text-red-400 text-xs mb-3 bg-red-500/10 rounded-lg px-3 py-2">{err}</p>}
+          {err && <p className="text-down text-xs mt-3 bg-down/10 rounded-lg px-3 py-2">{err}</p>}
 
           <button
             onClick={handle}
             disabled={!email || !pass || loading}
-            className="w-full py-3 rounded-xl btn-primary font-bold text-sm disabled:opacity-40"
+            className="w-full py-3 mt-4 rounded-xl btn-primary font-bold text-sm disabled:opacity-40"
           >
             {loading ? (
               <span className="flex items-center justify-center gap-2">
@@ -88,9 +90,9 @@ export default function LoginPage() {
           </button>
         </div>
 
-        <p className="text-[#3A424E] text-xs text-center mt-6 leading-5">
+        <p className="text-text-m text-xs text-center mt-6 leading-5">
           資料儲存於個人帳號，換裝置登入即可同步<br />
-          <span className="text-red-400/60">本 App 僅供參考，不構成投資建議</span>
+          <span className="text-down/60">本 App 僅供參考，不構成投資建議</span>
         </p>
       </div>
     </div>
