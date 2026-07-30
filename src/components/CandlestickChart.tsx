@@ -42,18 +42,18 @@ export function CandlestickChart({
         width:  el.clientWidth,
         height,
         layout: {
-          background: { type: ColorType.Solid, color: '#0A0D11' },
-          textColor:  '#8A94A2',
+          background: { type: ColorType.Solid, color: '#141922' },
+          textColor:  '#97A2B0',
           fontSize:   11,
         },
         grid: {
-          vertLines: { color: '#141A21' },
-          horzLines: { color: '#141A21' },
+          vertLines: { color: '#1E252E' },
+          horzLines: { color: '#1E252E' },
         },
         crosshair:       { mode: CrosshairMode.Normal },
-        rightPriceScale: { borderColor: '#1B222B', minimumWidth: 72 },
+        rightPriceScale: { borderColor: '#242C37', minimumWidth: 72 },
         timeScale: {
-          borderColor:    '#1B222B',
+          borderColor:    '#242C37',
           timeVisible:    true,
           secondsVisible: false,
         },
@@ -167,7 +167,7 @@ export function CandlestickChart({
           { color: '#3B82F6', label: 'OB▲',  dot: true },
           { color: '#F6465D', label: 'OB▼',  dot: true },
         ].map(({ color, label, dot }) => (
-          <span key={label} className="flex items-center gap-1 text-[9px] text-[#3A424E]">
+          <span key={label} className="flex items-center gap-1 text-[9px] text-text-m">
             {dot
               ? <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
               : <span className="w-4 h-px"                 style={{ background: color }} />
