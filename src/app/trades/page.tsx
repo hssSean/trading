@@ -881,6 +881,17 @@ export default function TradesPage() {
         const riskPct = Math.abs(entry - stopLoss) / entry * 100;
         return riskPct > 0 ? (pnlPercent / riskPct).toFixed(2) : '';
       };
+      // MFE/MAE 一律換算成 R（正 = 對我方向有利，負 = 不利），跟主要損益欄同一套
+      // 慣例——2026-07-30 策略檢討加的：出場價相同的兩筆單，一筆可能中途衝到
+      // +1.8R 才回落到 +0.2R 出場，一筆從沒超過 +0.3R，這是完全不同的兩個問題
+      // （TP1 設太遠 vs. 進場論點根本不成立），只看出場價分不出來。
+      const calcExcursionR = (entry: number, stopLoss: number, direction: string, price: number | null) => {
+        if (price === null) return '';
+        const riskDist = Math.abs(entry - stopLoss);
+        if (riskDist <= 0) return '';
+        const r = direction === 'LONG' ? (price - entry) / riskDist : (entry - price) / riskDist;
+        return r.toFixed(2);
+      };
 
       // 只匯出真正終局的列（closed_at 有值）——還開著的部位沒有結果可分析。
       const rows = (rawRows ?? [])
@@ -894,6 +905,9 @@ export default function TradesPage() {
           const acctR      = rMultiple === '' ? '' : (parseFloat(rMultiple) * (tier === 'B' ? 0.5 : 1.0)).toFixed(2);
           const closeReasonKey = (r.close_reason as string | null) ?? null;
           const resultKey  = (r.result as string | null) ?? 'MANUAL_CLOSE';
+          const direction  = r.direction as string;
+          const mfeR = calcExcursionR(entry, stopLoss, direction, (r.mfe_price as number | null) ?? null);
+          const maeR = calcExcursionR(entry, stopLoss, direction, (r.mae_price as number | null) ?? null);
           return [
             r.id, r.symbol, r.direction, r.timeframe, r.strength, r.score,
             entry, stopLoss, r.tp1, r.tp2,
@@ -905,6 +919,8 @@ export default function TradesPage() {
             pnlPercent ?? '',
             rMultiple,
             acctR,
+            mfeR,
+            maeR,
             `${tier}級·${r.timeframe}`,
             r.regime ? (REGIME_LABEL[r.regime as string] ?? r.regime) : '',
             r.confidence ?? '',
@@ -919,7 +935,7 @@ export default function TradesPage() {
       const header = [
         'ID', '幣種', '方向', '週期', '強度', '得分',
         '進場價', '止損', 'TP1', 'TP2', '開倉時間', '平倉時間',
-        '結果', '出場原因', '出場價', '損益%', 'R倍數', '帳戶R',
+        '結果', '出場原因', '出場價', '損益%', 'R倍數', '帳戶R', 'MFE(R)', 'MAE(R)',
         '策略', '盤勢regime', '信心分數confidence', '資金費率%funding',
         '建議風險%', '建議槓桿',
         '分析依據', '個人備註',

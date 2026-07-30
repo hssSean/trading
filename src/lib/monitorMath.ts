@@ -67,6 +67,47 @@ export function deriveCloseReason(params: {
   return 'trailing_stop'; // ratcheted trailing stop hit, or (rare, ATR unavailable) the original SL floor after TP1
 }
 
+// MFE (Maximum Favorable Excursion) / MAE (Maximum Adverse Excursion): how far
+// price moved in the trade's favor / against it since fill, in raw price terms
+// (converted to R at read time — CSV export does entry/stopLoss ÷ (mfe-entry) etc,
+// same convention as the rest of the app's R-multiple reporting).
+//
+// Why this matters: the trade log only records the EXIT price, so a trade that
+// ran to +1.8R before reversing to a time-stop +0.2R looks identical to one that
+// only ever reached +0.3R. Those are opposite problems (TP1 too far away vs.
+// entry/thesis wasn't working) needing opposite fixes — MFE/MAE is the only way
+// to tell them apart (2026-07-30 strategy review).
+//
+// Called with only the NEW candles fetched this scan (route.ts already narrows
+// to `openTime >= fillAnchor` on the first scan and to new bars on later ones),
+// not the trade's whole history — the running extreme is the persisted state,
+// updated incrementally each scan exactly like the trailing stop is. Pure and
+// monotonic: the result only ever extends prior, never retreats.
+export interface MfeMaeCandle { high: number; low: number; }
+
+export interface MfeMaeUpdate {
+  mfePrice: number | null;
+  maePrice: number | null;
+  changed: boolean;
+}
+
+export function updateMfeMae(
+  candles: MfeMaeCandle[],
+  isLong: boolean,
+  priorMfe: number | null,
+  priorMae: number | null,
+): MfeMaeUpdate {
+  let mfePrice = priorMfe;
+  let maePrice = priorMae;
+  for (const c of candles) {
+    const favorable = isLong ? c.high : c.low;
+    const adverse    = isLong ? c.low  : c.high;
+    if (mfePrice === null || (isLong ? favorable > mfePrice : favorable < mfePrice)) mfePrice = favorable;
+    if (maePrice === null || (isLong ? adverse   < maePrice  : adverse   > maePrice)) maePrice = adverse;
+  }
+  return { mfePrice, maePrice, changed: mfePrice !== priorMfe || maePrice !== priorMae };
+}
+
 export function walkTpSl(
   candles: WalkCandle[],
   afterMs: number,

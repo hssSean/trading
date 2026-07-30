@@ -603,7 +603,7 @@ export default function SettingsPage() {
 
           <p className="text-text-m text-xs mt-3 mb-1.5">每筆風險比例（A 級單；B 級輕倉自動減半）</p>
           <div className="flex gap-1.5 flex-wrap">
-            {[0.5, 1, 2, 3].map(p => (
+            {[0.5, 1, 2, 3, 5, 10].map(p => (
               <ToggleChip
                 key={p}
                 label={`${p}%`}
@@ -612,7 +612,12 @@ export default function SettingsPage() {
               />
             ))}
           </div>
-          {(settings.riskPctPerTrade ?? 1) >= 2 && (
+          {(settings.riskPctPerTrade ?? 1) >= 5 ? (
+            <p className="text-[#F6465D]/90 text-xs mt-1.5">
+              極高風險：連續 3 筆虧損就吃掉 {(3 * (settings.riskPctPerTrade ?? 1)).toFixed(0)}% 本金，
+              小帳戶用來滿足交易所最低下單額時務必嚴守停損
+            </p>
+          ) : (settings.riskPctPerTrade ?? 1) >= 2 && (
             <p className="text-[#C99A2E]/80 text-xs mt-1.5">
               高風險模式：連續虧損時資金回撤會很快，小資金滾倉建議搭配嚴格停損紀律
             </p>

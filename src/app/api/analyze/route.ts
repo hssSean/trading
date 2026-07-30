@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
@@ -639,6 +639,32 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     // 立刻被誤判「曾達 +0.5R」而觸發保本/移動止損通知。ATR 用全部 K 線無妨。
     const fillAnchor  = (trade.filled_at ?? trade.opened_at ?? 0) as number;
     const evalCandles = candles.filter(c => c.openTime >= fillAnchor);
+
+    // MFE/MAE (2026-07-30 strategy review): the trade log only ever recorded the
+    // exit price, so a trade that ran to +1.8R before reversing to a +0.2R time
+    // stop was indistinguishable from one that only ever reached +0.3R — opposite
+    // problems (TP1 too far away vs. the entry/thesis genuinely not working)
+    // needing opposite fixes. Independent of the close-detection logic below on
+    // purpose: this is monotonic (only ever extends, never retreats) and passive
+    // measurement, not a trading decision, so it doesn't need to share the close
+    // paths' atomic write guards. Runs off the same evalCandles already fetched
+    // for the TP/SL walk — no extra candle fetch.
+    if (evalCandles.length > 0) {
+      try {
+        const priorMfe = (trade.mfe_price as number | null) ?? null;
+        const priorMae = (trade.mae_price as number | null) ?? null;
+        const mm = updateMfeMae(evalCandles, isLong, priorMfe, priorMae);
+        if (mm.changed) {
+          await admin.from('trades')
+            .update({ mfe_price: mm.mfePrice, mae_price: mm.maePrice })
+            .eq('id', trade.id);
+        }
+      } catch (e) {
+        // 42703 (column not migrated) or any other error — MFE/MAE is pure
+        // analytics, must never block the real TP/SL monitoring below.
+        console.error(`[monitor] mfe/mae update failed ${trade.id}:`, String(e).slice(0, 150));
+      }
+    }
 
     // Scan candles in chronological order.
     // Check order within each candle: TP1 first, then TP2, then trailing stop, then SL.
