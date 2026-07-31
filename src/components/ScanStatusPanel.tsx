@@ -284,7 +284,7 @@ export function ScanStatusPanel() {
             </div>
           )}
           <p className="text-text-m text-[9px] mt-2 num">
-            總持倉風險 {scan.totalOpenRisk}% · 每 5 分鐘自動掃描 · 點擊標題可收合
+            持倉風險評分 {scan.totalOpenRisk}（非帳戶實際風險%）· 每 5 分鐘自動掃描 · 點擊標題可收合
           </p>
         </div>
       )}

@@ -54,7 +54,7 @@ export function BtcStatusBar() {
         <>
           <span className="text-text-s num">{scan.notified.length} 訊號</span>
           <span className="text-text-m">|</span>
-          <span className="text-text-m num">RISK {scan.totalOpenRisk}%</span>
+          <span className="text-text-m num">持倉評分 {scan.totalOpenRisk}</span>
         </>
       )}
     </div>

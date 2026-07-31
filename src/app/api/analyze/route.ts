@@ -1176,10 +1176,19 @@ async function checkStratBPaused(symbol: string): Promise<boolean> {
   }
 }
 
-const MAX_TOTAL_RISK_PCT = 5; // total open risk cap (% of account)
+const MAX_TOTAL_RISK_PCT = 5; // cap on summed suggested_risk_pct — see note below, NOT real account %
 
 // ── Phase 5: total open risk check ───────────────────────────
-// Sums suggested_risk_pct of all open trades for a user.
+// Sums suggested_risk_pct of all open trades for a user. suggested_risk_pct is
+// the system's ATR-volatility-based sizing suggestion (0.5/1.0/1.5, informational,
+// user applies manually — src/types/index.ts), completely independent of the
+// user's own acctRiskPct setting. So this cap is really "how many concurrent
+// positions, weighted by volatility class" — NOT a real dollar/account % figure,
+// regardless of what risk% the user has chosen. 2026-07-31: relabeled the
+// displayed text (skip reason + BtcStatusBar/ScanStatusPanel) to stop implying
+// it's real account risk after the 10% risk option made the gap between this
+// proxy number and actual dollar exposure obvious — the number/threshold itself
+// is unchanged, only what it's called.
 // Falls back to (open-trade-count × 1%) if the column doesn't exist yet.
 // Returns 0 on any fatal error so the gate never falsely blocks signals.
 async function checkTotalOpenRisk(profileId: string): Promise<number> {
@@ -1357,7 +1366,7 @@ async function checkSameDirectionRisk(
 // NOT raw pnl_percent. A single ATR-based -12% stop is only -1R = -1% account;
 // summing raw % tripped the breaker on one bad candle and froze signals all day.
 // Cache key is v2 so any stuck v1 (`circuit_breaker:`) key is abandoned on deploy.
-async function checkCircuitBreaker(profileId: string): Promise<{ triggered: boolean; reason?: string }> {
+async function checkCircuitBreaker(profileId: string, acctRiskPct: number): Promise<{ triggered: boolean; reason?: string }> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key || !profileId) return { triggered: false };
@@ -1385,17 +1394,22 @@ async function checkCircuitBreaker(profileId: string): Promise<{ triggered: bool
 
     if (!data || data.length === 0) return { triggered: false };
 
-    // Check 1: cumulative ACCOUNT loss ≤ -3% (R-multiple × tier risk)
+    // Check 1: cumulative tier-weighted R ≤ -3R（門檻故意不乘 acctRiskPct——
+    // 2026-07-31：門檻若隨風險%走，10% 設定下單筆 -1R 就等於 -10%，會直接
+    // 單筆熔斷整天，喪失「連續虧損才熔斷」的本意；R 空間下門檻恆定，出單
+    // 節奏不會因為使用者選了更高風險% 而被打斷。只有下面顯示用的真實帳戶%
+    // 才乘 acctRiskPct，不影響觸發邏輯）。
     const rows = data as { result: string; pnl_percent?: number | null; entry?: number | null; stop_loss?: number | null; tier?: string | null }[];
-    const dailyAcct = rows.reduce((s, t) => {
+    const dailyR = rows.reduce((s, t) => {
       if (t.pnl_percent == null || !t.entry || !t.stop_loss) return s;
       const stopPct = Math.abs(t.entry - t.stop_loss) / t.entry * 100;
       if (stopPct <= 0) return s;
       const rMultiple = t.pnl_percent / stopPct;          // e.g. -12% / 12% = -1R
-      return s + rMultiple * (t.tier === 'B' ? 0.5 : 1.0); // account % at suggested risk
+      return s + rMultiple * (t.tier === 'B' ? 0.5 : 1.0); // tier-weighted R
     }, 0);
-    if (dailyAcct <= -3) {
-      const reason = `熔斷：當日帳戶虧損 ${dailyAcct.toFixed(2)}%（≤ -3%）`;
+    if (dailyR <= -3) {
+      const realAcctPct = dailyR * acctRiskPct;
+      const reason = `熔斷：當日帳戶虧損 ${realAcctPct.toFixed(2)}%（風險加權 ${dailyR.toFixed(2)}R ≤ -3R）`;
       await cacheBreaker(r, profileId, reason, todayUTC);
       return { triggered: true, reason };
     }
@@ -1788,7 +1802,7 @@ export async function GET(req: NextRequest) {
   const adxStateChanges: Record<string, string> = {};
 
   // §4.4 Circuit breaker — check once per cron run
-  const breaker = profileId ? await checkCircuitBreaker(profileId) : { triggered: false };
+  const breaker = profileId ? await checkCircuitBreaker(profileId, acctRiskPct) : { triggered: false };
 
   // Phase 5: total open risk — check once per cron run; blocks all new signals when cap is hit
   const totalOpenRisk = profileId ? await checkTotalOpenRisk(profileId) : 0;
@@ -2040,7 +2054,7 @@ export async function GET(req: NextRequest) {
       else if (breaker.triggered)
         { skipKey = 'circuit_breaker'; skipReason = `熔斷 — ${breaker.reason}`; }
       else if (totalOpenRisk >= MAX_TOTAL_RISK_PCT)
-        { skipKey = 'total_risk_cap'; skipReason = `跳過 — 總持倉風險 ${totalOpenRisk.toFixed(1)}% 已達上限 ${MAX_TOTAL_RISK_PCT}%`; }
+        { skipKey = 'total_risk_cap'; skipReason = `跳過 — 持倉風險評分 ${totalOpenRisk.toFixed(1)} 已達上限 ${MAX_TOTAL_RISK_PCT}（與實際帳戶風險%無關，僅為持倉數量代理值）`; }
       else if (locked)
         { skipKey = 'locked';         skipReason = `跳過 — 持倉中 (${last?.direction})`; }
       else if (sameCandle)
