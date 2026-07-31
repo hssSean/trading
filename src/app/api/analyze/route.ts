@@ -1270,8 +1270,9 @@ async function checkEventFilter(): Promise<{ active: boolean; reason?: string }>
 // Spec 原文是「同向合計風險 ≤ 2%」，舊實作卻數「筆數 ≤ 2」——B 級輕倉
 // 只佔 0.5% 風險，按筆數算會把容量砍半（2026-07-19 漏斗數據：同向上限
 // 佔全部拒絕 11-23%，是第二大容量瓶頸）。改為：
-//   同向合計風險 + 新單風險 ≤ 2.0%；山寨桶（非BTC/ETH）同向 ≤ 1.0%。
-// A 級 = 1%、B 級 = 0.5%（tier 欄位缺失的舊資料保守當 1%）。
+//   同向合計風險 + 新單風險 ≤ acctRiskPct×2；山寨桶（非BTC/ETH）同向 ≤ acctRiskPct×1
+//（2026-07-31 起改跟 acctRiskPct 等比例縮放，理由見下方同一函式內的補充註解）。
+// A 級 = 1 倍、B 級 = 0.5 倍（tier 欄位缺失的舊資料保守當 1 倍）。
 //
 // 2026-07-26：山寨桶原本是 1 個名額全有全無（A 級單開一筆就佔滿 1.0%），
 // 桶內零分散——單一幣種特有風險（插針/下架）100% 曝露在那一筆上，且名額
@@ -1291,6 +1292,15 @@ async function checkEventFilter(): Promise<{ active: boolean; reason?: string }>
 // 已知近似：既有持倉是用「現在」的 acctRiskPct 反推，若使用者中途改過風險
 //設定，舊倉位開倉當下的真實風險可能跟現在算出來的不同——比照全站其餘倉位
 // 試算（也都是用「現在」acctRiskPct）的既有假設，不是這次修正引入的新問題。
+//
+// 2026-07-31：上面兩個帽子 2.0%／1.0% 當時是寫死的絕對值，隱含假設
+// acctRiskPct 大約落在 1%（riskPctPerTrade 選項只到 3% 時還撐得住，3%
+// 山寨滿倉 0.99%×3≈2.97% 已經逼近上限）。新增 10% 選項後，單一主流幣新單
+// 風險貢獻本身就是 acctRiskPct×1.0=10%，尚未疊加任何既有倉位就已經超過
+// 固定 2% 上限——導致同向上限攔截「已佔用 0.00%」的單，等於完全擋死。
+// 改成兩個帽子都跟 acctRiskPct 等比例縮放（2 倍／1 倍），語意維持「同向最多
+// 疊多少筆」而不是「帳戶風險絕對值上限」，acctRiskPct=1 時數字與舊版完全
+// 相同，數值不會因為使用者選了更高風險% 而變相被腰斬。
 async function checkSameDirectionRisk(
   profileId: string, direction: string, symbol: string, newTier: string | null | undefined,
   acctRiskPct: number,
@@ -1321,18 +1331,20 @@ async function checkSameDirectionRisk(
 
     const isAltcoin = isAlt(symbol);
     const newRisk = riskContribution(symbol, newTier);
+    const totalCap = acctRiskPct * 2.0;
+    const altCap   = acctRiskPct * 1.0;
 
-    if (totalRisk + newRisk > 2.0) {
+    if (totalRisk + newRisk > totalCap) {
       return {
         block: true,
-        reason: `同向風險上限：${direction} 已占用 ${totalRisk.toFixed(2)}%，新單 ${newRisk.toFixed(2)}% 會超過 2%`,
+        reason: `同向風險上限：${direction} 已占用 ${totalRisk.toFixed(2)}%，新單 ${newRisk.toFixed(2)}% 會超過 ${totalCap.toFixed(2)}%`,
       };
     }
 
-    if (isAltcoin && altRisk + newRisk > 1.0) {
+    if (isAltcoin && altRisk + newRisk > altCap) {
       return {
         block: true,
-        reason: `山寨同向風險上限：${direction} 山寨桶已占用 ${altRisk.toFixed(2)}%，新單 ${newRisk.toFixed(2)}% 會超過 1%`,
+        reason: `山寨同向風險上限：${direction} 山寨桶已占用 ${altRisk.toFixed(2)}%，新單 ${newRisk.toFixed(2)}% 會超過 ${altCap.toFixed(2)}%`,
       };
     }
     return { block: false };
