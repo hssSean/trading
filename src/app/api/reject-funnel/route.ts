@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { aggregateTimeStopShadows, type TimeStopShadow } from '@/lib/timeStopShadow';
+import { aggregateCancelShadows, type CancelShadow } from '@/lib/cancelShadow';
 
 export const dynamic = 'force-dynamic';
 
@@ -84,10 +85,11 @@ export async function GET(req: NextRequest) {
 
   try {
     const redis = Redis.fromEnv();
-    const [raw, rawShadows, rawTimeStopShadows] = await Promise.all([
+    const [raw, rawShadows, rawTimeStopShadows, rawCancelShadows] = await Promise.all([
       redis.lrange('reject_funnel', 0, -1),
       redis.hgetall<Record<string, unknown>>('shadow_trades'),
       redis.hgetall<Record<string, unknown>>('time_stop_shadows'),
+      redis.hgetall<Record<string, unknown>>('cancel_shadows'),
     ]);
     const entries: FunnelEntry[] = raw
       .map(r => { try { return typeof r === 'string' ? JSON.parse(r) : r; } catch { return null; } })
@@ -104,6 +106,13 @@ export async function GET(req: NextRequest) {
       .map(v => { try { return (typeof v === 'string' ? JSON.parse(v) : v) as TimeStopShadow; } catch { return null; } })
       .filter((s): s is TimeStopShadow => !!s && !!s.trigger);
     const timeStopStats = aggregateTimeStopShadows(timeStopShadows);
+
+    // docs/TODO.md 2026-08-01：策略A的回調進場在強趨勢盤大量「推薦單失效」，
+    // 模擬「如果當下用訊號價市價進場」的淨R，回答該不該放寬近市價進場例外。
+    const cancelShadows: CancelShadow[] = Object.values(rawCancelShadows ?? {})
+      .map(v => { try { return (typeof v === 'string' ? JSON.parse(v) : v) as CancelShadow; } catch { return null; } })
+      .filter((s): s is CancelShadow => !!s && !!s.trigger);
+    const cancelStats = aggregateCancelShadows(cancelShadows);
 
     const total = entries.length;
     const sent  = entries.filter(e => e.rejectedAt === null).length;
@@ -134,6 +143,7 @@ export async function GET(req: NextRequest) {
       ok: true, days, total, sent, rejected, reasons, topSymbols,
       shadowStats,
       timeStopStats,
+      cancelStats,
       recent: entries.slice(0, 20),
     });
   } catch (e) {

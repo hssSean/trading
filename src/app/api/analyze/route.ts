@@ -10,6 +10,7 @@ import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae } fro
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
+import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib/cancelShadow';
 
 export const maxDuration = 60;
 
@@ -302,6 +303,9 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   // 時間止損影子模擬新開的追蹤（docs/TODO.md P1 #1）——Phase 2 關單時累積，
   // 函式結尾一次 flush 進 Redis。
   const timeStopShadowStarts: TimeStopShadow[] = [];
+  // 推薦單失效影子模擬新開的追蹤（docs/TODO.md 2026-08-01 策略檢討）——
+  // Phase 1 掛單被取消時累積，函式結尾一次 flush 進 Redis。
+  const cancelShadowStarts: CancelShadow[] = [];
 
   // ── Duplicate cleanup: a symbol should have at most ONE open trade ──────────
   // A stale WAITING limit order alongside a filled ACTIVE/TP1 trade for the same
@@ -539,6 +543,23 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         if (cancelClass === 'opportunity_expired') {
           const holdSec = BIAS_HOLD_BARS * tfBarMinutes(trade.timeframe as string | null) * 60;
           await setBiasHold(trade.symbol as string, trade.direction as string, holdSec);
+        }
+        // 推薦單失效影子模擬（docs/TODO.md 2026-08-01）：模擬「當下用訊號價
+        // sp 市價進場」會怎樣，回答「等回調的設計是不是白白錯過這類單」。
+        // 沒有 sp（舊資料缺 signal_price 欄位）就跳過——沒有假設進場價可模擬。
+        if (sp > 0 && cancelReasonKey) {
+          cancelShadowStarts.push(startCancelShadow({
+            id:                trade.id as string,
+            symbol:            trade.symbol as string,
+            direction:         trade.direction as 'LONG' | 'SHORT',
+            timeframe:         trade.timeframe as string,
+            hypotheticalEntry: sp,
+            stopLoss:          slPx,
+            tp1:               trade.tp1 as number,
+            tp2:               trade.tp2 as number,
+            trigger:           cancelReasonKey,
+            cancelledAt:       now,
+          }));
         }
         // Notify only after the write is confirmed to have landed — prevents repeat if it had failed.
         // cancelReason/cancelBody were set during the chronological scan above.
@@ -1024,6 +1045,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   }
 
   await processTimeStopShadows(timeStopShadowStarts);
+  await processCancelShadows(cancelShadowStarts);
 
   if (rLock) { try { await rLock.del('monitor-run-lock'); } catch { /* best-effort */ } }
   return { monitored: active.length + waiting.length, closed, filled, cancelled };
@@ -1092,6 +1114,68 @@ async function processTimeStopShadows(newStarts: TimeStopShadow[]): Promise<void
     await r.expire('time_stop_shadows', 30 * 24 * 3600);
   } catch (e) {
     console.error('[time-stop-shadow] simulation failed:', String(e).slice(0, 200));
+  }
+}
+
+// 推薦單失效影子模擬的 Redis 讀寫（docs/TODO.md 2026-08-01）。跟
+// processTimeStopShadows 同一種模式（合併新單、每輪限量抓K線推進、修剪過舊
+// 的已結束項目），獨立的 Redis key 跟節流 slot，不跟時間止損互搶額度。
+async function processCancelShadows(newStarts: CancelShadow[]): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    const raw = (await r.hgetall<Record<string, unknown>>('cancel_shadows')) ?? {};
+    const shadows = new Map<string, CancelShadow>();
+    for (const [id, v] of Object.entries(raw)) {
+      try {
+        const s = (typeof v === 'string' ? JSON.parse(v) : v) as CancelShadow;
+        if (s && s.symbol && s.status) shadows.set(id, s);
+      } catch { /* drop malformed entry */ }
+    }
+
+    const writes: Record<string, string> = {};
+    for (const s of newStarts) {
+      if (shadows.has(s.id)) continue; // already tracked (shouldn't happen, guard anyway)
+      shadows.set(s.id, s);
+      writes[s.id] = JSON.stringify(s);
+    }
+
+    const now = Date.now();
+
+    if (await claimPeriodicSlot('cancel-shadow-advance', SHADOW_ADVANCE_PERIOD_SEC)) {
+      const live = Array.from(shadows.values()).filter(s => s.status === 'live');
+      const bySymbol = new Map<string, CancelShadow[]>();
+      live.forEach(s => {
+        const arr = bySymbol.get(s.symbol) ?? [];
+        arr.push(s);
+        bySymbol.set(s.symbol, arr);
+      });
+
+      let fetches = 0;
+      for (const [symbol, group] of Array.from(bySymbol.entries())) {
+        if (fetches >= 8) break; // rest advance next slot
+        fetches++;
+        let candles: Candle[] = [];
+        try { candles = await fetchCandles(symbol, '1h', 168, 3); } catch { continue; }
+        for (const s of group) {
+          const advanced = advanceCancelShadow(s, candles, now);
+          shadows.set(s.id, advanced);
+          writes[s.id] = JSON.stringify(advanced);
+        }
+      }
+    }
+
+    // Prune done shadows older than 30 days — same retention as time-stop shadows.
+    const toDelete: string[] = [];
+    for (const [id, s] of Array.from(shadows.entries())) {
+      if (s.status === 'done' && now - (s.closedAt ?? s.cancelledAt) > 30 * 24 * 3600 * 1000) toDelete.push(id);
+    }
+
+    if (Object.keys(writes).length > 0) await r.hset('cancel_shadows', writes);
+    if (toDelete.length > 0) await r.hdel('cancel_shadows', ...toDelete);
+    await r.expire('cancel_shadows', 30 * 24 * 3600);
+  } catch (e) {
+    console.error('[cancel-shadow] simulation failed:', String(e).slice(0, 200));
   }
 }
 

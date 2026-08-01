@@ -65,6 +65,16 @@ interface TimeStopStat {
   realNetR: number;  // 真實時間止損出場的淨R
 }
 
+interface CancelStat {
+  win: number;
+  loss: number;
+  stillOpen: number;
+  live: number;
+  netR: number; // 「如果當下市價進場」的模擬淨R——沒有真實R基準可比，這數字本身就是答案
+}
+
+type CancelTriggerKey = 'cancel_thesis_invalidated' | 'cancel_ran_away' | 'cancel_tp1_direct' | 'cancel_expired';
+
 interface FunnelStats {
   total: number;
   sent: number;
@@ -79,11 +89,20 @@ interface FunnelStats {
   // docs/TODO.md P1 #1：時間止損（8根K線停滯/24-168h到期）強制關單後，
   // 繼續模擬到真正 TP/SL 的淨R vs 真實出場淨R。
   timeStopStats?: Partial<Record<'stall' | 'expiry', TimeStopStat>>;
+  // docs/TODO.md 2026-08-01：推薦單失效（掛單未成交）模擬「當下市價進場」的淨R。
+  cancelStats?: Partial<Record<CancelTriggerKey, CancelStat>>;
 }
 
 const TIME_STOP_LABEL: Record<string, string> = {
   stall:  '停滯止損（8根K線）',
   expiry: '到期平倉（24-168h）',
+};
+
+const CANCEL_LABEL: Record<CancelTriggerKey, string> = {
+  cancel_thesis_invalidated: '論點失效',
+  cancel_ran_away:           '行情走遠',
+  cancel_tp1_direct:         '直達TP1',
+  cancel_expired:            '逾期未成交',
 };
 
 const BTC_REGIME_LABEL: Record<string, { text: string; cls: string }> = {
@@ -276,6 +295,29 @@ export function ScanStatusPanel() {
                     {TIME_STOP_LABEL[trigger]}：真實淨 {s.realNetR >= 0 ? '+' : ''}{s.realNetR}R
                     {decided > 0 && (
                       <> · 若不砍模擬淨 {s.netR >= 0 ? '+' : ''}{s.netR}R（賺{s.win} 虧{s.loss}{s.stillOpen > 0 ? ` 未平${s.stillOpen}` : ''}）</>
+                    )}
+                    {s.live > 0 && <span className="text-text-m"> · {s.live} 筆追蹤中</span>}
+                  </p>
+                );
+              })}
+            </div>
+          )}
+          {/* docs/TODO.md 2026-08-01：推薦單失效（掛單未成交）模擬「當下市價
+              進場」的淨R——沒有真實R基準可比（單從沒成交），netR > 0 代表
+              白白錯過，該考慮放寬近市價進場；netR ≤ 0 代表等回調是對的。
+              樣本不足前只陳述數字，不下判詞。 */}
+          {funnel?.cancelStats && (Object.keys(funnel.cancelStats).length > 0) && (
+            <div className="mt-2.5 pt-2 border-t border-white/[0.06]">
+              <p className="tlabel mb-1">推薦單失效影子模擬</p>
+              {(['cancel_tp1_direct', 'cancel_ran_away', 'cancel_expired', 'cancel_thesis_invalidated'] as const).map(trigger => {
+                const s = funnel.cancelStats?.[trigger];
+                if (!s) return null;
+                const decided = s.win + s.loss + s.stillOpen;
+                return (
+                  <p key={trigger} className="text-[10px] leading-4 mb-0.5 num text-text-m">
+                    {CANCEL_LABEL[trigger]}
+                    {decided > 0 && (
+                      <> · 若市價進場模擬淨 {s.netR >= 0 ? '+' : ''}{s.netR}R（賺{s.win} 虧{s.loss}{s.stillOpen > 0 ? ` 未平${s.stillOpen}` : ''}）</>
                     )}
                     {s.live > 0 && <span className="text-text-m"> · {s.live} 筆追蹤中</span>}
                   </p>
