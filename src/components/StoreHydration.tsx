@@ -702,7 +702,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
   const [authReady, setAuthReady] = useState(false);
   const [userId, setLocalUserId]  = useState<string | null>(null);
   const saveTimerRef              = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const syncDoneRef               = useRef(false);
+  const initialLoadRef            = useRef(false);
   const router   = useRouter();
   const pathname = usePathname();
 
@@ -735,16 +735,38 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     if (!userId && pathname !== '/login') router.replace('/login');
   }, [authReady, userId, pathname, router]);
 
-  // ── Load from Supabase after auth ────────────────────────────────
+  // ── Initial load from Supabase after auth ─────────────────────────
+  // Ref-guarded on purpose: this is a one-shot "pull the world" on first login,
+  // not something that should re-fire on every session hiccup.
   useEffect(() => {
-    if (!userId || !hasHydrated || syncDoneRef.current) return;
-    syncDoneRef.current = true;
+    if (!userId || !hasHydrated || initialLoadRef.current) return;
+    initialLoadRef.current = true;
 
     loadFromSupabase(userId)
       .then(() => pickupServerSignals())  // pick up any Redis-queued signals missed on other pages
       .then(() => retryPendingDeletes(userId))
       .then(() => retryPendingCoinDeletes(userId))
       .catch(() => {});
+  }, [userId, hasHydrated]);
+
+  // ── Background sync listeners (save/periodic-sync/visibility) ────
+  // 2026-08-03：故意「不」依賴 userId（跟上面那個 effect 不同）——這裡曾經
+  // 跟初始載入共用同一個 effect，deps 是 [userId, hasHydrated] 且用 syncDoneRef
+  // 閂鎖只讓它們註冊一次。iOS standalone PWA 從背景恢復時，supabase-js 的
+  // token 自動刷新偶爾會有一瞬間 session 空窗（onAuthStateChange 先收到
+  // null，稍後才收到恢復的 uid），userId 因此短暫變 null 又變回來：
+  //   1. userId → null：這裡的 cleanup 被觸發，四個監聽器全部解除
+  //   2. userId 恢復：effect body 重跑，但閂鎖已經是 true，直接 return
+  //      —— 監聽器永遠沒有重新註冊
+  // 結果是定期同步、回前景同步、自動存檔永久死亡，只剩手動「同步紀錄」
+  // 按鈕還能觸發 fullSyncFromSupabase（待修改事項.md 2026-08-03 實錘：
+  // 分類按鈕要重整才有反應、掛單卡在「已達進場 等待確認」都是這裡）。
+  // 修法：這個 effect 只依賴 hasHydrated（只會 false→true 一次，見
+  // useStore.ts 的 onRehydrateStorage，永不重置）——session 空窗不再讓監聽器
+  // 被拆掉。每個回呼內部本來就即時讀 useStore.getState().userId 決定要不要
+  // 動作，不靠 closure 捕捉的值，所以拿掉 userId 依賴不影響行為。
+  useEffect(() => {
+    if (!hasHydrated) return;
 
     // Auto-save on state changes (debounced 4s)
     const unsub = useStore.subscribe(() => {
@@ -797,7 +819,7 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
       document.removeEventListener('visibilitychange', handleVisibility);
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [userId, hasHydrated]);
+  }, [hasHydrated]);
 
   // Show spinner during init
   if (!mounted || !hasHydrated) {

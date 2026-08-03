@@ -256,7 +256,13 @@ const TradeRow = memo(function TradeRow({
           {livePx > 0 ? (
             <>
               <span className={distToEntry > 0 ? 'text-[#E6AF5A]' : 'text-accent'}>
-                {distToEntry > 0 ? `距進場位 還差 ${distToEntry.toFixed(2)}%` : '已達進場 等待確認'}
+                {distToEntry > 0
+                  ? `距進場位 還差 ${distToEntry.toFixed(2)}%`
+                  // 2026-08-03：伺服器用 1h K 線 + 時間錨判定成交（route.ts），觸價
+                  // 到伺服器真正確認之間最長可能有近 1 根 K 線的正常延遲（刻意設計，
+                  // 不是卡住）——顯示已等多久，讓使用者分得出「正常等待中」vs「同步
+                  // 真的壞了」，不用再靠猜的（docs/BUG-2026-08-03 §3.2-A）。
+                  : `已觸價 · 等待伺服器確認成交 · 已等 ${fmtDuration(now - trade.openedAt)}`}
               </span>
               <span className="text-text-s ml-2 num">現價 {fmtPrice(livePx)}</span>
             </>

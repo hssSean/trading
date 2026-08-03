@@ -1,6 +1,6 @@
 # 待辦清單
 
-> 最後更新：2026-08-01
+> 最後更新：2026-08-03
 > 排序依「該不該現在做」，不是依技術難度。
 > 標 🔬 的是**樣本不足**，動了也分不出是改對還是雜訊——刻意不做。
 
@@ -27,7 +27,60 @@
 回調，兩者互相矛盾。當日 10 筆候選全部「推薦單失效」，7/29 也有 60%
 （3/5）失效，非單一意外。已建「推薦單失效影子模擬」量測「如果當下市價
 進場淨R會怎樣」，跑數據前不動進場邏輯本身；
+8/3 修掉一個 iOS PWA 才會踩到的同步死亡 bug：`StoreHydration.tsx` 用單一
+effect + `syncDoneRef` 閂鎖同時管「初次載入」跟「背景監聽器註冊」，deps 是
+`[userId, hasHydrated]`——iOS standalone PWA 從背景恢復時 token 刷新偶爾有
+一瞬間 session 空窗，userId 短暫變 null 又變回來，cleanup 被觸發解除全部
+監聽器，閂鎖卻擋住重新註冊，定期同步/回前景同步/自動存檔永久死亡，只剩
+手動「同步紀錄」按鈕還活著（分類按鈕要重整才有反應、掛單卡在「已達進場
+等待確認」都是這裡）。拆成兩個 effect：初次載入保留 ref 守衛，監聽器那個
+改成只依賴 `hasHydrated`（只會 false→true 一次，不受 session 空窗影響）；
+順便把「已達進場 等待確認」文案改顯示已等多久，讓伺服器判定成交本來就有
+的最長約 1 小時延遲不再被誤讀成當機；
 下一個沒被擋住的是自動化交易的「執行引擎放哪」決策點。
+
+---
+
+## 已完成（2026-08-03）
+
+**修 iOS PWA 同步永久死亡 bug**（完整根因分析：`docs/BUG-2026-08-03-同步失效與掛單狀態卡住.md`）：
+
+使用者回報兩個症狀：(1) 手機分類按鈕要先按「同步紀錄」、把 App 完全關掉重開
+才正常；(2) 明明已經打到進場價，紀錄仍顯示「已達進場 等待確認」。查證後
+是同一個根因——`StoreHydration.tsx` 原本用一個 effect（`[userId, hasHydrated]`
+deps）同時管「初次從 Supabase 載入」跟「四個背景監聽器（自動存檔/10分鐘
+定期存檔/2分鐘定期同步/回前景同步）的註冊」，用 `syncDoneRef` 閂鎖只讓它們
+跑一次。iOS standalone PWA 從背景恢復時，supabase-js 的 token 自動刷新偶爾
+會有一瞬間 session 空窗（`onAuthStateChange` 先收到 null、稍後才收到恢復的
+uid），userId 因此短暫變 null 又變回來：cleanup 在 userId 變 null 時被觸發，
+四個監聽器全部解除；userId 恢復時 effect body 重跑，但閂鎖已是 true，直接
+return——監聽器永遠沒有重新註冊。只剩手動「同步紀錄」按鈕（直接呼叫
+`fullSyncFromSupabase`，不經過這個 effect）還活著，這正好對上使用者的
+操作流程。決定性證據：`PriceFeed`（同一個 root layout、同樣用
+`visibilitychange`）的即時價格是新的，證明事件確實有觸發，只是
+StoreHydration 那組監聽器已經不在了——排除法排除了「iOS 事件不可靠」
+的假設。
+
+修法：`src/components/StoreHydration.tsx` 拆成兩個 effect——初次載入保留
+`initialLoadRef` 守衛（一次性行為，deps 不變）；監聽器那個改成只依賴
+`hasHydrated`（`useStore.ts` 的 `onRehydrateStorage` 只會 false→true 一次，
+永不重置），不再依賴 `userId`——session 空窗不再讓監聽器被拆掉。每個回呼
+內部本來就即時讀 `useStore.getState().userId` 決定要不要動作，不靠 closure
+捕捉的值，拿掉依賴不影響行為。
+
+順便修 `src/app/trades/page.tsx`：「已達進場 等待確認」改顯示
+「已觸價 · 等待伺服器確認成交 · 已等 X」——伺服器判定成交用 1h K 線 +
+時間錨（route.ts，刻意設計，不能改），觸價到確認之間本來就可能有近 1 根
+K 線的正常延遲，顯示已等多久讓使用者分得出「正常等待」vs「真的卡住」。
+
+已排除：Service Worker 快取（`sw.js` 的 fetch handler 是空 passthrough，
+無快取邏輯）；Webhook Secret 錯誤（使用者確認沒看到警告橫幅）。
+
+驗證：tsc 0 錯、vitest 303 passed、next build 0 錯；本機預覽（真實
+Supabase session）首頁與登入頁渲染正常、無 console 錯誤。**這個 bug 依賴
+iOS 背景凍結/解凍時序，自動化工具無法忠實重現**——需要使用者實機驗收：
+切到別的 App 放置 10 分鐘以上，切回後不按同步、不重開，直接點分類按鈕，
+應立刻正確反映最新狀態（驗收細節見 BUG-2026-08-03 §6）。
 
 ---
 
