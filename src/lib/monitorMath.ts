@@ -108,6 +108,29 @@ export function updateMfeMae(
   return { mfePrice, maePrice, changed: mfePrice !== priorMfe || maePrice !== priorMae };
 }
 
+// 2026-08-04（實錘：移動止損從未生效，見 docs/ANALYSIS-2026-08-04）：ATR 必須
+// 從一個「完整、固定長度」的 K 線窗口算，不能從 route.ts Phase 2 那個增量抓取
+// 的 `candles`（每輪只帶 last_monitored_at 之後的新K線，通常只有 1-2 根）算——
+// 後者會讓 `candles.length >= 15` 恆為 false，`atr1h` 恆為 0，移動止損永遠不會
+// 被初始化，TP1 後只能一路等到原始止損才出場。呼叫端改用 fetchCandlesCached
+// 額外抓一份完整窗口餵這個函式，不能跟 evalCandles 共用同一份增量陣列。
+//
+// 簡單 TR 均值（非 Wilder 遞迴），刻意跟修 bug 前 route.ts 原本的公式一致——
+// 這次只修「資料來源」，不動「ATR 算法本身」，避免一次動兩個變數。
+export function calcSimpleAtr(candles: WalkCandle[], period = 14): number {
+  if (candles.length < period + 1) return 0;
+  const n = Math.min(period, candles.length - 1);
+  let trSum = 0;
+  for (let i = candles.length - n; i < candles.length; i++) {
+    trSum += Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low  - candles[i - 1].close),
+    );
+  }
+  return trSum / n;
+}
+
 export function walkTpSl(
   candles: WalkCandle[],
   afterMs: number,

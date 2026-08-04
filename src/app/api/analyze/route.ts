@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
@@ -625,18 +625,28 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
 
     // Simple 14-period ATR from 1H candles — used to set/ratchet trailing stop.
     // Only computed for Strategy A trades; Strategy B uses fixed TP=BB middle (no trailing).
+    //
+    // 2026-08-04 P0 fix（docs/ANALYSIS-2026-08-04-移動止損失效與策略數據檢討.md）：
+    // MUST come from a separately-fetched, full-length window — NOT from `candles`
+    // above. `candles` is fetched incrementally (only bars since last_monitored_at,
+    // this loop runs every 5 min so it's usually 1-2 bars), so the old
+    // `candles.length >= 15` guard was silently false on every single scan and
+    // atr1h was permanently 0. Trailing stop was therefore NEVER initialized —
+    // TP1-hit trades rode all the way back down to the original stop loss instead
+    // (confirmed live: zero "🛡 移動止損上移" pushes ever sent, current_stop always
+    // NULL). fetchCandlesCached keeps its own full window and only re-fetches the
+    // tail each call, so this doesn't cost a full 20-bar transfer every scan.
     let atr1h = 0;
-    if (tradeStrategy === 'A' && candles.length >= 15) {
-      const n = Math.min(14, candles.length - 1);
-      let trSum = 0;
-      for (let i = candles.length - n; i < candles.length; i++) {
-        trSum += Math.max(
-          candles[i].high - candles[i].low,
-          Math.abs(candles[i].high - candles[i - 1].close),
-          Math.abs(candles[i].low  - candles[i - 1].close),
-        );
+    if (tradeStrategy === 'A') {
+      try {
+        const atrCandles = await fetchCandlesCached(trade.symbol as string, '1h', 20);
+        atr1h = calcSimpleAtr(atrCandles, 14);
+        if (atr1h === 0) {
+          console.error(`[monitor] atr1h still 0 for ${trade.id} (${trade.symbol}) after fetching ${atrCandles.length} 1h candles — trailing stop cannot initialize this scan`);
+        }
+      } catch (e) {
+        console.error(`[monitor] atr1h fetch failed ${trade.id} (${trade.symbol}):`, String(e).slice(0, 150));
       }
-      atr1h = trSum / n;
     }
 
     // Pre-loop: initialize trailing stop for existing tp1_hit trades that pre-date the columns.

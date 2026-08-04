@@ -1,6 +1,6 @@
 # 待辦清單
 
-> 最後更新：2026-08-03
+> 最後更新：2026-08-04
 > 排序依「該不該現在做」，不是依技術難度。
 > 標 🔬 的是**樣本不足**，動了也分不出是改對還是雜訊——刻意不做。
 
@@ -37,7 +37,77 @@ effect + `syncDoneRef` 閂鎖同時管「初次載入」跟「背景監聽器註
 改成只依賴 `hasHydrated`（只會 false→true 一次，不受 session 空窗影響）；
 順便把「已達進場 等待確認」文案改顯示已等多久，讓伺服器判定成交本來就有
 的最長約 1 小時延遲不再被誤讀成當機；
+8/4 修掉一個嚴重 P0 bug：移動止損從未生效過。`atr1h` 是從 Phase 2 增量抓的
+`candles`（每輪只帶新K線，通常 1-2 根）算的，`candles.length >= 15` 因此
+恆為 false，`atr1h` 恆為 0——移動止損永遠不會初始化，TP1 後只能一路等到
+原始止損才出場（100+ 筆樣本查出：從沒收過移動止損推播、卡片止損位永遠
+顯示進場價、MFE 3.08R 只拿到 0.32R）。改用 `fetchCandlesCached` 額外抓
+一份完整窗口算 ATR，抽成純函數 `calcSimpleAtr` + 6 個單元測試；同一輪
+順便修 trades 頁兩個分類 bug：`filtered` 的 `base.sort()` 會就地改動被
+`useMemo` 快取的 pending/waiting/closed 陣列（改成先複製），「全部」chip
+數字漏算 unconfirmed（同步中）的單；CSV 匯出補上真正的 `strategy` 欄位
+（原本「策略」欄其實是 tier，跟移動止損的開關條件是不同東西，診斷不了
+這類 bug）；
 下一個沒被擋住的是自動化交易的「執行引擎放哪」決策點。
+
+---
+
+## 已完成（2026-08-04）
+
+**修移動止損從未生效的 P0 bug**（完整根因分析：`docs/ANALYSIS-2026-08-04-移動止損失效與策略數據檢討.md`）：
+
+使用者用 CSV（107 筆已平倉）＋近 3 天漏斗數據做策略檢討時，同時回報一個
+具體症狀：「碰到 TP1 會移動止損，但等的過程中碰到移動後的止損卻不會停止，
+要等到碰到原始止損才會停止」。查證後發現比症狀描述更嚴重——移動止損機制
+**從未被建立過**。
+
+根因：`route.ts` Phase 2 監控迴圈的 `atr1h`（用來初始化與棘輪移動止損）
+是從 `candles` 算的，而 `candles` 是**增量抓取**（`startTime` 帶
+`last_monitored_at`，每輪只帶上一次掃描之後的新K線）。外部 cron 每 5 分鐘
+跑一次，`candles.length` 因此恆約為 2，舊版 `candles.length >= 15` 的守衛
+**永遠是 false**，`atr1h` 永遠是 0——移動止損的初始化、補種、棘輪三處全部
+被跳過，`trailingStop` 恆為 0，TP1 後只能落到原始止損才出場。`current_stop`
+從未被寫入 → 卡片走 fallback 顯示進場價，造成「有在保護」的錯覺（實際沒有）。
+
+根因由兩個從程式碼推導、可否證的行為預測經使用者實機確認：(1) 從未收過
+「🛡 移動止損上移」推播（該推播需要 `atr1h > 0` 才可能觸發）；(2) 卡片止損
+位永遠顯示進場價、鎖定 R 永遠 `+0.0R`（`current_stop` 恆為 NULL 時的 fallback
+行為）。加上 CSV 三條獨立資料佐證（ETHUSDT 出場價完全等於原始止損、
+HYPEUSDT MFE 3.08R 只拿到 0.32R、107 筆裡「移動止損出場」出現 0 次），
+根因確認無誤。
+
+修法：`atr1h` 改用 `fetchCandlesCached(symbol, '1h', 20)` 額外抓一份完整
+窗口（跟既有 4H regime 快取同一套機制，只補尾巴，不會每輪整包重抓），只在
+`tradeStrategy === 'A'` 時才抓，Strategy B（無移動止損）不受影響。ATR 計算
+本身抽成純函數 `calcSimpleAtr`（`src/lib/monitorMath.ts`）+ 6 個單元測試，
+公式刻意跟修 bug 前一致（簡單 TR 均值，非 Wilder 遞迴）——這次只修資料
+來源，不動算法本身，避免一次動兩個變數。`atr1h` 算出來仍是 0 時記錄
+error log，避免這類靜默失效再度潛伏數週不被發現。
+
+同一輪順手修 trades 頁兩個獨立的分類 bug（跟移動止損無關，是查移動止損
+時順帶發現的）：(1) `filtered` 的 `useMemo` 裡，`filter` 是 PENDING/WAITING/
+CLOSED 時直接拿 `pending`/`waiting`/`closed` 這幾個 memo 陣列的參考，後面
+`base.sort()` 是就地排序，會直接改動這些陣列本身——陣列 identity 沒變，
+依賴它們的其他 memo（如 `liveCounts`）不會重算，卻用到被改過順序的資料；
+改成先複製一份再排序。(2)「全部」chip 顯示的數字是
+`waiting+pending+closed`，但 `filter==='ALL'` 實際列出的內容還包含
+`unconfirmed`（同步中），有同步中的單時數字會比實際列出的筆數少；補上
+`unconfirmed.length`。
+
+CSV 匯出補上真正的 `strategy` 欄位（新增「進場策略」欄）——原本「策略」欄
+其實是 `${tier}級·${timeframe}`（改標成「級別」避免混淆），跟真正控制
+移動止損開關的 `strategy`（A/B/C）欄位完全是兩件事，之前的 CSV 診斷不了
+這類問題。
+
+**尚待使用者確認**：截圖裡「按持倉卻列出等待進場的單」那個症狀，用現行
+程式碼推導不出成因（`waiting`/`pending` 嚴格互斥、全專案沒有就地改動
+`trade.status` 的地方、截圖數字本身自洽於 `waiting.length===0`）——最可能
+是瀏覽器在跑舊 bundle，已請使用者比對設定頁的 build SHA 是否為最新
+（詳見 ANALYSIS MD §5）。
+
+驗證：tsc 0 錯、vitest 309 passed（新增 6 個）、next build 0 錯；本機預覽
+無 console 錯誤。移動止損的實際效果（TP1 後鎖住多少 R）需要新持倉走完
+TP1 才看得到，舊單無回溯。
 
 ---
 
