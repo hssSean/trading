@@ -818,9 +818,13 @@ export default function TradesPage() {
         ? (livePx - t.entry) / t.entry * 100
         : (t.entry - livePx) / t.entry * 100;
     };
-    let base = filter === 'PENDING'   ? pending
-             : filter === 'WAITING'   ? waiting
-             : filter === 'CLOSED'    ? closed
+    // 2026-08-04：這幾支陣列都是 useMemo 快取值——PENDING/WAITING/CLOSED 三個分支
+    // 之前直接拿參考（不是複製），下面的 base.sort() 是就地排序，會直接改動
+    // pending/waiting/closed 本身。陣列 identity 沒變，依賴它們的其他 useMemo
+    // （如 liveCounts）因此不會重算，卻拿到被改過順序的資料——一定要先複製一份。
+    let base = filter === 'PENDING'   ? [...pending]
+             : filter === 'WAITING'   ? [...waiting]
+             : filter === 'CLOSED'    ? [...closed]
              : filter === 'PROFIT'    ? pending.filter(t => (calcLivePnl(t) ?? -1) > 0)
              : filter === 'LOSS_LIVE' ? pending.filter(t => (calcLivePnl(t) ?? 1) < 0)
              : [...waiting, ...pending, ...unconfirmed, ...closed];
@@ -928,6 +932,7 @@ export default function TradesPage() {
             mfeR,
             maeR,
             `${tier}級·${r.timeframe}`,
+            r.strategy ?? '',
             r.regime ? (REGIME_LABEL[r.regime as string] ?? r.regime) : '',
             r.confidence ?? '',
             r.funding_rate != null ? ((r.funding_rate as number) * 100).toFixed(4) : '',
@@ -942,7 +947,7 @@ export default function TradesPage() {
         'ID', '幣種', '方向', '週期', '強度', '得分',
         '進場價', '止損', 'TP1', 'TP2', '開倉時間', '平倉時間',
         '結果', '出場原因', '出場價', '損益%', 'R倍數', '帳戶R', 'MFE(R)', 'MAE(R)',
-        '策略', '盤勢regime', '信心分數confidence', '資金費率%funding',
+        '級別', '進場策略', '盤勢regime', '信心分數confidence', '資金費率%funding',
         '建議風險%', '建議槓桿',
         '分析依據', '個人備註',
       ].join(',');
@@ -1332,7 +1337,11 @@ export default function TradesPage() {
         {/* Row 1: 狀態 filter */}
         <div className="flex gap-1.5 mb-2 flex-wrap">
           {([
-            ['ALL',       `全部 (${waiting.length + pending.length + closed.length})`],
+            // 2026-08-04：全部 chip 數字要跟 filtered 實際列出的內容一致——
+            // filter==='ALL' 的 base 是 [...waiting, ...pending, ...unconfirmed, ...closed]
+            // （見上面 filtered 的 useMemo），漏算 unconfirmed 會讓有同步中的單時
+            // 這個數字小於實際列出的筆數。
+            ['ALL',       `全部 (${waiting.length + pending.length + unconfirmed.length + closed.length})`],
             ['PENDING',   `持倉 (${pending.length})`],
             ['WAITING',   waiting.length > 0 ? `等待進場 (${waiting.length})` : '等待進場'],
             ['CLOSED',    `結束 (${closed.length})`],
