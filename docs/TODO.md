@@ -59,6 +59,18 @@ effect + `syncDoneRef` 閂鎖同時管「初次載入」跟「背景監聽器註
 「總風險上限」擋掉 64%——近 3 天 1500 候選只出 5 單。放寬品質濾網解不了
 （影子淨R 除以樣本數後全在成本線），**要出更多單得先把 CPU 省出來換幣種**。
 詳見 `docs/ANALYSIS-2026-08-04B-CPU曲線與容量瓶頸.md`；
+同一輪動手做了 B2（訊號計算 memoize，`src/lib/signalCache.ts`）與 B4
+（client 成交備援窗口 4h→1h）。B2 比照 regimeCache 的 memoize 哲學，
+per-(symbol, timeframe) 快取 `generateSignals()` 完整結果，命中判斷同時比對
+K線收盤時間、htfBias、regime 三者（不只K線——regime 抓取失敗時的預設值
+不受K線邊界巢狀保護，必須明確比對才安全）；訊號物件會被下游就地改動
+（`entrySignal.reasons.push(...)`、`s.fundingRate = ...` 等），所以快取存入
+與命中讀出都做了淺複製+`reasons`陣列複製，避免這一輪的變動污染到快取，
+或快取被下一輪污染。本機對同一即時資料連續打兩次 `/api/analyze`（相隔
+26 秒，都在同一根K線窗口內）驗證 15 個幣種的 topScore/regime/adx4h/
+confluenceMet 等全部欄位逐位元組相同，0 個差異——證明快取命中時輸出跟
+沒快取時完全一致，不是行為改變，純粹省重算。CPU 是否真的下降仍要等
+Vercel 曲線，前三次同類優化都曾在這一步落空；
 下一個沒被擋住的是自動化交易的「執行引擎放哪」決策點。
 
 ---

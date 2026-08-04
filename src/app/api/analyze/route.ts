@@ -9,6 +9,7 @@ import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/posi
 import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
+import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib/cancelShadow';
 
@@ -2044,9 +2045,37 @@ export async function GET(req: NextRequest) {
             // second confluence confirmation (§3-A: 4H judges direction, 1H enters).
             if (tf === entryTf) entryTfBias = htfBias;
 
-            const dbg: { long?: number; short?: number } = {};
-            const sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime, dbg);
-            rawTopScore = Math.max(rawTopScore, dbg.long ?? 0, dbg.short ?? 0);
+            // 2026-08-04（docs/ANALYSIS-2026-08-04B §3.1）：訊號只有在這個 tf
+            // 真的收出新K線時才會變，但掃描每 5 分鐘跑一次——15m 每輪重算 3
+            // 次、1h 每輪重算 12 次，全是白工。跟 regimeCache 同一套memoize
+            // 哲學：快取「完整計算結果」，輸入（K線收盤時間/htfBias/regime）
+            // 一有變動就整個重算，不做增量遞推。htfBias/regime 都納入命中
+            // 判斷是必要的，不只是保險——一般情況下標準時框邊界是巢狀的
+            // （4H收線必然也是1H/15m/5m收線），tf 自己的K線沒變就代表
+            // htfBias/regime 的來源時框也不可能變；唯一打破這個保證的是
+            // regime 抓取失敗時的預設值（跟K線邊界無關的獨立事件），所以
+            // 兩者都要明確比對，不能只靠邊界巢狀這個假設。
+            const cachedSig = getSignalCache(symbol, tf);
+            let sigs: TradingSignal[];
+            let dbgLong = 0, dbgShort = 0;
+            if (isSignalCacheHit(cachedSig, candles, htfBias, symbolRegime)) {
+              sigs = freshenCachedSignals(cachedSig!.signals);
+              dbgLong = cachedSig!.dbgLong;
+              dbgShort = cachedSig!.dbgShort;
+            } else {
+              const dbg: { long?: number; short?: number } = {};
+              sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime, dbg);
+              dbgLong = dbg.long ?? 0;
+              dbgShort = dbg.short ?? 0;
+              if (candles.length > 0) {
+                setSignalCache(symbol, tf, {
+                  lastBarOpenTime: candles[candles.length - 1].openTime,
+                  htfBias, regime: symbolRegime,
+                  signals: cloneSignals(sigs), dbgLong, dbgShort,
+                });
+              }
+            }
+            rawTopScore = Math.max(rawTopScore, dbgLong, dbgShort);
             allSignals.push(...sigs);
             sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
           } catch { /* skip failed timeframe */ }
