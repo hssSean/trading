@@ -432,19 +432,27 @@ async function reconcileIncorrectlyActiveTrades(confirmedActive: Set<string> = n
   });
   if (suspects.length === 0) return;
 
-  // For each suspect: fetch 4h K-lines and check whether price touched the entry AFTER
-  // the order was placed. startTime retreats ONE 4h bar before opened_at (the candle
+  // For each suspect: fetch 1h K-lines and check whether price touched the entry AFTER
+  // the order was placed. startTime retreats ONE 1h bar before opened_at (the candle
   // containing the fill often opens before opened_at), but evalCandles then filters back
   // to openTime >= openedAt — same two-step anchor as route.ts's Phase 1 fill scan — so
   // pre-order price action can never be misread as a fill.
   // This fallback only PROMOTES (latches active locally); it never demotes to waiting —
   // fills are a one-way latch (server cancels unfilled limits via `result`, not by
   // reverting to waiting) — and never writes to the DB (see function comment above).
+  //
+  // 2026-08-04（docs/ANALYSIS-2026-08-04-移動止損失效與策略數據檢討.md 修正D）：
+  // was 4h/500 — with the same start-of-bar anchor, a limit order placed at 04:36
+  // has its 04:00 4h bar excluded, so the next usable bar doesn't land until 08:00:
+  // up to a ~4h blind spot before this fallback could ever notice a fill. The
+  // server's own Phase 1 fill scan (route.ts) uses 1h for the same reason this
+  // fallback exists — align the two so the client-side backstop is never blunter
+  // than the path it's backing up. 168 bars = 7 days, matching the server's lookback.
   const toActivate: string[] = [];
 
   for (const t of suspects) {
     try {
-      const candles = await fetchCandles(t.symbol, '4h', 500, 2, t.openedAt - 4 * 3600 * 1000);
+      const candles = await fetchCandles(t.symbol, '1h', 168, 2, t.openedAt - 3_600_000);
       const evalCandles = candles.filter(c => c.openTime >= t.openedAt);
       const entryTouched = evalCandles.some(c =>
         t.direction === 'LONG'  ? c.low  <= t.entry :
