@@ -26,6 +26,9 @@ export interface ScanStatus {
   at: number;
   btcRegime: string;
   circuitBreaker: string | boolean | null;
+  // 跨日權益回撤停機（2026-08-04）——舊的 last_scan 快照沒有這個 key，
+  // 讀到 undefined 時視同「沒停機」，不會把舊快照誤判成停機中。
+  drawdownHalt?: string | boolean | null;
   eventFilter: string | boolean | null;
   totalOpenRisk: number;
   notified: string[];

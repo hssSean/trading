@@ -5,6 +5,7 @@ import { useStore } from '@/store/useStore';
 interface Scan {
   btcRegime: string;
   circuitBreaker: string | boolean | null;
+  drawdownHalt?: string | boolean | null;
   eventFilter: string | boolean | null;
   totalOpenRisk: number;
   notified: string[];
@@ -39,7 +40,7 @@ export function BtcStatusBar() {
   if (!scan) return null;
 
   const info    = BTC[scan.btcRegime] ?? { label: `BTC ${scan.btcRegime}`, hint: '大盤中性', color: '#8A94A2' };
-  const blocked = !!scan.circuitBreaker || !!scan.eventFilter;
+  const blocked = !!scan.circuitBreaker || !!scan.drawdownHalt || !!scan.eventFilter;
 
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 bg-[#0C1116] border-b border-white/[0.06] text-[11px]">
@@ -49,7 +50,9 @@ export function BtcStatusBar() {
       <span className="text-text-s truncate">{info.hint}</span>
       <span className="flex-1" />
       {blocked ? (
-        <span className="text-down font-medium">{scan.circuitBreaker ? '熔斷中' : '事件窗口'}</span>
+        <span className="text-down font-medium">
+          {scan.circuitBreaker ? '熔斷中' : scan.drawdownHalt ? '回撤停機' : '事件窗口'}
+        </span>
       ) : (
         <>
           <span className="text-text-s num">{scan.notified.length} 訊號</span>

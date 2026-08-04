@@ -16,6 +16,7 @@ interface Scan {
   at: number;
   btcRegime: string;
   circuitBreaker: string | boolean | null;
+  drawdownHalt?: string | boolean | null;
   eventFilter: string | boolean | null;
   totalOpenRisk: number;
   notified: string[];
@@ -32,6 +33,7 @@ const REGIME_LABEL: Record<string, { text: string; cls: string }> = {
 const REJECT_LABEL: Record<string, string> = {
   event_filter:      '事件窗口',
   circuit_breaker:   '當日熔斷',
+  drawdown_halt:     '回撤停機',
   total_risk_cap:    '總風險上限',
   locked:            '持倉鎖定',
   same_candle:       '同4H蠟燭',
@@ -198,6 +200,7 @@ export function ScanStatusPanel() {
   const btc = BTC_REGIME_LABEL[scan.btcRegime] ?? { text: scan.btcRegime, cls: 'text-text-m' };
   const blockers = [
     scan.circuitBreaker ? '熔斷中' : null,
+    scan.drawdownHalt ? '回撤停機' : null,
     scan.eventFilter ? '事件窗口' : null,
   ].filter(Boolean);
 
@@ -222,9 +225,10 @@ export function ScanStatusPanel() {
       {/* Expanded: per-coin table */}
       {expanded && (
         <div className="px-3 pb-2.5 border-t border-white/[0.06]">
-          {(scan.circuitBreaker || scan.eventFilter) && (
+          {(scan.circuitBreaker || scan.drawdownHalt || scan.eventFilter) && (
             <p className="text-down/80 text-[10px] mt-2">
               {typeof scan.circuitBreaker === 'string' ? scan.circuitBreaker : ''}
+              {typeof scan.drawdownHalt === 'string' ? ` ${scan.drawdownHalt}` : ''}
               {typeof scan.eventFilter === 'string' ? ` ${scan.eventFilter}` : ''}
             </p>
           )}

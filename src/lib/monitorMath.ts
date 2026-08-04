@@ -131,6 +131,38 @@ export function calcSimpleAtr(candles: WalkCandle[], period = 14): number {
   return trSum / n;
 }
 
+// 2026-08-04（docs/ANALYSIS-2026-08-04C「自動化前工程面還缺什麼」）：
+// 既有熔斷只看「當日」——當日累計 −3R 或連續 3 筆止損，且每天 UTC 0 點重置。
+// 這擋得住單日崩盤，但擋不住慢性失血：每天 −2.5R 連續 5 天，從來沒有任何一天
+// 觸發當日 −3R 門檻，累積卻已經 −12.5R。手動操作時使用者自己看得到帳戶在縮水
+// 會停手，全自動就沒有這個人為煞車了，所以補一個跨日的權益高點回撤上限。
+//
+// 用「已平倉單的帳戶R累積權益曲線」算：逐筆累加，記錄歷史高點，回撤 =
+// 高點 − 當前。實測歷史資料（55 筆已平倉）最大回撤僅 2.01R、最大連續虧損
+// 3 筆、最差單日 −1.20R，所以預設門檻 8R 約是歷史最糟的 4 倍——正常運作
+// 不會碰到，碰到就代表策略行為已經脫離歷史分布，該停下來人工檢查。
+//
+// 刻意「不」自動解除：權益回到高點附近才會自然低於門檻而恢復。停下來之後
+// 沒有新單，權益只能靠既有持倉平倉變動，所以實務上等同「停到人工介入」——
+// 這正是自動交易該有的行為，不是缺陷。
+export interface EquityPoint { closedAt: number; accountR: number; }
+
+export interface DrawdownState {
+  peak: number;      // 歷史權益高點（帳戶R）
+  current: number;   // 目前累積權益（帳戶R）
+  drawdown: number;  // peak − current，恆 >= 0
+}
+
+export function calcDrawdown(points: EquityPoint[]): DrawdownState {
+  const sorted = [...points].sort((a, b) => a.closedAt - b.closedAt);
+  let equity = 0, peak = 0;
+  for (const p of sorted) {
+    equity += p.accountR;
+    if (equity > peak) peak = equity;
+  }
+  return { peak, current: equity, drawdown: Math.max(0, peak - equity) };
+}
+
 export function walkTpSl(
   candles: WalkCandle[],
   afterMs: number,

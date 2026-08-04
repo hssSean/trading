@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
@@ -851,9 +851,18 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         const dir = isLong ? '▲ 做多' : '▼ 做空';
         const sym = (trade.symbol as string).replace('USDT', '/USDT');
         if (profileId && notifyOk) {
+          // 2026-08-04：這裡原本寫死 `trade.entry`，但實際保護價是 trailingStop
+          // （= max(tp1 − 2×ATR, entry)，SHORT 鏡像）。7/30 前 atr1h 恆為 0，
+          // trailingStop 也恆為 0，寫死 entry 剛好跟事實一致所以沒被發現；
+          // 8/4 修好 ATR 之後 trailingStop 常常明顯優於 entry，這則推播就會
+          // 低報實際鎖住的利潤。改成顯示真正會被執行的那個價位。
+          const protectedStop = trailingStop > 0 ? trailingStop : (trade.entry as number);
+          const lockedR = riskDist > 0
+            ? (isLong ? protectedStop - (trade.entry as number) : (trade.entry as number) - protectedStop) / riskDist
+            : 0;
           await sendWebPushToUser(profileId, {
             title: `🎯 TP1 達標 ${sym}`,
-            body: `${dir} $${fmtPrice(trade.tp1 as number)} ｜ 止損移至 $${fmtPrice(trade.entry as number)}`,
+            body: `${dir} $${fmtPrice(trade.tp1 as number)} ｜ 止損移至 $${fmtPrice(protectedStop)}（鎖 ${lockedR >= 0 ? '+' : ''}${lockedR.toFixed(1)}R）`,
             tag: `tp1-${trade.id}`,
           });
         }
@@ -1530,6 +1539,59 @@ async function cacheBreaker(r: import('@upstash/redis').Redis | null, profileId:
   try { await r.set(`circuit_breaker_v2:${profileId}`, reason, { ex: Math.max(secLeft, 60) }); } catch { /* best-effort */ }
 }
 
+// ── 跨日權益回撤上限（2026-08-04，自動化前的安全網）─────────────
+// checkCircuitBreaker 只看當日、每天 UTC 0 點重置，擋不住「每天小輸、累積大輸」。
+// 這裡看整條已平倉權益曲線的高點回撤（詳細動機見 monitorMath.ts 的 calcDrawdown）。
+//
+// 門檻預設 8R：實測歷史 55 筆已平倉單最大回撤 2.01R，8R 約是 4 倍，正常運作
+// 碰不到。可用 MAX_DRAWDOWN_R 環境變數調整；設為 0 或負數等於停用這道關卡。
+//
+// 用「帳戶R」而非原始R：B 級輕倉只承擔一半風險，回撤要按實際帳戶衝擊算，
+// 跟熔斷、CSV 匯出的「帳戶R」欄位同一套口徑。
+const DEFAULT_MAX_DRAWDOWN_R = 8;
+
+async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; reason?: string; state?: DrawdownState }> {
+  const limit = parseFloat(process.env.MAX_DRAWDOWN_R ?? String(DEFAULT_MAX_DRAWDOWN_R));
+  if (!isFinite(limit) || limit <= 0) return { halted: false }; // 停用
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key || !profileId) return { halted: false };
+
+  try {
+    const { createClient: mk } = await import('@supabase/supabase-js');
+    const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+    const { data } = await adm.from('trades')
+      .select('closed_at, pnl_percent, entry, stop_loss, tier')
+      .eq('user_id', profileId).not('closed_at', 'is', null).not('result', 'is', null)
+      .order('closed_at', { ascending: true });
+    if (!data || data.length === 0) return { halted: false };
+
+    const rows = data as { closed_at: number; pnl_percent?: number | null; entry?: number | null; stop_loss?: number | null; tier?: string | null }[];
+    const points: EquityPoint[] = [];
+    for (const t of rows) {
+      if (t.pnl_percent == null || !t.entry || !t.stop_loss) continue;
+      const stopPct = Math.abs(t.entry - t.stop_loss) / t.entry * 100;
+      if (stopPct <= 0) continue;
+      // 同 checkCircuitBreaker 的口徑：R 倍數 × tier 權重 = 帳戶衝擊
+      points.push({ closedAt: t.closed_at, accountR: (t.pnl_percent / stopPct) * (t.tier === 'B' ? 0.5 : 1.0) });
+    }
+    if (points.length === 0) return { halted: false };
+
+    const state = calcDrawdown(points);
+    if (state.drawdown >= limit) {
+      return {
+        halted: true,
+        reason: `權益回撤 ${state.drawdown.toFixed(2)}R（高點 ${state.peak.toFixed(2)}R → 目前 ${state.current.toFixed(2)}R），已達上限 ${limit}R — 暫停開新倉，請人工檢查策略是否失效`,
+        state,
+      };
+    }
+    return { halted: false, state };
+  } catch {
+    // 查詢失敗不擋單——跟其餘關卡一致，絕不因為基礎設施故障就凍結整個系統
+    return { halted: false };
+  }
+}
+
 // ── Shadow simulation of rejected signals ──────────────────────
 // Spec §4.5: a rule may only be loosened when funnel data proves the signals
 // it kills are net-positive. Every gate-rejected candidate that had concrete
@@ -1899,6 +1961,9 @@ export async function GET(req: NextRequest) {
   // §4.4 Circuit breaker — check once per cron run
   const breaker = profileId ? await checkCircuitBreaker(profileId, acctRiskPct) : { triggered: false };
 
+  // 跨日權益回撤上限 — 熔斷只看當日，這個看整條權益曲線的高點回撤（2026-08-04）
+  const drawdown = profileId ? await checkDrawdownHalt(profileId) : { halted: false };
+
   // Phase 5: total open risk — check once per cron run; blocks all new signals when cap is hit
   const totalOpenRisk = profileId ? await checkTotalOpenRisk(profileId) : 0;
 
@@ -2176,6 +2241,11 @@ export async function GET(req: NextRequest) {
       // §4.4 Circuit breaker (global; set once before loop, checked per signal)
       else if (breaker.triggered)
         { skipKey = 'circuit_breaker'; skipReason = `熔斷 — ${breaker.reason}`; }
+      // 跨日權益回撤上限（2026-08-04）——排在熔斷之後：熔斷是當日急性事件、
+      // 回撤是跨日慢性失血，兩者互補。刻意排在 total_risk_cap 之前，因為
+      // 「策略可能已經失效」比「倉位滿了」更該優先讓使用者看到。
+      else if (drawdown.halted)
+        { skipKey = 'drawdown_halt'; skipReason = `回撤停機 — ${drawdown.reason}`; }
       else if (totalOpenRisk >= MAX_TOTAL_RISK_PCT)
         { skipKey = 'total_risk_cap'; skipReason = `跳過 — 持倉風險評分 ${totalOpenRisk.toFixed(1)} 已達上限 ${MAX_TOTAL_RISK_PCT}（與實際帳戶風險%無關，僅為持倉數量代理值）`; }
       else if (locked)
@@ -2708,6 +2778,7 @@ export async function GET(req: NextRequest) {
           at: Date.now(),
           btcRegime: btcState.regime,
           circuitBreaker: breaker.triggered ? breaker.reason ?? true : null,
+          drawdownHalt: drawdown.halted ? drawdown.reason ?? true : null,
           eventFilter: eventFilter.active ? eventFilter.reason ?? true : null,
           totalOpenRisk: parseFloat(totalOpenRisk.toFixed(2)),
           notified,
@@ -2731,6 +2802,7 @@ export async function GET(req: NextRequest) {
     monitor,
     btcRegime: btcState.regime,
     circuitBreaker: breaker.triggered ? breaker.reason : null,
+    drawdownHalt: drawdown.halted ? drawdown.reason : null,
     totalOpenRisk: parseFloat(totalOpenRisk.toFixed(2)),
     eventFilter: { active: eventFilter.active, ...(eventFilter.reason ? { reason: eventFilter.reason } : {}) },
   });
