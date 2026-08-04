@@ -451,6 +451,13 @@ export function generateSignals(
     price * MAX_SL_PCT,
   );
 
+  // 2026-08-04：進場品質量測（docs/ANALYSIS-2026-08-04C §第三順位）。
+  // 純被動記錄，不參與評分、不影響任何關卡——只為了讓未來能檢驗
+  // 「A 級單分數越高、平均 R 反而越低」是不是因為高分訊號的進場位置比較差。
+  // 依方向帶正負號在下面各自算（LONG 用 price-ema20，SHORT 反向）。
+  const extAtrRaw = atrVal > 0 ? (price - ind.ema20) / atrVal : 0;
+  const roundAtr  = (v: number) => parseFloat(v.toFixed(2));
+
   // Entry zone thresholds — how far below/above current price counts as a limit order
   //   5m  : ±0.3%  (price moves fast, entries must be close)
   //   15m : ±0.5%
@@ -605,6 +612,10 @@ export function generateSignals(
         trend: longTrend, momentum: longMom, structure: longStruct,
         volume: longVol, priceAction: longPAction,
         penalties: longScore - 40 - longTrend - longMom - longStruct - longVol - longPAction,
+        // LONG: 正值 = 價格已在 EMA20 上方（朝訊號方向延伸）
+        extensionAtr: roundAtr(extAtrRaw),
+        // 正值 = 進場價低於現價，要等回調才會成交；越大代表回調要越深
+        entryDistAtr: atrVal > 0 ? roundAtr((price - longEntry) / atrVal) : 0,
       },
     });
     if (longTier === 'B') longReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');
@@ -647,6 +658,10 @@ export function generateSignals(
         trend: shortTrend, momentum: shortMom, structure: shortStruct,
         volume: shortVol, priceAction: shortPAction,
         penalties: shortScore - 40 - shortTrend - shortMom - shortStruct - shortVol - shortPAction,
+        // SHORT 鏡像：正值 = 價格已在 EMA20 下方（朝訊號方向延伸）
+        extensionAtr: roundAtr(-extAtrRaw),
+        // 正值 = 進場價高於現價，要等反彈才會成交
+        entryDistAtr: atrVal > 0 ? roundAtr((shortEntry - price) / atrVal) : 0,
       },
     });
     if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');

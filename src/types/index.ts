@@ -98,6 +98,21 @@ export interface ScoreBreakdown {
   volume: number;
   priceAction: number;
   penalties: number; // negative; includes no-level penalty
+  // 2026-08-04（docs/ANALYSIS-2026-08-04C §第三順位）：118 筆樣本顯示 A 級單
+  // 分數越高平均 R 反而越低（<60 +0.752R → 60-64 +0.769R → 65-69 +0.470R →
+  // 70+ +0.391R，單調遞減）。假說是「高分靠的是趨勢已經走很強的證據，而那
+  // 正是進場位置最差的時候」，但當時沒有任何欄位能檢驗這個假說。
+  //
+  // 這兩個是純被動量測，不參與任何評分或關卡判斷，只為了讓未來能回答
+  // 「進場位置的優劣能不能解釋 R 的差異」。刻意塞進既有的 score_breakdown
+  // JSONB 而不是開新欄位——不需要 ALTER TABLE，舊資料列自然是 undefined。
+  //
+  // extensionAtr：訊號當下價格離 EMA20 幾個 ATR（依方向帶正負號，正值＝
+  //   已經朝訊號方向延伸多遠）。這是「行情是不是已經走過頭」的直接量測。
+  extensionAtr?: number;
+  // entryDistAtr：掛單進場價離訊號當下價格幾個 ATR。值越大代表要等越深的
+  //   回調才會成交——直接對應「53% 推薦單失效」那個問題。
+  entryDistAtr?: number;
 }
 
 export interface TradingSignal {

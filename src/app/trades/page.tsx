@@ -918,6 +918,9 @@ export default function TradesPage() {
           const direction  = r.direction as string;
           const mfeR = calcExcursionR(entry, stopLoss, direction, (r.mfe_price as number | null) ?? null);
           const maeR = calcExcursionR(entry, stopLoss, direction, (r.mae_price as number | null) ?? null);
+          // 2026-08-04：進場品質量測，塞在既有的 score_breakdown JSONB 裡
+          // （不需要 ALTER TABLE）。舊資料列沒有這兩個 key，匯出成空字串。
+          const sb = (r.score_breakdown ?? null) as { extensionAtr?: number; entryDistAtr?: number } | null;
           return [
             r.id, r.symbol, r.direction, r.timeframe, r.strength, r.score,
             entry, stopLoss, r.tp1, r.tp2,
@@ -931,6 +934,8 @@ export default function TradesPage() {
             acctR,
             mfeR,
             maeR,
+            sb?.extensionAtr ?? '',
+            sb?.entryDistAtr ?? '',
             `${tier}級·${r.timeframe}`,
             r.strategy ?? '',
             r.regime ? (REGIME_LABEL[r.regime as string] ?? r.regime) : '',
@@ -947,6 +952,7 @@ export default function TradesPage() {
         'ID', '幣種', '方向', '週期', '強度', '得分',
         '進場價', '止損', 'TP1', 'TP2', '開倉時間', '平倉時間',
         '結果', '出場原因', '出場價', '損益%', 'R倍數', '帳戶R', 'MFE(R)', 'MAE(R)',
+        '延伸度(ATR)', '進場距離(ATR)',
         '級別', '進場策略', '盤勢regime', '信心分數confidence', '資金費率%funding',
         '建議風險%', '建議槓桿',
         '分析依據', '個人備註',
