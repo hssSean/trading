@@ -1562,7 +1562,7 @@ interface ShadowTrade {
 // Gates where a full signal existed — worth simulating. score_gate has no levels;
 // locked/same_candle/cooldown duplicate live trades and would double-count.
 const SHADOW_GATES = new Set([
-  'confluence', 'no_entry_tf', 'btc_direction', 'btc_pause', 'loss_cooldown',
+  'confluence', 'no_entry_tf', 'btc_direction', 'btc_chaos', 'btc_pause', 'loss_cooldown',
   'same_dir_cap', 'total_risk_cap', 'circuit_breaker', 'event_filter', 'insert_failed',
 ]);
 const SHADOW_MAX = 300; // hash size guard
@@ -1873,8 +1873,8 @@ export async function GET(req: NextRequest) {
   // Rejected candidates with concrete levels → simulated as shadow trades
   const shadowCandidates: ShadowTrade[] = [];
   // docs/TODO.md P2 #5: candidates that cleared every per-symbol gate (locked/
-  // cooldown/confluence/no_entry_tf/btc_direction/btc_pause/loss_cooldown/
-  // bias_hold) and are genuine contenders for the shared same-direction risk
+  // cooldown/confluence/no_entry_tf/btc_direction/btc_chaos/btc_pause/
+  // loss_cooldown/bias_hold) and are genuine contenders for the shared same-direction risk
   // budget. Scan order is by trading volume rank — first-come-first-served on
   // a scarce resource is the worst allocation rule. Deferred here so ALL of
   // this cycle's candidates are known before same_dir_cap decides who gets the
@@ -2202,16 +2202,16 @@ export async function GET(req: NextRequest) {
             { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏多 — 跳過山寨做空 (${symbol})`; }
           else if (btcState.regime === 'bearish' && entrySignal.direction === 'LONG')
             { skipKey = 'btc_direction'; skipReason = `BTC 大盤偏空 — 跳過山寨做多 (${symbol})`; }
-          else if (btcState.regime === 'chaotic' && entrySignal.strategy === 'A') {
-            // v2.1 §1.3: chaos downgrades instead of blocking — tier B, risk 0.5%,
-            // confidence -10, leverage ≤5x. Strategy B is already tier B, so the
-            // downgrade only meaningfully applies to A.
-            entrySignal.tier               = 'B';
-            entrySignal.suggestedRiskPct   = 0.5;
-            entrySignal.suggestedLeverage  = Math.min(entrySignal.suggestedLeverage ?? 5, 5);
-            entrySignal.confidence         = Math.max(0, (entrySignal.confidence ?? 50) - 10);
-            entrySignal.reasons.push('⚠ BTC 混沌區 — 降級 B 級輕倉（風險 0.5%、槓桿 ≤5x）');
-          }
+          else if (btcState.regime === 'chaotic' && entrySignal.strategy === 'A')
+            // 2026-08-04（docs/ANALYSIS-2026-08-04C-自動化前的策略體檢.md）：
+            // v2.1 §1.3 原本混沌區降級（tier B、風險0.5%、槓桿≤5x）而非直接擋。
+            // 但降級只改倉位大小，不改 R 倍數——118 筆樣本裡混沌期單扣成本後
+            // 平均 −0.007R（信賴區間跨0），非混沌單扣成本後 +0.422R（信賴區間
+            // 不跨0，bootstrap 96.8% 勝過成本）。差距不是「倉位下太大」，是
+            // 「混沌期進場的訊號本身沒有優勢」——輕倉只是把沒優勢的賭注下小，
+            // 不會讓它變有優勢。改成直接跳過，比照 btc_direction 硬擋；納入
+            // SHADOW_GATES 讓漏斗持續追蹤，未來樣本若翻案要看得出來。
+            { skipKey = 'btc_chaos'; skipReason = `BTC 混沌區 — 跳過山寨 ${symbol}（v2.1策略A訊號無統計優勢，2026-08-04數據）`; }
         }
         if (!skipReason && !isLargeCap) {
           if (entrySignal.direction === 'LONG'  && btcState.longPaused)

@@ -39,6 +39,7 @@ const REJECT_LABEL: Record<string, string> = {
   confluence:        '多框架未確認',
   no_entry_tf:       '進場時區無訊號',
   btc_direction:     'BTC 逆向',
+  btc_chaos:         'BTC 混沌跳過',
   btc_pause:         'BTC 急漲跌暫停',
   same_dir_cap:      '同向上限',
   loss_cooldown:     '止損後冷卻24h',
