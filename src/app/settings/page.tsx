@@ -528,8 +528,13 @@ export default function SettingsPage() {
           )}
           {diagResult && !diagResult.skipped && (
             <div className="bg-card-2 rounded-[10px] p-3 text-xs space-y-2">
-              <p className="text-accent num">{diagResult.ok ? '分析完成' : '分析失敗'}</p>
-              <p className="text-text-s">已通知：{diagResult.notified?.join(', ') || '無'}</p>
+              <p className="text-accent num">{diagResult.ok ? `分析完成（已掃描 ${diagResult.results?.length ?? 0} 檔）` : '分析失敗'}</p>
+              <p className="text-text-s">
+                已通知：{diagResult.notified?.join(', ') || '無'}
+                {!diagResult.notified?.length && (
+                  <span className="text-text-m">（無＝這次沒有新訊號通過進場關卡，非未執行——下方為各幣即時分析結果）</span>
+                )}
+              </p>
               {diagResult.results?.map((r) => (
                 <div key={r.symbol} className={`rounded-[10px] px-3 py-2 border ${
                   diagResult.notified?.includes(r.symbol) ? 'border-up/30' :
