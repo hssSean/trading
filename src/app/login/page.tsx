@@ -37,7 +37,7 @@ export default function LoginPage() {
     <div className="min-h-dvh bg-app flex items-center justify-center px-6">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="text-4xl mb-3">📈</div>
+          <div className="text-2xl font-mono text-accent tracking-widest mb-3">[ CT ]</div>
           <h1 className="text-text-p text-2xl font-extrabold">Crypto Trader</h1>
           <p className="text-text-m text-sm mt-1">加密貨幣交易信號分析</p>
         </div>
