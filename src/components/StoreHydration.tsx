@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
+import { AlertTriangle, X } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
 import { fetchCandles } from '@/api/binance';
@@ -863,8 +864,11 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
     <>
       {syncWarning && (
         <div className="fixed top-16 left-0 right-0 z-50 px-4 py-2 bg-orange-500/10 border-b border-orange-500/30 text-orange-400 text-xs text-center font-semibold flex items-center justify-center gap-2">
-          <span>⚠ {syncWarning}</span>
-          <button onClick={() => setSyncWarning(null)} className="opacity-60 hover:opacity-100">✕</button>
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span>{syncWarning}</span>
+          <button onClick={() => setSyncWarning(null)} className="opacity-60 hover:opacity-100">
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
       {children}

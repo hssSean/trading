@@ -9,7 +9,7 @@ import { zhTW } from 'date-fns/locale';
 import { TradeCard } from '@/components/ui/TradeCard';
 import { PillBadge } from '@/components/ui/PillBadge';
 import { StatChip } from '@/components/ui/StatChip';
-import { Wallet, Layers, ShieldAlert } from 'lucide-react';
+import { Wallet, Layers, ShieldAlert, Check } from 'lucide-react';
 
 interface Props {
   signal: TradingSignal;
@@ -31,7 +31,7 @@ export function SignalCard({ signal, onClick, compact }: Props) {
 
   const effRisk = riskPct * tierRiskMultiplier(signal.symbol, signal.tier);
   const plan    = calcPositionPlan(accountSize, effRisk, signal.entry, signal.stopLoss, signal.tier === 'B' ? 5 : 10);
-  const isHighVol  = signal.reasons.some((r) => r.startsWith('⚠ 高波動'));
+  const isHighVol  = signal.reasons.some((r) => r.startsWith('高波動'));
   const sp         = signal.signalPrice ?? 0;
   const isLimit    = sp > 0 && Math.abs(signal.entry - sp) / sp > 0.003;
   const isIntraday = signal.timeframe === '5m' || signal.timeframe === '15m';
@@ -146,7 +146,7 @@ export function SignalCard({ signal, onClick, compact }: Props) {
           <button
             onClick={handleSync}
             disabled={hasTrade || justAdded || syncing}
-            className={`text-[11px] font-medium px-3.5 py-1.5 rounded-full transition-colors ${
+            className={`flex items-center gap-1 text-[11px] font-medium px-3.5 py-1.5 rounded-full transition-colors ${
               flash
                 ? 'border border-up/45 text-up'
                 : justAdded || hasTrade
@@ -154,7 +154,8 @@ export function SignalCard({ signal, onClick, compact }: Props) {
                 : 'bg-accent text-[#0A0D11] active:opacity-80'
             }`}
           >
-            {flash ? '✓ 已同步' : justAdded ? '已在紀錄' : hasTrade ? '已持倉' : syncing ? '同步中…' : '同步 ▸'}
+            {flash && <Check className="w-3 h-3" strokeWidth={3} />}
+            {flash ? '已同步' : justAdded ? '已在紀錄' : hasTrade ? '已持倉' : syncing ? '同步中…' : '同步 ▸'}
           </button>
         </div>
       )}

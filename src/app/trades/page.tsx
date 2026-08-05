@@ -11,7 +11,7 @@ import { TradeCard } from '@/components/ui/TradeCard';
 import { PillBadge } from '@/components/ui/PillBadge';
 import { StatChip } from '@/components/ui/StatChip';
 import { PriceProgressBar } from '@/components/ui/PriceProgressBar';
-import { Wallet, ShieldAlert, LineChart, FileText, Layers, Percent } from 'lucide-react';
+import { Wallet, ShieldAlert, LineChart, FileText, Layers, Percent, Check } from 'lucide-react';
 
 const RESULT_LABEL: Record<string, string> = {
   WIN_TP1:      'TP1 達標',
@@ -203,7 +203,7 @@ const TradeRow = memo(function TradeRow({
           className="absolute top-3.5 right-3.5 w-4 h-4 rounded-full border flex items-center justify-center"
           style={{ borderColor: selected ? '#2DD4BF' : '#3A424E', background: selected ? '#2DD4BF' : 'transparent' }}
         >
-          {selected && <span className="text-[#0A0D11] text-[9px] leading-none">✓</span>}
+          {selected && <Check className="w-2.5 h-2.5 text-[#0A0D11]" strokeWidth={3} />}
         </div>
       )}
 

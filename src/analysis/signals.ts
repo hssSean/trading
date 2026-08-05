@@ -301,7 +301,7 @@ export function generateSignals(
     if (patterns.bullishEngulfing) { lPA += 7; longReasons.push('看漲吞噬K線'); }
     if (patterns.hammer)           { lPA += 5; longReasons.push('錘子線'); }
 
-    if (atrPct > HIGH_VOLIT_PCT) { lPenalties -= 3; longReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）-3分`); }
+    if (atrPct > HIGH_VOLIT_PCT) { lPenalties -= 3; longReasons.push(`高波動（ATR ${(atrPct * 100).toFixed(1)}%）-3分`); }
   }
 
   // ── SHORT SCORING (§4.2 v2 group-capped) ─────────────────────
