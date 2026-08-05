@@ -738,6 +738,13 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
       setLocalUserId(uid);
       if (uid) useStore.getState().setUserId(uid);
       setAuthReady(true);
+    }).catch(() => {
+      // Network/config failure reading the session — fall through to the
+      // login redirect instead of hanging on the spinner forever (previously
+      // no .catch() here at all: a rejected getSession() left authReady
+      // permanently false).
+      setLocalUserId(null);
+      setAuthReady(true);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
