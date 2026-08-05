@@ -637,9 +637,11 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 無真實 Supabase session 卡在 `StoreHydration.tsx` 的 `authReady` 載入圈（既有已知
 限制，非本次改動造成）。
 
-### 12. 零星功能性符號
+### ~~12. 零星功能性符號~~ ✅ 已完成（`243205a`，2026-08-06）
 `StoreHydration.tsx`（⚠/✕）、`trades/page.tsx`（✓ checkbox）、`SignalCard.tsx`（⚠/✓）
-各 1-2 處。跟裝飾性 emoji 性質不同（是功能指示），要不要清可討論。
+全部換成 lucide-react 圖示或純文字。順帶拿掉 `signals.ts` 高波動 reason 字串裡
+唯一的 ⚠ 前綴（其餘 reason 全是純中文），`SignalCard.tsx` 的 `isHighVol` 判斷
+同步改比對新字串。tsc/vitest(480)/build 全過。
 
 ---
 
