@@ -2,6 +2,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { WatchedCoin, TradingSignal, AppSettings, Timeframe, TradeRecord, TradeResult } from '@/types';
+import { blendTp1PartialPnl } from '@/lib/monitorMath';
 
 const DEFAULT_SETTINGS: AppSettings = {
   analysisIntervalMinutes: 15,
@@ -179,9 +180,18 @@ export const useStore = create<StoreState>()(
         set((s) => ({
           trades: s.trades.map((t) => {
             if (t.id !== id || t.result) return t; // skip already-closed
-            const pnl = t.direction === 'LONG'
-              ? ((exitPrice - t.entry) / t.entry) * 100
-              : ((t.entry - exitPrice) / t.entry) * 100;
+            // 2026-08-05：跟伺服器端 route.ts 用同一套 TP1 部分停利加權——
+            // t.status==='tp1_hit' 代表這筆單曾經碰到 TP1（tp1-watching 狀態
+            // 本身就是 result 已有值但未 closedAt，這裡的 t.result 早退守衛
+            // 目前會讓這個分支對 tp1-watching 單形同無效，是另一個獨立問題，
+            // 不在這次修改範圍——但公式本身先寫對，之後守衛修好就自動接上，
+            // 不會留一個「連著改」卻算錯的坑。
+            const reachedTp1 = t.status === 'tp1_hit';
+            const pnl = reachedTp1
+              ? blendTp1PartialPnl(t.entry, t.tp1, exitPrice, t.direction === 'LONG')
+              : (t.direction === 'LONG'
+                  ? ((exitPrice - t.entry) / t.entry) * 100
+                  : ((t.entry - exitPrice) / t.entry) * 100);
             return { ...t, result, exitPrice, closedAt: Date.now(), pnlPercent: parseFloat(pnl.toFixed(2)), closeReason: 'manual' };
           }),
         }));

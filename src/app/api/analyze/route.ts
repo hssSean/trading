@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
@@ -915,9 +915,18 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     }
 
     const entry = trade.entry as number;
-    const pnl   = isLong
-      ? ((closePrice - entry) / entry) * 100
-      : ((entry - closePrice) / entry) * 100;
+    // 2026-08-05（docs/ANALYSIS-2026-08-05-提升盈虧率的可動項目.md #1）：
+    // TP1 部分停利。localTp1Hit（不是 isTp1Hit/isFinalClosingTp1，那個只反映
+    // DB 在「這輪掃描開始時」的狀態，用來做並發安全的原子寫入守衛，跟這裡
+    // 的「這筆單是否曾經碰到 TP1」是兩件事——TP1/TP2 在同一根K線都被打穿
+    // 的情況下 isFinalClosingTp1 會是 false，但 localTp1Hit 依然正確為
+    // true）為真時，把最終 R 當成「一半在 TP1 鎖定、一半照最終出場價」
+    // 的加權平均，而不是全部用最終出場價算。
+    const pnl = localTp1Hit
+      ? blendTp1PartialPnl(entry, trade.tp1 as number, closePrice, isLong)
+      : (isLong
+          ? ((closePrice - entry) / entry) * 100
+          : ((entry - closePrice) / entry) * 100);
 
     // Why this trade ended, distinct from the win/loss result itself — written to a
     // new `close_reason` column so exported reports can group by exit mechanism

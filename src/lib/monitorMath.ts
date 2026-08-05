@@ -13,6 +13,34 @@ export function clampAutoCloseAfterTp1(
   return isLong ? Math.max(lastClose, floor) : Math.min(lastClose, floor);
 }
 
+// 2026-08-05（docs/ANALYSIS-2026-08-05-提升盈虧率的可動項目.md #1）：TP1
+// 過去只是里程碑，不是實際成交事件——不管碰過 TP1 沒有，最終 R 一律用
+// 「最後出場價」算 100%，等於把「碰到 TP1 又回吐」的那段有利波動當成
+// 沒發生過。20 筆有 MFE 樣本裡，碰到 TP1 的 5 筆平均回吐超過一半（實得
+// 合計 5.31R vs 若在 TP1 全出會是 9.74R）。
+//
+// 改成 TP1 部分停利：碰到 TP1 視為平掉 fraction（預設 50%）部位鎖定該處
+// 的 R，剩下的部位才繼續照最終出場價計算，兩段加權平均成最終 R。不需要
+// 新增資料表欄位——TP1 價格是既有固定欄位，可以隨時反推那一段的 R，不用
+// 另外儲存「當時鎖定的 R」。
+//
+// 固定 50%、不做成使用者可調參數：分析文件明確建議「先用中庸值，不要想
+// 一次調到最佳」——樣本只有 5 筆，決定不出真正的最佳比例，開放調整只會
+// 被拿去在雜訊上亂試。
+export const TP1_PARTIAL_FRACTION = 0.5;
+
+export function blendTp1PartialPnl(
+  entry: number,
+  tp1: number,
+  finalExitPrice: number,
+  isLong: boolean,
+  fraction: number = TP1_PARTIAL_FRACTION,
+): number {
+  const pnlAt = (price: number) =>
+    isLong ? ((price - entry) / entry) * 100 : ((entry - price) / entry) * 100;
+  return fraction * pnlAt(tp1) + (1 - fraction) * pnlAt(finalExitPrice);
+}
+
 // Shared "what happens after this position is live" walk, used by both the
 // reject-funnel shadow simulator (gate-rejected candidates that were never
 // really taken) and the time-stop shadow simulator (real trades force-closed
