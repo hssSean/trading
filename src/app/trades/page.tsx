@@ -244,7 +244,15 @@ const TradeRow = memo(function TradeRow({
             const color = isManual
               ? (isWin ? '#5DCAA5' : isLossTrade(trade) ? '#F09595' : '#2DD4BF')
               : RESULT_COLOR[trade.result!];
-            return <PillBadge label={RESULT_LABEL[trade.result!]} color={color} />;
+            // 2026-08-05：伺服器端的時間止損／到期平倉也是寫 result='MANUAL_CLOSE'，
+            // 只看 result 會一律標成「手動平倉」，使用者因此以為是自己或某個 bug
+            // 把單平掉的（實際是系統依規則關的）。有 close_reason 時優先用它，
+            // 只有真的是使用者按平倉（close_reason='manual'）或舊資料沒有這個
+            // 欄位時，才退回 RESULT_LABEL。
+            const label = isManual && trade.closeReason
+              ? (CLOSE_REASON_LABEL[trade.closeReason] ?? RESULT_LABEL[trade.result!])
+              : RESULT_LABEL[trade.result!];
+            return <PillBadge label={label} color={color} />;
           })()}
           <span className="text-accent text-[12px] num">{trade.score}</span>
         </div>

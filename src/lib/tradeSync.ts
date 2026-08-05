@@ -19,6 +19,12 @@ export interface ServerOutcome {
   closedAt: number | null;
   exitPrice: number | null;
   pnlPercent: number | null;
+  // 2026-08-05：伺服器關單時寫的 close_reason（time_stop_stall / tp2 /
+  // trailing_stop / ...）。以前完全沒同步回客戶端，導致紀錄頁只看得到
+  // result='MANUAL_CLOSE' 就一律標成「手動平倉」——但伺服器端的時間止損、
+  // 到期平倉都是用 MANUAL_CLOSE 這個 result 值，使用者因此以為是自己（或
+  // 某個 bug）把單平掉的。有了這個欄位才分得出「系統關的」與「我自己關的」。
+  closeReason?: string | null;
 }
 
 // 本地單需要參與計算的最小欄位。
@@ -34,7 +40,7 @@ export type OutcomeAction =
   // TP1 達標、仍在等 TP2：記錄 result=WIN_TP1 但「不」關單（closedAt 保持 undefined）。
   | { kind: 'markTp1'; exitPrice: number; pnlPercent: number }
   // 伺服器已寫入 closed_at：真正結束（移動止損 / TP2 / 原止損 / 時間止損 / 到期）。
-  | { kind: 'finalize'; result: TradeResult; exitPrice: number; pnlPercent: number; closedAt: number };
+  | { kind: 'finalize'; result: TradeResult; exitPrice: number; pnlPercent: number; closedAt: number; closeReason?: string };
 
 function pnlPercentOf(local: LocalTrade, exitPrice: number): number {
   const raw = local.direction === 'LONG'
@@ -59,6 +65,7 @@ export function resolveServerOutcome(local: LocalTrade, srv: ServerOutcome): Out
       // 伺服器 pnl_percent 為權威值（依實際出場價計算）；缺值時才本地推算。
       pnlPercent: srv.pnlPercent ?? pnlPercentOf(local, exitPrice),
       closedAt: srv.closedAt,
+      ...(srv.closeReason ? { closeReason: srv.closeReason } : {}),
     };
   }
 

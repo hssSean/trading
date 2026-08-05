@@ -155,6 +155,10 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     statusConfirmed: (r.result as TradeRecord['result']) === 'WIN_TP1' && (r.closed_at as number | null) == null,
     signalPrice: (r.signal_price as number | null) ?? undefined,
     filledAt:    (r.filled_at as number | null) ?? undefined,
+    // 伺服器寫的關單原因（time_stop_stall / tp2 / trailing_stop / ...）。
+    // 紀錄頁靠這個分辨「系統關的」與「使用者自己按平倉的」——沒有它，
+    // 伺服器的時間止損（result='MANUAL_CLOSE'）會被一律標成「手動平倉」。
+    closeReason: (r.close_reason as string | null) ?? undefined,
     tier:        ((r.tier as string | null) as 'A' | 'B' | undefined) ?? undefined,
     scoreBreakdown: (r.score_breakdown as TradeRecord['scoreBreakdown'] | null) ?? undefined,
   };
@@ -171,9 +175,12 @@ function applyServerOutcome(targetId: string, local: TradeRecord, r: Record<stri
     closedAt:   (r.closed_at as number | null) ?? null,
     exitPrice:  (r.exit_price as number | null) ?? null,
     pnlPercent: (r.pnl_percent as number | null) ?? null,
+    closeReason: (r.close_reason as string | null) ?? null,
   });
   if (action.kind === 'finalize') {
-    useStore.getState().finalizeFromServer(targetId, action.result, action.exitPrice, action.pnlPercent, action.closedAt);
+    useStore.getState().finalizeFromServer(
+      targetId, action.result, action.exitPrice, action.pnlPercent, action.closedAt, action.closeReason,
+    );
     return true;
   }
   if (action.kind === 'markTp1') {
@@ -520,7 +527,10 @@ export async function fullSyncFromSupabase(userId: string): Promise<number> {
       exit_price:   t.exitPrice ?? null,
       pnl_percent:  t.pnlPercent ?? null,
       entry_notes:  t.entryNotes ?? '',
-      // Same rule as saveToSupabase's finalizedRows: only present for a manual close.
+      // Same rule as saveToSupabase's finalizedRows: omitted (not nulled) when absent.
+      // 2026-08-05：closeReason 現在也會從伺服器同步回本地，所以這裡推回去的
+      // 可能是伺服器自己寫的值——寫回同一個值是冪等的，不會蓋錯；重點仍是
+      // 「沒有值時要省略而不是寫 null」，否則會清掉 route.ts 寫的關單原因。
       ...(t.closeReason ? { close_reason: t.closeReason } : {}),
     }));
     await Promise.all(rows.map(({ id, ...patch }) =>
@@ -648,10 +658,12 @@ export async function saveToSupabase(userId: string) {
     result:      t.result ?? null,
     exit_price:  t.exitPrice ?? null,
     pnl_percent: t.pnlPercent ?? null,
-    // Only set for a manual close (useStore.closeTrade sets this locally). Omitted
-    // — not written as null — for every server-auto-closed trade, so this blanket
-    // per-tick push never clobbers the close_reason route.ts already wrote
-    // (tp2/trailing_stop/stop_loss/time_stop_stall/...).
+    // Set by the client's own manual close (useStore.closeTrade), and — since
+    // 2026-08-05 — also mirrored back from the server so the journal can tell a
+    // system time-stop apart from a user close. Either way it's omitted, NOT
+    // written as null, when absent: a null here would wipe the close_reason
+    // route.ts wrote (tp2/trailing_stop/stop_loss/time_stop_stall/...). Pushing
+    // back a value that originally came from the server is idempotent.
     ...(t.closeReason ? { close_reason: t.closeReason } : {}),
   }));
 

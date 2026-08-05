@@ -25,6 +25,39 @@ const srv = (over: Partial<ServerOutcome> = {}): ServerOutcome => ({
   closedAt: over.closedAt ?? null,
   exitPrice: over.exitPrice ?? null,
   pnlPercent: over.pnlPercent ?? null,
+  closeReason: over.closeReason ?? null,
+});
+
+// 2026-08-05：伺服器的時間止損／到期平倉都寫 result='MANUAL_CLOSE'，紀錄頁
+// 若只看 result 會一律標成「手動平倉」，使用者以為是自己把單平掉的。
+// close_reason 必須跟著 finalize 一起帶回本地，紀錄頁才分得出來。
+describe('resolveServerOutcome — close_reason 同步（分辨系統關單 vs 使用者關單）', () => {
+  it('伺服器時間止損（MANUAL_CLOSE + time_stop_stall）→ finalize 要帶回 closeReason', () => {
+    const action = resolveServerOutcome(
+      local(),
+      srv({ result: 'MANUAL_CLOSE', closedAt: 1_700_000_000_000, exitPrice: 101, closeReason: 'time_stop_stall' }),
+    );
+    expect(action.kind).toBe('finalize');
+    if (action.kind === 'finalize') expect(action.closeReason).toBe('time_stop_stall');
+  });
+
+  it('伺服器沒有 close_reason（舊資料列）→ closeReason 為 undefined，不可寫成 null 蓋掉本地值', () => {
+    const action = resolveServerOutcome(
+      local(),
+      srv({ result: 'MANUAL_CLOSE', closedAt: 1_700_000_000_000, exitPrice: 101 }),
+    );
+    expect(action.kind).toBe('finalize');
+    if (action.kind === 'finalize') expect(action.closeReason).toBeUndefined();
+  });
+
+  it('移動止損關單的 close_reason 一樣帶得回來', () => {
+    const action = resolveServerOutcome(
+      local({ result: 'WIN_TP1' }),
+      srv({ result: 'WIN_TP1', closedAt: 1_700_000_000_000, exitPrice: 108, closeReason: 'trailing_stop' }),
+    );
+    expect(action.kind).toBe('finalize');
+    if (action.kind === 'finalize') expect(action.closeReason).toBe('trailing_stop');
+  });
 });
 
 describe('resolveServerOutcome', () => {

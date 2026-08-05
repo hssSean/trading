@@ -1034,8 +1034,19 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       await setLossCooldown(trade.symbol as string, trade.direction as string);
     } else if (timeStopFired) {
       // 時間止損＝盤面停滯而非證偽；短冷卻 4h 防止立刻重進同一個停滯 setup
-      // 空轉手續費，倉位仍讓給其他幣種
-      await setLossCooldown(trade.symbol as string, trade.direction as string, 4 * 3600);
+      // 空轉手續費，倉位仍讓給其他幣種。
+      //
+      // 2026-08-05：原本只鎖「同方向」，但時間止損的判定依據是「8 根 K 線
+      // 都卡在 −0.3R ~ +0.3R」——這是對「這個標的現在在盤整」的診斷，不是
+      // 對「做多錯了」的診斷。只鎖同向的話，剛把停滯的多單砍掉，下一輪
+      // (5 分鐘後) 反向的空單訊號完全暢通，等於在同一個盤整區來回付手續費，
+      // 正是上面註解想避免的事。使用者實際踩到：持倉被時間止損關掉後，
+      // 立刻又收到同一個標的的新掛單推薦。改成兩個方向都鎖 4h。
+      //
+      // 註：LOSS 維持只鎖同向不變——止損是對「這個方向錯了」的診斷，
+      // 反向反而可能是對的，兩者語意不同，不能一起改。
+      await setLossCooldown(trade.symbol as string, 'LONG',  4 * 3600);
+      await setLossCooldown(trade.symbol as string, 'SHORT', 4 * 3600);
     }
 
     {
@@ -2290,10 +2301,12 @@ export async function GET(req: NextRequest) {
             { skipKey = 'btc_pause'; skipReason = `BTC 1H 異常急漲（${btcState.movePct ?? '?'}%，門檻 ±${btcState.moveThresholdPct ?? '?'}%）— ${symbol} 做空暫停 2h`; }
         }
 
-        // Post-loss cooldown: this symbol+direction stopped out within 24h
+        // 這個 symbol+direction 剛止損（24h，只鎖同向）或剛被時間止損
+        // （4h，兩個方向都鎖，見 monitorActiveTrades 的說明）。這裡只看得到
+        // 「有沒有冷卻」看不到來源，所以文案不寫死時數與原因。
         if (!skipReason && await isOnLossCooldown(symbol, entrySignal.direction)) {
           skipKey = 'loss_cooldown';
-          skipReason = `跳過 — ${symbol} ${entrySignal.direction === 'LONG' ? '做多' : '做空'} 24h 內止損過，同向暫停一天`;
+          skipReason = `跳過 — ${symbol} ${entrySignal.direction === 'LONG' ? '做多' : '做空'} 冷卻中（近期止損 24h／時間止損 4h）`;
         }
 
         // v2.4 §1.2: directional bias hold — after an opportunity-expired cancel,
