@@ -179,13 +179,7 @@ export const useStore = create<StoreState>()(
       closeTrade: (id, result, exitPrice) => {
         set((s) => ({
           trades: s.trades.map((t) => {
-            if (t.id !== id || t.result) return t; // skip already-closed
-            // 2026-08-05：跟伺服器端 route.ts 用同一套 TP1 部分停利加權——
-            // t.status==='tp1_hit' 代表這筆單曾經碰到 TP1（tp1-watching 狀態
-            // 本身就是 result 已有值但未 closedAt，這裡的 t.result 早退守衛
-            // 目前會讓這個分支對 tp1-watching 單形同無效，是另一個獨立問題，
-            // 不在這次修改範圍——但公式本身先寫對，之後守衛修好就自動接上，
-            // 不會留一個「連著改」卻算錯的坑。
+            if (t.id !== id || t.closedAt) return t; // skip already-closed（真正結束以 closedAt 為準，tp1-watching 單雖有 result 但未 closedAt，必須放行）
             const reachedTp1 = t.status === 'tp1_hit';
             const pnl = reachedTp1
               ? blendTp1PartialPnl(t.entry, t.tp1, exitPrice, t.direction === 'LONG')
