@@ -631,8 +631,11 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 
 ## P3 — UI 殘留（低優先）
 
-### 11. login 頁裝飾 emoji
-`src/app/login/page.tsx` 有 1 處 📈，從未終端化過。
+### ~~11. login 頁裝飾 emoji~~ ✅ 已完成（`6d21295`，2026-08-06）
+`src/app/login/page.tsx` 的 📈 換成終端風格 `[ CT ]`（font-mono + tracking-widest），
+比照其餘頁面 2A 階段的終端化。純文字/class 換行，tsc/build 過，瀏覽器驗證因本機
+無真實 Supabase session 卡在 `StoreHydration.tsx` 的 `authReady` 載入圈（既有已知
+限制，非本次改動造成）。
 
 ### 12. 零星功能性符號
 `StoreHydration.tsx`（⚠/✕）、`trades/page.tsx`（✓ checkbox）、`SignalCard.tsx`（⚠/✓）
