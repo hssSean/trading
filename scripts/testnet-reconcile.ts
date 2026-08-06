@@ -58,6 +58,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// Binance rejects newClientOrderId over 36 chars (-4015) — the original
+// "testnet-reconcile-<tag>-<ms timestamp>" prefix was 38+ chars for several
+// tags and only surfaced when actually run against demo-fapi (tsc/unit tests
+// can't catch a string-length limit enforced server-side). Kept short with
+// margin rather than truncating, since truncation risks silent collisions.
+function mkId(tag: string): string {
+  return `tnr-${tag}-${Date.now()}`;
+}
+
 async function fetchMarkPrice(symbol: string): Promise<number> {
   // Public endpoint — demo-fapi has its own price feed, separate from mainnet.
   const res = await axios.get('https://demo-fapi.binance.com/fapi/v1/ticker/price', { params: { symbol } });
@@ -123,7 +132,7 @@ async function main() {
   const testQty = roundToStepSize(Math.max((f.minNotional * 1.5) / limitPrice, f.stepSize), f.stepSize);
   const placed = await client.placeOrder({
     symbol: SYMBOL, side: 'BUY', type: 'LIMIT', quantity: testQty, price: limitPrice,
-    timeInForce: 'GTC', newClientOrderId: `testnet-reconcile-limit-${Date.now()}`,
+    timeInForce: 'GTC', newClientOrderId: mkId('limit'),
   });
   check('限價單掛單成功', placed.status === 'NEW', placed);
 
@@ -150,7 +159,7 @@ async function main() {
   const openQty = roundToStepSize(Math.max((f.minNotional * 1.2) / markPrice, f.stepSize), f.stepSize);
   const openOrderRes = await client.placeOrder({
     symbol: SYMBOL, side: 'BUY', type: 'MARKET', quantity: openQty,
-    newClientOrderId: `testnet-reconcile-open-${Date.now()}`,
+    newClientOrderId: mkId('open'),
   });
   check('市價單送出成功', !!openOrderRes.orderId, openOrderRes);
 
@@ -175,7 +184,7 @@ async function main() {
   const stopPrice = roundToTickSize(entryPrice * 0.97, f.tickSize); // 3% 止損，僅供驗證流程用
   const stopOrder = await client.placeOrder({
     symbol: SYMBOL, side: 'SELL', type: 'STOP_MARKET', stopPrice, closePosition: true,
-    newClientOrderId: `testnet-reconcile-sl-${Date.now()}`,
+    newClientOrderId: mkId('sl'),
   });
   check('止損單掛單成功', !!stopOrder.orderId, stopOrder);
 
@@ -187,7 +196,7 @@ async function main() {
   step('14. 平倉（reduceOnly 市價全平）');
   const closeRes = await client.placeOrder({
     symbol: SYMBOL, side: 'SELL', type: 'MARKET', quantity: openQty, reduceOnly: true,
-    newClientOrderId: `testnet-reconcile-close-${Date.now()}`,
+    newClientOrderId: mkId('close'),
   });
   check('平倉單送出成功', !!closeRes.orderId, closeRes);
 
