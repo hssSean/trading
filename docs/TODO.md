@@ -656,7 +656,9 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 
 > 討論於 2026-07-26。**執行引擎放哪還沒決定**（見下方決策點）。
 > **第一批安全基礎設施已完成**（commit `580e2ad`，2026-07-26）——見 §進度。
-> 2026-08-06：補上 TP1 部分平倉/移動止損的下單決策純函數（`db5811d`），
+> 2026-08-06：補上 testnet 對帳腳本（`scripts/testnet-reconcile.ts`），
+> 使用者自己在本機執行——下單這件事（即使 testnet 假錢）刻意不代為執行。
+> 補上 TP1 部分平倉/移動止損的下單決策純函數（`db5811d`），
 > 接著補掛單競態決策 + runner 執行骨架（`9beb89a`）。
 
 ## 進度
@@ -709,9 +711,14 @@ vitest 完全沒設定過，所有測試都繞開這條路用相對路徑）。
 - kill switch 觸發後的實際 flatten 動作（現在只設 flag，沒有一鍵撤單平倉；
   `runner.ts` 讀到 active 會跳過新動作，但不會主動平倉）
 - ~~部分成交、取消/成交競態的處理~~ 決策邏輯已完成（`pendingOrderLifecycle.ts`），
-  **但完全沒在真實網路環境測過**——`extractBinanceErrorCode` 假設的錯誤
-  回應格式（`error.response.data.code`）是照 Binance 文件推的，沒對過
-  testnet 的真實錯誤形狀
+  **`npm run testnet-reconcile` 腳本已寫好（`scripts/testnet-reconcile.ts`），
+  但還沒有人實際跑過**——`extractBinanceErrorCode` 假設的錯誤回應格式
+  （`error.response.data.code`）是照 Binance 文件推的，沒對過 testnet 的
+  真實錯誤形狀。腳本會走一輪開倉→補止損→平倉的完整流程，15 個 ✅/❌ 檢查點，
+  其中第 8 步專門驗證真實 -2011 的格式。使用需要自己申請 testnet API key
+  （testnet.binancefuture.com，GitHub 登入，免費送假 USDT），設定成環境變數
+  跑 `npm run testnet-reconcile [SYMBOL]`——下單這件事即使是假錢也刻意
+  不代為執行，跑完把輸出貼回來，有 ❌ 再一起看
 - **策略層還沒接進 runner**：`runner.ts` 吃的是「已經決定好的動作」
   （`pendingCancels`/`tp1Closes`/`trailingStopUpdates`），這些動作現在
   誰來產生完全沒寫——route.ts 的 candle-scan 判斷邏輯（該不該撤單、
