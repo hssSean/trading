@@ -29,6 +29,24 @@ export function clampAutoCloseAfterTp1(
 // 被拿去在雜訊上亂試。
 export const TP1_PARTIAL_FRACTION = 0.5;
 
+// 2026-08-06（docs/ANALYSIS-2026-08-06B-策略可行性複查與修改方案.md 方法3）：
+// 止損出場（原始止損、TP1後移動止損）在真實市場是 STOP_MARKET 型執行——
+// 觸價後才送市價單，快速行情下實際成交可能比觸發價更差。這個系統一直假設
+// 剛好在觸發價成交、零滑價：8/6 CSV 查出 8 筆止損出場全部精準 −1.00R，但
+// MAE 資料顯示其中 5 筆的 K 線實際走到 −1.33/−1.10/−1.08/−1.06/−1.05R——
+// 代表帳目比真實情況樂觀，而目前整體扣成本後平均只有 +0.18R/筆，這個樂觀
+// 偏差不是小數目。
+//
+// 不是策略調參，是讓記帳誠實：套一個保守、不是照這批樣本硬湊出來的固定值，
+// 跟既有 scripts/backtest.ts 的進場滑價假設（SLIP = 0.03%）同一數量級。
+// 只用在止損類出場（STOP_MARKET 語意）——TP1/TP2 是限價單性質，觸及即成交
+// 不會有逆price滑價，不套用這個模型。
+export const STOP_EXIT_SLIPPAGE_PCT = 0.0005; // 0.05%，對交易者不利的方向
+
+export function applyStopSlippage(stopPrice: number, isLong: boolean): number {
+  return isLong ? stopPrice * (1 - STOP_EXIT_SLIPPAGE_PCT) : stopPrice * (1 + STOP_EXIT_SLIPPAGE_PCT);
+}
+
 export function blendTp1PartialPnl(
   entry: number,
   tp1: number,

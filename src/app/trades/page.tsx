@@ -921,7 +921,15 @@ export default function TradesPage() {
           const entry      = r.entry as number;
           const stopLoss   = r.stop_loss as number;
           const pnlPercent = (r.pnl_percent as number | null) ?? null;
-          const tier       = (r.tier as string | null) ?? 'A';
+          // 2026-08-06：舊資料列（v2.1 tier 欄位加入前）tier 是 NULL，原本這裡
+          // `?? 'A'` 會把它們一律當成 A級匯出——不是「預設安全值」，是捏造一個
+          // 不存在的分級標籤。這個匯出檔是策略分析的資料來源，捏造標籤會直接
+          // 汙染任何依「級別」分組的統計結論（8/6 分析已查出 27 筆因此誤標，
+          // 含兩筆最大贏家，見 docs/ANALYSIS-2026-08-06B）。改成不強制預設，
+          // 「級別」欄位如實顯示「未知」，帳戶R 的加權邏輯（下面 acctR）維持
+          // 原樣不變——`tier === 'B' ? 0.5 : 1.0` 對 tier=null 算出 1.0，這是
+          // tier 系統加入前全站統一風險倍率的正確歷史還原，不是這次要修的問題。
+          const tier       = (r.tier as string | null) ?? null;
           const rMultiple  = calcR(entry, stopLoss, pnlPercent);
           const acctR      = rMultiple === '' ? '' : (parseFloat(rMultiple) * (tier === 'B' ? 0.5 : 1.0)).toFixed(2);
           const closeReasonKey = (r.close_reason as string | null) ?? null;
@@ -947,7 +955,7 @@ export default function TradesPage() {
             maeR,
             sb?.extensionAtr ?? '',
             sb?.entryDistAtr ?? '',
-            `${tier}級·${r.timeframe}`,
+            `${tier ? tier + '級' : '未知'}·${r.timeframe}`,
             r.strategy ?? '',
             r.regime ? (REGIME_LABEL[r.regime as string] ?? r.regime) : '',
             r.confidence ?? '',

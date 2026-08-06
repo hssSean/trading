@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, TP1_PARTIAL_FRACTION, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, TP1_PARTIAL_FRACTION, applyStopSlippage, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
@@ -725,11 +725,11 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         // the pre-TP1 profit ladder was removed; the stop stays at the original SL
         // until TP1 is reached).
         if (localTp1Hit && trailingStop > 0 && c.low <= trailingStop) {
-          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
+          closeResult = 'WIN_TP1'; closePrice = applyStopSlippage(trailingStop, true); hitTrailingStop = true; break;
         }
         if (c.low <= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
-          closePrice  = trade.stop_loss as number;
+          closePrice  = applyStopSlippage(trade.stop_loss as number, true);
           break;
         }
         // Post-TP1: ratchet trailing stop upward via 2×ATR (not on the init candle)
@@ -752,11 +752,11 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         }
         // Trailing stop (SHORT: stop is ABOVE, hit when high >= stop) — ONLY after TP1.
         if (localTp1Hit && trailingStop > 0 && c.high >= trailingStop) {
-          closeResult = 'WIN_TP1'; closePrice = trailingStop; hitTrailingStop = true; break;
+          closeResult = 'WIN_TP1'; closePrice = applyStopSlippage(trailingStop, false); hitTrailingStop = true; break;
         }
         if (c.high >= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
-          closePrice  = trade.stop_loss as number;
+          closePrice  = applyStopSlippage(trade.stop_loss as number, false);
           break;
         }
         // Post-TP1: ratchet trailing stop downward via 2×ATR (SHORT)
