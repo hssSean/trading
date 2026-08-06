@@ -656,6 +656,7 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 
 > 討論於 2026-07-26。**執行引擎放哪還沒決定**（見下方決策點）。
 > **第一批安全基礎設施已完成**（commit `580e2ad`，2026-07-26）——見 §進度。
+> 2026-08-06：補上 TP1 部分平倉/移動止損的下單決策純函數（`db5811d`）。
 
 ## 進度
 
@@ -669,6 +670,17 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 | `binanceClient.ts` | HMAC-SHA256 簽名 client（讀+寫端點都有，寫的還沒被呼叫過） | 8 |
 | `killSwitch.ts` | Redis flag + 自動觸發判斷（純函數） | 6 |
 | `watchdog.ts` | 持倉/掛單對帳（抓裸倉、孤兒單） | 9 |
+| `orderLifecycle.ts` | TP1 部分平倉／移動止損改單的下單決策（純函數） | 15 |
+
+**2026-08-06（`db5811d`）**：`docs/ANALYSIS-2026-08-06-自動交易缺口清單.md` §三
+點名的 11 種結局裡，挑最危險的兩項先做成純函數——`decideTp1PartialClose`
+（reduceOnly 平倉數量，stepSize 無條件捨去，clientOrderId 固定用 tradeId 防重複
+平倉）、`decideTrailingStopReplace`（撤舊單+掛新單的順序決策：**先掛新、再撤舊**，
+兩張 closePosition 單短暫並存是安全的——先觸發那張會平倉，另一張之後對空倉
+觸發只會報錯，不會二次出場；反過來先撤後掛，掛單一失敗就是真裸倉）。只往
+有利方向棘輪、目標價沒有更好時直接拒絕改單。順便補了 `vitest.config.ts`
+的 `@/` alias（第一次有 `src/engine` 需要 cross-import `src/lib`，之前
+vitest 完全沒設定過，所有測試都繞開這條路用相對路徑）。
 
 **還沒做、真錢上線前必做**：
 - watchdog 的輪詢迴圈本體（reconcile 邏輯有了，包成常駐 loop 還沒寫）
