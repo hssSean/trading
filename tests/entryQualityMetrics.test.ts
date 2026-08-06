@@ -9,12 +9,18 @@ import type { Candle } from '../src/types';
 // generateSignals correctly returns nothing, leaving the assertions below
 // vacuous. Tuned deliberately: the point is to get *a* real signal object out
 // so the metric fields can be asserted on, not to model a realistic market.
-function risingWithVolumeSurge(n: number): Candle[] {
+//
+// 2026-08-07：growth/oscillation 從 1.0035/0.012 調到 1.002/0.02——原本的
+// 陡峭趨勢讓拉回進場位跟現價差了 3.19×ATR，超過同一天新增的
+// MAX_ENTRY_DIST_ATR（2.5）濾網，訊號被正確擋掉，斷言全部空轉。這裡改的
+// 是合成資料本身的參數（漲幅趨緩、震盪加大讓拉回位靠近現價），不是放寬
+// 濾網去遷就測試。
+function risingWithVolumeSurge(n: number, growth = 1.002, osc = 0.02): Candle[] {
   const out: Candle[] = [];
   let price = 100;
   for (let i = 0; i < n; i++) {
-    price = price * 1.0035;
-    const mid = price * (1 + 0.012 * Math.sin(i / 6));
+    price = price * growth;
+    const mid = price * (1 + osc * Math.sin(i / 6));
     const open = mid * (1 - 0.0015);
     const close = mid;
     out.push({
@@ -72,6 +78,27 @@ describe('進場品質量測（scoreBreakdown 的 extensionAtr / entryDistAtr）
       const b = s.scoreBreakdown!;
       const summed = 40 + b.trend + b.momentum + b.structure + b.volume + b.priceAction + b.penalties;
       expect(summed).toBe(s.score);
+    }
+  });
+});
+
+describe('MAX_ENTRY_DIST_ATR 濾網（docs/ANALYSIS-2026-08-06B 方法1）', () => {
+  it('掛單距離現價超過門檻時不發訊號——原本 1.0035/0.012 的陡峭趨勢實測 entryDistAtr=3.19，本測試就是靠這組參數觸發濾網', () => {
+    const steepCandles = risingWithVolumeSurge(260, 1.0035, 0.012);
+    const dbg: { long?: number; short?: number } = {};
+    const signals = generateSignals('BTCUSDT', '1h', steepCandles, 'LONG', 'trending', dbg);
+    // 分數本身仍然合格（dbg.long 遠高於 60 分門檻），純粹是距離濾網擋掉——
+    // 證明這是濾網在生效，不是分數不夠這種別的原因造成的假陽性。
+    expect(dbg.long).toBeGreaterThanOrEqual(60);
+    expect(signals.length).toBe(0);
+  });
+
+  it('掛單距離在門檻內時正常發訊號——調過的 1.002/0.02 實測 entryDistAtr=1.53，遠低於 2.5 門檻', () => {
+    const closeCandles = risingWithVolumeSurge(260, 1.002, 0.02);
+    const signals = generateSignals('BTCUSDT', '1h', closeCandles, 'LONG', 'trending');
+    expect(signals.length).toBeGreaterThan(0);
+    for (const s of signals) {
+      expect(Math.abs(s.scoreBreakdown!.entryDistAtr!)).toBeLessThan(2.5);
     }
   });
 });

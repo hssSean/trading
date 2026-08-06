@@ -158,6 +158,16 @@ const HIGH_VOLIT_PCT     = 0.03;  // ATR% above this → −3 penalty (soft sign
 // so 3% double-penalized ordinary altcoins. 4.5% still blocks the wildest
 // coins for marginal (B-tier) signals while restoring normal-vol flow.
 const B_TIER_MAX_ATR     = 0.045;
+// 2026-08-07（docs/ANALYSIS-2026-08-06B 方法1）：掛單價距離現價太遠時，
+// 回調到位的機率低——8/6 CSV 用既有的被動量測 entryDistAtr 查出，成交組
+// 平均 1.06×ATR，未成交組（逾期/行情走遠取消）平均 2.27×ATR。cancelStats
+// 影子模擬已證實「放棄等回調、市價追價進場」不能提升期望值（逾期未成交
+// 淨 −8.79R）——這個濾網不是為了多賺，是少發那些統計上大概率掛不到、
+// 純粹製造通知雜訊跟 CPU 消耗的訊號。
+// 門檻取 2.5：樣本重疊（成交組最大 2.04、未成交組最小 1.05，找不到乾淨
+// 切點），只砍最極端的長尾（未成交組 16 筆裡 5 筆 ≥3.10）避免誤傷太多
+// 本來會成交的單。樣本仍薄（21 筆），之後有更多資料要重新檢視這個門檻。
+const MAX_ENTRY_DIST_ATR = 2.5;
 const NO_LEVEL_PENALTY   = 3;
 const GROUP_CAPS = { trend: 15, momentum: 10, structure: 15, volume: 10, priceAction: 10 } as const;
 
@@ -509,6 +519,9 @@ export function generateSignals(
     longScore -= NO_LEVEL_PENALTY;
     longReasons.push('⚠ 無明確回測位，扣 3 分');
   }
+  // 方法1：掛單距離現價太遠就不發訊號，見 MAX_ENTRY_DIST_ATR 註解。
+  const longEntryDistAtr = atrVal > 0 ? (price - longEntry) / atrVal : 0;
+  const longEntryTooFar  = longEntryDistAtr > MAX_ENTRY_DIST_ATR;
 
   // ── SHORT: find best entry level ─────────────────────────────
   let shortEntry = price;
@@ -549,6 +562,9 @@ export function generateSignals(
     shortScore -= NO_LEVEL_PENALTY;
     shortReasons.push('⚠ 無明確回測位，扣 3 分');
   }
+  // 方法1：掛單距離現價太遠就不發訊號，見 MAX_ENTRY_DIST_ATR 註解。
+  const shortEntryDistAtr = atrVal > 0 ? (shortEntry - price) / atrVal : 0;
+  const shortEntryTooFar  = shortEntryDistAtr > MAX_ENTRY_DIST_ATR;
 
   // Report raw scores (all bonuses/penalties applied) for near-miss diagnostics
   if (debugOut) { debugOut.long = longScore; debugOut.short = shortScore; }
@@ -577,7 +593,7 @@ export function generateSignals(
     longScore >= effectiveMinScore && longGroups >= 3 ? 'A'
     : longScore >= MIN_SCORE_TIER_B && longGroups >= 2 && atrPct <= B_TIER_MAX_ATR ? 'B'
     : null;
-  if (longTier && longScore > shortScore && longIntradayOk) {
+  if (longTier && longScore > shortScore && longIntradayOk && !longEntryTooFar) {
     const sl   = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
                : longSR  ? Math.min(longSR.price * 0.995, longEntry - slBuffer)
                : longEntry - slBuffer;
@@ -615,7 +631,7 @@ export function generateSignals(
         // LONG: 正值 = 價格已在 EMA20 上方（朝訊號方向延伸）
         extensionAtr: roundAtr(extAtrRaw),
         // 正值 = 進場價低於現價，要等回調才會成交；越大代表回調要越深
-        entryDistAtr: atrVal > 0 ? roundAtr((price - longEntry) / atrVal) : 0,
+        entryDistAtr: roundAtr(longEntryDistAtr),
       },
     });
     if (longTier === 'B') longReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');
@@ -626,7 +642,7 @@ export function generateSignals(
     shortScore >= effectiveMinScore && shortGroups >= 3 ? 'A'
     : shortScore >= MIN_SCORE_TIER_B && shortGroups >= 2 && atrPct <= B_TIER_MAX_ATR ? 'B'
     : null;
-  if (shortTier && shortScore > longScore && shortIntradayOk) {
+  if (shortTier && shortScore > longScore && shortIntradayOk && !shortEntryTooFar) {
     const sl   = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)
                : shortSR ? Math.max(shortSR.price * 1.005, shortEntry + slBuffer)
                : shortEntry + slBuffer;
@@ -661,7 +677,7 @@ export function generateSignals(
         // SHORT 鏡像：正值 = 價格已在 EMA20 下方（朝訊號方向延伸）
         extensionAtr: roundAtr(-extAtrRaw),
         // 正值 = 進場價高於現價，要等反彈才會成交
-        entryDistAtr: atrVal > 0 ? roundAtr((shortEntry - price) / atrVal) : 0,
+        entryDistAtr: roundAtr(shortEntryDistAtr),
       },
     });
     if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');

@@ -29,7 +29,13 @@ interface LockEntry {
   locked:       boolean; // true = active trade in journal
 }
 const LOCK_TTL_SEC     = 24 * 3600;        // 24h lock for intraday trades
-const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2h cooldown between signals (was 6h)
+// 2026-08-07：2h → 6h。掛單過期用的是 WAITING_EXPIRY_BARS=4 根K線，這批
+// 資料主力時框是 1h，等於自然過期窗口就有 4h——2h 冷卻比自然過期還短，
+// 結構上不可能真的擋住「過期解鎖後立刻再發同一個幣種」這件事，冷卻機制
+// 形同虛設（另見 unlockSymbol 的 sentAt 歸零 bug，兩者疊加是 8/6 CSV 查出
+// ADAUSDT/ZECUSDT 重複洗版的直接原因）。6h 給出比自然過期窗口更長的緩衝，
+// 不是照這批樣本精算出的最佳值，是中庸值——樣本不足以決定精確門檻。
+const COOLDOWN_MS      = 6 * 60 * 60 * 1000; // 6h cooldown between signals for the same symbol
 const STRONG_THRESHOLD   = 65;               // Strategy A: v2 spec ≥65 to notify
 const STRONG_THRESHOLD_B = 13;               // Strategy B: base 10 (BB+RSI cross) + ≥1 confirmation
 const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older than 24h
@@ -162,17 +168,24 @@ async function setLock(symbol: string, entry: LockEntry): Promise<void> {
   memLock.set(symbol, entry);
 }
 
+// 2026-08-07（docs/ANALYSIS-2026-08-06B 方法2）：這裡原本把 sentAt 歸零
+// （`sentAt: 0`），意圖大概是「解鎖了就當作從沒發過訊號」。但下面 onCooldown
+// 的判斷式是 `(now - last.sentAt) < COOLDOWN_MS`——sentAt 歸零讓這個算式
+// 變成 `(now - 0) < COOLDOWN_MS`，對任何現實的 now 恆為 false，等於冷卻
+// 機制在每次解鎖後直接失能。8/6 CSV 查出 ADAUSDT/ZECUSDT 在 40 筆訊號裡
+// 各出現 10 次/7 次，時間間隔集中在解鎖後幾乎立刻重發。改成保留原本的
+// sentAt，讓 COOLDOWN_MS 真正管得到「解鎖後多快可以再發」。
 async function unlockSymbol(symbol: string): Promise<void> {
   const r = getRedis();
   if (r) {
     try {
       const entry = await r.get<LockEntry>(`tlock:${symbol}`);
-      if (entry) await r.set(`tlock:${symbol}`, { ...entry, locked: false, sentAt: 0 }, { ex: LOCK_TTL_SEC });
+      if (entry) await r.set(`tlock:${symbol}`, { ...entry, locked: false }, { ex: LOCK_TTL_SEC });
       return;
     } catch { /* fall through */ }
   }
   const entry = memLock.get(symbol);
-  if (entry) memLock.set(symbol, { ...entry, locked: false, sentAt: 0 });
+  if (entry) memLock.set(symbol, { ...entry, locked: false });
 }
 
 // ── Pending signals for client auto-journal pickup ────────────
