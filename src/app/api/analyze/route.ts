@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, TP1_PARTIAL_FRACTION, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
@@ -860,9 +860,14 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
           const lockedR = riskDist > 0
             ? (isLong ? protectedStop - (trade.entry as number) : (trade.entry as number) - protectedStop) / riskDist
             : 0;
+          // 2026-08-06：帳面（blendTp1PartialPnl）已經把 TP1 當成「平掉
+          // TP1_PARTIAL_FRACTION（50%）」在算最終 R，但系統從沒實際下單，
+          // 也從沒告訴使用者要手動平那一半——本地/紀錄頁算出來的 R 因此
+          // 比使用者真正持有的部位樂觀。這裡明確提示，帳目跟實際操作才對得上。
+          const partialPct = Math.round(TP1_PARTIAL_FRACTION * 100);
           await sendWebPushToUser(profileId, {
             title: `🎯 TP1 達標 ${sym}`,
-            body: `${dir} $${fmtPrice(trade.tp1 as number)} ｜ 止損移至 $${fmtPrice(protectedStop)}（鎖 ${lockedR >= 0 ? '+' : ''}${lockedR.toFixed(1)}R）`,
+            body: `${dir} $${fmtPrice(trade.tp1 as number)} ｜ 請手動平掉 ${partialPct}% 部位 ｜ 剩餘止損移至 $${fmtPrice(protectedStop)}（鎖 ${lockedR >= 0 ? '+' : ''}${lockedR.toFixed(1)}R）`,
             tag: `tp1-${trade.id}`,
           });
         }

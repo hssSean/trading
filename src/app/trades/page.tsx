@@ -5,6 +5,7 @@ import { usePriceStore } from '@/store/usePriceStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
 import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
+import { TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
 import { StatsHero } from '@/components/StatsHero';
 import { TradeResult, TradeRecord } from '@/types';
 import { TradeCard } from '@/components/ui/TradeCard';
@@ -338,7 +339,9 @@ const TradeRow = memo(function TradeRow({
       {isWatchingTp2 && livePx > 0 && (
         <div className="grid grid-cols-2 gap-1.5 mb-2">
           <div className="border border-up/25 rounded-[10px] p-2 text-center">
-            <div className="text-up text-[10px]">TP1 已鎖定 · 追蹤TP2</div>
+            <div className="text-up text-[10px]">
+              TP1 已鎖定 · 請手動平掉 {Math.round(TP1_PARTIAL_FRACTION * 100)}% · 追蹤TP2
+            </div>
             <div className="text-up text-[12px] num mt-0.5">
               {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過TP2 ${Math.abs(distTP2).toFixed(2)}%`}
             </div>
