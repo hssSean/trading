@@ -656,7 +656,8 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 
 > 討論於 2026-07-26。**執行引擎放哪還沒決定**（見下方決策點）。
 > **第一批安全基礎設施已完成**（commit `580e2ad`，2026-07-26）——見 §進度。
-> 2026-08-06：補上 TP1 部分平倉/移動止損的下單決策純函數（`db5811d`）。
+> 2026-08-06：補上 TP1 部分平倉/移動止損的下單決策純函數（`db5811d`），
+> 接著補掛單競態決策 + runner 執行骨架（`9beb89a`）。
 
 ## 進度
 
@@ -671,6 +672,25 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 | `killSwitch.ts` | Redis flag + 自動觸發判斷（純函數） | 6 |
 | `watchdog.ts` | 持倉/掛單對帳（抓裸倉、孤兒單） | 9 |
 | `orderLifecycle.ts` | TP1 部分平倉／移動止損改單的下單決策（純函數） | 15 |
+| `pendingOrderLifecycle.ts` | 部分成交感知的撤單規劃 + 撤單/成交競態裁決（純函數） | 15 |
+| `runner.ts` | 執行編排骨架：串 preTradeCheck/orderLifecycle/pendingOrderLifecycle/watchdog/killSwitch 成一輪循環 | 15 |
+
+**2026-08-06（`9beb89a`）**：接續 `db5811d`，補齊 §三/§五 剩下部分。
+`pendingOrderLifecycle.ts` 的 `resolveCancelOutcome` 是撤單/成交競態的
+唯一裁決點——Binance 對「剛好成交」跟「早就不存在」的訂單撤單都回
+`-2011`，兩者外觀相同，硬當「取消成功」處理正是文件點名的風險，這裡
+強制呼叫端先重查 `positionRisk` 才能判斷，沒給重查結果就回 `ambiguous`，
+拒絕用猜的。`decidePendingOrderCancelPlan` 處理部分成交：`executedQty>0`
+時撤單只清未成交餘量，已成交部分是真倉位需要補止損，不是取消。
+
+`runner.ts` 是執行層編排骨架，把上面五個模組串成一輪監控循環——刻意
+「不」碰策略判斷（訊號評分、要不要取消掛單、移動止損目標價怎麼算，
+這些完全不動，還是 route.ts 現有的 candle-scan 邏輯），只負責「已經
+決定要做的事，怎麼安全地對交易所執行」。依賴注入（`RunnerClient` 介面），
+測試用記憶體假 client。kill switch 讀取失敗時 fail closed；watchdog
+對帳在 kill switch 啟動時仍照跑；移動止損新單失敗時絕不觸碰舊止損單。
+**依然沒有接上任何 Next.js route 或 cron**——執行引擎放哪還沒定案，
+這是給未來獨立 process 呼叫的編排邏輯，不是給現在的 App 用的。
 
 **2026-08-06（`db5811d`）**：`docs/ANALYSIS-2026-08-06-自動交易缺口清單.md` §三
 點名的 11 種結局裡，挑最危險的兩項先做成純函數——`decideTp1PartialClose`
@@ -683,10 +703,22 @@ same_dir_cap/insert 路徑要等真的有多個候選同時競爭同向額度時
 vitest 完全沒設定過，所有測試都繞開這條路用相對路徑）。
 
 **還沒做、真錢上線前必做**：
-- watchdog 的輪詢迴圈本體（reconcile 邏輯有了，包成常駐 loop 還沒寫）
-- kill switch 觸發後的實際 flatten 動作（現在只設 flag，沒有一鍵撤單平倉）
-- testnet 對帳
-- 部分成交、取消/成交競態的處理（見下方「掛單過期功能會怎樣」）
+- watchdog 的輪詢迴圈本體（reconcile 邏輯有了，`runner.ts` 也會呼叫，但
+  「每 30 秒跑一次」的常駐 loop 包裝還沒寫——`runner.ts` 目前是「跑一輪」
+  的函式，不是常駐程序）
+- kill switch 觸發後的實際 flatten 動作（現在只設 flag，沒有一鍵撤單平倉；
+  `runner.ts` 讀到 active 會跳過新動作，但不會主動平倉）
+- ~~部分成交、取消/成交競態的處理~~ 決策邏輯已完成（`pendingOrderLifecycle.ts`），
+  **但完全沒在真實網路環境測過**——`extractBinanceErrorCode` 假設的錯誤
+  回應格式（`error.response.data.code`）是照 Binance 文件推的，沒對過
+  testnet 的真實錯誤形狀
+- **策略層還沒接進 runner**：`runner.ts` 吃的是「已經決定好的動作」
+  （`pendingCancels`/`tp1Closes`/`trailingStopUpdates`），這些動作現在
+  誰來產生完全沒寫——route.ts 的 candle-scan 判斷邏輯（該不該撤單、
+  移動止損目標價多少）還沒有一個「餵給 runner」的橋接層
+- DB 整合——runner 不碰 Supabase，「這一輪要處理哪些 trade」的讀取/
+  寫回完全還沒設計
+- testnet 對帳（`extractBinanceErrorCode`/整個 runner 都要在這裡驗證）
 - `goodTillDate` 提前量在 testnet 實測
 - leverageBracket 查詢接上（`preTradeCheck` 現在吃固定 `maintenanceMarginRate` 參數，
   還沒接上真實的分級查詢）
