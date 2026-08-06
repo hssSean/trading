@@ -4,8 +4,11 @@
  * Binance Futures testnet responses before anything touches real money.
  *
  * Usage:
- *   1. https://testnet.binancefuture.com → 用 GitHub 帳號登入 → API Key 頁面
- *      產生一組 testnet 專用 key（免費，跟正式站完全隔離，帳戶會自動發假 USDT）
+ *   1. 登入 https://demo.binance.com（你的一般幣安帳號，這是官方整合式
+ *      Demo Trading，不是舊版獨立的 testnet.binancefuture.com/GitHub 登入）→
+ *      API 管理頁面 → 建立新 API（合約權限）。secret 只顯示一次，自己複製，
+ *      不要貼給任何人（含這個對話）。這組 key 對接的是 demo-fapi.binance.com，
+ *      跟你正式帳戶的資產/API key 完全無關
  *   2. 設定環境變數（不要貼在 chat 裡，只在自己的終端機/檔案設定）：
  *        export BINANCE_TESTNET_API_KEY=你的key
  *        export BINANCE_TESTNET_API_SECRET=你的secret
@@ -56,8 +59,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function fetchMarkPrice(symbol: string): Promise<number> {
-  // Public endpoint — testnet has its own price feed, separate from mainnet.
-  const res = await axios.get('https://testnet.binancefuture.com/fapi/v1/ticker/price', { params: { symbol } });
+  // Public endpoint — demo-fapi has its own price feed, separate from mainnet.
+  const res = await axios.get('https://demo-fapi.binance.com/fapi/v1/ticker/price', { params: { symbol } });
   return parseFloat(res.data.price);
 }
 

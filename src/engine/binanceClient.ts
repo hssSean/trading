@@ -104,7 +104,14 @@ export class BinanceFuturesClient {
   constructor(config: BinanceClientConfig) {
     this.secret = config.apiSecret;
     this.http = axios.create({
-      baseURL: config.testnet ? 'https://testnet.binancefuture.com/fapi' : 'https://fapi.binance.com/fapi',
+      // 2026-08-06：demo-fapi.binance.com is Binance's current documented USDS-M
+      // futures testnet REST base (developers.binance.com/docs/derivatives/
+      // usds-margined-futures/general-info) — it's the API side of the
+      // "Demo Trading" product embedded in the main binance.com account (the
+      // old separate testnet.binancefuture.com / GitHub-login flow is a
+      // different, older product). Same path structure as production
+      // (/fapi/v1/..., /fapi/v2/...), just a different host.
+      baseURL: config.testnet ? 'https://demo-fapi.binance.com/fapi' : 'https://fapi.binance.com/fapi',
       timeout: 10_000,
       headers: { 'X-MBX-APIKEY': config.apiKey },
     });

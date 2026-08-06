@@ -715,10 +715,14 @@ vitest 完全沒設定過，所有測試都繞開這條路用相對路徑）。
   但還沒有人實際跑過**——`extractBinanceErrorCode` 假設的錯誤回應格式
   （`error.response.data.code`）是照 Binance 文件推的，沒對過 testnet 的
   真實錯誤形狀。腳本會走一輪開倉→補止損→平倉的完整流程，15 個 ✅/❌ 檢查點，
-  其中第 8 步專門驗證真實 -2011 的格式。使用需要自己申請 testnet API key
-  （testnet.binancefuture.com，GitHub 登入，免費送假 USDT），設定成環境變數
+  其中第 8 步專門驗證真實 -2011 的格式。使用需要自己在 demo.binance.com
+  （官方整合式 Demo Trading，用一般幣安帳號登入，不是舊版獨立的
+  testnet.binancefuture.com/GitHub 登入那個）申請 API key，設定成環境變數
   跑 `npm run testnet-reconcile [SYMBOL]`——下單這件事即使是假錢也刻意
-  不代為執行，跑完把輸出貼回來，有 ❌ 再一起看
+  不代為執行，跑完把輸出貼回來，有 ❌ 再一起看。2026-08-06 查證：
+  binanceClient.ts 的 base URL 已改成 `demo-fapi.binance.com`（照
+  Binance 官方文件 usds-margined-futures/general-info 確認的目前版本，
+  跟舊的 testnet.binancefuture.com 是不同網域）
 - **策略層還沒接進 runner**：`runner.ts` 吃的是「已經決定好的動作」
   （`pendingCancels`/`tp1Closes`/`trailingStopUpdates`），這些動作現在
   誰來產生完全沒寫——route.ts 的 candle-scan 判斷邏輯（該不該撤單、
@@ -754,7 +758,8 @@ vitest 完全沒設定過，所有測試都繞開這條路用相對路徑）。
 
 1. ~~先做「怎麼停下來」~~ ✅ kill switch + watchdog 核心邏輯已完成（純函數部分）
 2. ~~前置檢查做成純函數 + 測試~~ ✅ 已完成
-3. testnet（`testnet.binancefuture.com`）跑到對帳零誤差 ← **下一步**
+3. testnet（`demo.binance.com` / API base `demo-fapi.binance.com`）
+   跑到對帳零誤差 ← **下一步**（`npm run testnet-reconcile` 已寫好，待執行）
 4. 真帳戶 dry-run：算出訂單參數但不送，log 出來跟手動下單比對一週
 5. 真錢最小規模（名目 5-10 USDT），每天對帳，跑一週
 6. 對帳零誤差才放大到策略原本的倉位
