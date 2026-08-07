@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { OpenOrder, PositionRisk } from '../../src/engine/binanceClient';
+import { AlgoOrder, OpenOrder, PositionRisk } from '../../src/engine/binanceClient';
 import { reconcilePositionsAndOrders } from '../../src/engine/watchdog';
 
 function position(overrides: Partial<PositionRisk> = {}): PositionRisk {
@@ -27,6 +27,21 @@ function stopOrder(overrides: Partial<OpenOrder> = {}): OpenOrder {
     origQty: '0',
     executedQty: '0',
     stopPrice: '64350',
+    closePosition: true,
+    ...overrides,
+  };
+}
+
+function algoStopOrder(overrides: Partial<AlgoOrder> = {}): AlgoOrder {
+  return {
+    algoId: 3000000000003505,
+    clientAlgoId: 'trade-1-sl',
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    orderType: 'STOP_MARKET',
+    algoStatus: 'NEW',
+    triggerPrice: '64350',
+    quantity: '0',
     closePosition: true,
     ...overrides,
   };
@@ -90,5 +105,43 @@ describe('reconcilePositionsAndOrders', () => {
     );
     expect(anomalies).toHaveLength(1);
     expect(anomalies[0].symbol).toBe('ETHUSDT');
+  });
+});
+
+// 2026-08-08：幣安 2025-12 遷移後條件單活在 openAlgoOrders，不再出現在
+// openOrders 裡——這組測試沒過，代表 watchdog 會對每個真的有保護的部位誤報
+// position_without_stop（見對話紀錄：live-runner 第一次接上真帳戶就撞到這個）。
+describe('reconcilePositionsAndOrders — openAlgoOrders (2025-12 遷移後的條件單來源)', () => {
+  it('recognizes a stop order that only exists in openAlgoOrders (not openOrders) as protection', () => {
+    const anomalies = reconcilePositionsAndOrders([position()], [], [algoStopOrder()]);
+    expect(anomalies).toEqual([]);
+  });
+
+  it('still flags a naked position when openAlgoOrders is empty too', () => {
+    const anomalies = reconcilePositionsAndOrders([position()], [], []);
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].kind).toBe('position_without_stop');
+  });
+
+  it('does not treat a TAKE_PROFIT_MARKET algo order as satisfying the requirement differently from STOP_MARKET', () => {
+    const anomalies = reconcilePositionsAndOrders(
+      [position()], [], [algoStopOrder({ orderType: 'TAKE_PROFIT_MARKET', algoId: 2 })],
+    );
+    expect(anomalies).toEqual([]);
+  });
+
+  it('flags an orphan algo stop order whose symbol has no open position', () => {
+    const anomalies = reconcilePositionsAndOrders([], [], [algoStopOrder()]);
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].kind).toBe('orphan_stop_order');
+  });
+
+  it('combines both sources: an openOrders stop AND an openAlgoOrders stop both count toward the same symbol', () => {
+    const anomalies = reconcilePositionsAndOrders(
+      [position({ symbol: 'BTCUSDT' }), position({ symbol: 'ETHUSDT' })],
+      [stopOrder({ symbol: 'BTCUSDT' })],
+      [algoStopOrder({ symbol: 'ETHUSDT', algoId: 2 })],
+    );
+    expect(anomalies).toEqual([]);
   });
 });

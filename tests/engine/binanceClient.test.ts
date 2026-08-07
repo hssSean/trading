@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSignedQuery, signQuery } from '../../src/engine/binanceClient';
+import { buildSignedQuery, isAlgoOrderType, signQuery, toAlgoOrderBody } from '../../src/engine/binanceClient';
 
 describe('signQuery', () => {
   // Worked example from Binance's official API documentation (HMAC-SHA256
@@ -52,5 +52,65 @@ describe('buildSignedQuery', () => {
     const out = buildSignedQuery({ symbol: 'ETHUSDT', quantity: 0.5 }, secret, timestamp, 6000);
     const [base, sigPart] = [out.slice(0, out.lastIndexOf('&signature=')), out.slice(out.lastIndexOf('signature=') + 10)];
     expect(signQuery(base, secret)).toBe(sigPart);
+  });
+});
+
+// 2026-08-08：幣安 2025-12 把條件單移到 /fapi/v1/algoOrder，端點路徑跟參數是
+// 直接讀 developers.binance.com 頁面內容逐字核對過的（不是猜的）。這兩個函式
+// 是「該打哪個端點、參數怎麼轉換」這個判斷的全部邏輯，錯了會導致真單下錯
+// 端點（-4120）或算法單參數缺漏（比如漏了 triggerPrice，交易所會怎麼處理
+// 不確定，不能靠運氣）。
+describe('isAlgoOrderType', () => {
+  it('recognizes all five conditional order types as algo orders', () => {
+    expect(isAlgoOrderType('STOP_MARKET')).toBe(true);
+    expect(isAlgoOrderType('TAKE_PROFIT_MARKET')).toBe(true);
+    expect(isAlgoOrderType('STOP')).toBe(true);
+    expect(isAlgoOrderType('TAKE_PROFIT')).toBe(true);
+    expect(isAlgoOrderType('TRAILING_STOP_MARKET')).toBe(true);
+  });
+
+  it('does not treat plain LIMIT/MARKET orders as algo orders', () => {
+    expect(isAlgoOrderType('LIMIT')).toBe(false);
+    expect(isAlgoOrderType('MARKET')).toBe(false);
+  });
+});
+
+describe('toAlgoOrderBody', () => {
+  it('renames stopPrice to triggerPrice and newClientOrderId to clientAlgoId', () => {
+    const body = toAlgoOrderBody({
+      symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET',
+      stopPrice: 64000, closePosition: true, newClientOrderId: 't1-sl-64000',
+    });
+    expect(body.triggerPrice).toBe(64000);
+    expect(body.clientAlgoId).toBe('t1-sl-64000');
+    // 舊欄位名不該出現在送出去的 body 裡——留著沒有意義，幣安新端點不認得
+    // stopPrice/newClientOrderId 這兩個名字。
+    expect(body).not.toHaveProperty('stopPrice');
+    expect(body).not.toHaveProperty('newClientOrderId');
+  });
+
+  it('always sets algoType to CONDITIONAL (the only value the docs list as supported)', () => {
+    const body = toAlgoOrderBody({ symbol: 'BTCUSDT', side: 'BUY', type: 'TAKE_PROFIT_MARKET' });
+    expect(body.algoType).toBe('CONDITIONAL');
+  });
+
+  it('passes through quantity/closePosition/reduceOnly/timeInForce unchanged', () => {
+    const body = toAlgoOrderBody({
+      symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET',
+      quantity: 0.05, closePosition: false, reduceOnly: true, timeInForce: 'GTC',
+    });
+    expect(body.quantity).toBe(0.05);
+    expect(body.closePosition).toBe(false);
+    expect(body.reduceOnly).toBe(true);
+    expect(body.timeInForce).toBe('GTC');
+  });
+
+  it('carries TRAILING_STOP_MARKET-specific fields (activatePrice/callbackRate)', () => {
+    const body = toAlgoOrderBody({
+      symbol: 'BTCUSDT', side: 'SELL', type: 'TRAILING_STOP_MARKET',
+      activatePrice: 65000, callbackRate: 1.5,
+    });
+    expect(body.activatePrice).toBe(65000);
+    expect(body.callbackRate).toBe(1.5);
   });
 });

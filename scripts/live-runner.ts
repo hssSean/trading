@@ -56,10 +56,11 @@ async function main() {
   const binance = new BinanceFuturesClient(config);
 
   const client: RunnerClient = {
-    getPositionRisk: (symbol) => binance.getPositionRisk(symbol),
-    getOpenOrders:   (symbol) => binance.getOpenOrders(symbol),
-    placeOrder:      (params) => binance.placeOrder(params),
-    cancelOrder:     (symbol, orderId) => binance.cancelOrder(symbol, orderId),
+    getPositionRisk:   (symbol) => binance.getPositionRisk(symbol),
+    getOpenOrders:     (symbol) => binance.getOpenOrders(symbol),
+    getOpenAlgoOrders: (symbol) => binance.getOpenAlgoOrders(symbol),
+    placeOrder:        (params) => binance.placeOrder(params),
+    cancelOrder:       (symbol, orderId, isAlgoOrder) => binance.cancelOrder(symbol, orderId, isAlgoOrder),
   };
 
   console.log(`[${nowStr()}] live-runner 啟動（testnet 觀察模式，${CYCLE_MS / 1000}秒/輪）`);

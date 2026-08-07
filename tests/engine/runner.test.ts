@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { runMonitorCycle, RunnerClient, RunnerDeps, RunnerCycleInput } from '../../src/engine/runner';
-import { PlaceOrderParams, OpenOrder, PositionRisk } from '../../src/engine/binanceClient';
+import { AlgoOrder, PlaceOrderParams, OpenOrder, PositionRisk } from '../../src/engine/binanceClient';
 import { KillSwitchState } from '../../src/engine/killSwitch';
 import { BINANCE_ERR_UNKNOWN_ORDER } from '../../src/engine/pendingOrderLifecycle';
 
@@ -12,9 +12,10 @@ const filters = { stepSize: 0.001, tickSize: 0.1, minNotional: 5 };
 class FakeClient implements RunnerClient {
   positions: PositionRisk[] = [];
   openOrders: OpenOrder[] = [];
+  openAlgoOrders: AlgoOrder[] = [];
   callLog: string[] = [];
   placeOrderCalls: PlaceOrderParams[] = [];
-  cancelOrderCalls: Array<{ symbol: string; orderId: number }> = [];
+  cancelOrderCalls: Array<{ symbol: string; orderId: number; isAlgoOrder?: boolean }> = [];
   cancelOrderImpl?: (symbol: string, orderId: number) => Promise<{ orderId: number; status: string }>;
   placeOrderImpl?: (params: PlaceOrderParams) => Promise<{ orderId: number; clientOrderId: string; status: string }>;
 
@@ -24,15 +25,18 @@ class FakeClient implements RunnerClient {
   async getOpenOrders(symbol?: string): Promise<OpenOrder[]> {
     return symbol ? this.openOrders.filter(o => o.symbol === symbol) : this.openOrders;
   }
+  async getOpenAlgoOrders(symbol?: string): Promise<AlgoOrder[]> {
+    return symbol ? this.openAlgoOrders.filter(o => o.symbol === symbol) : this.openAlgoOrders;
+  }
   async placeOrder(params: PlaceOrderParams) {
     this.callLog.push(`place:${params.symbol}:${params.stopPrice ?? params.quantity}`);
     this.placeOrderCalls.push(params);
     if (this.placeOrderImpl) return this.placeOrderImpl(params);
     return { orderId: 999, clientOrderId: params.newClientOrderId ?? '', status: 'NEW' };
   }
-  async cancelOrder(symbol: string, orderId: number) {
+  async cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean) {
     this.callLog.push(`cancel:${symbol}:${orderId}`);
-    this.cancelOrderCalls.push({ symbol, orderId });
+    this.cancelOrderCalls.push({ symbol, orderId, isAlgoOrder });
     if (this.cancelOrderImpl) return this.cancelOrderImpl(symbol, orderId);
     return { orderId, status: 'CANCELED' };
   }
@@ -77,7 +81,7 @@ describe('runMonitorCycle — pending order cancels', () => {
       ...emptyInput(),
       pendingCancels: [{ symbol: 'BTCUSDT', orderId: 5, origQty: 0.1, executedQty: 0 }],
     });
-    expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 5 }]);
+    expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 5, isAlgoOrder: false }]);
     expect(r.actionsTaken.some(a => a.includes('已取消'))).toBe(true);
     expect(r.errors).toEqual([]);
   });
@@ -98,7 +102,7 @@ describe('runMonitorCycle — pending order cancels', () => {
       ...emptyInput(),
       pendingCancels: [{ symbol: 'BTCUSDT', orderId: 5, origQty: 0.1, executedQty: 0.04 }],
     });
-    expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 5 }]);
+    expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 5, isAlgoOrder: false }]);
     expect(r.actionsTaken.some(a => a.includes('部分成交 0.04') && a.includes('補止損'))).toBe(true);
   });
 
@@ -195,6 +199,9 @@ describe('runMonitorCycle — trailing stop replace', () => {
     });
     expect(client.callLog).toEqual(['place:BTCUSDT:65200', 'cancel:BTCUSDT:111']);
     expect(r.actionsTaken.some(a => a.includes('更新'))).toBe(true);
+    // 舊止損單是條件單（STOP_MARKET），撤單要走 algoOrder 端點，不是 order——
+    // 標錯會撤到一個不存在的普通訂單，實際的舊止損完全沒被清掉。
+    expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 111, isAlgoOrder: true }]);
   });
 
   it('does nothing when the target is not more favorable than the current stop', async () => {

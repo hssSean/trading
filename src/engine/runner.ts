@@ -19,7 +19,7 @@
 // partial-fill handling, cancel/fill race resolution — without any network
 // call or real credentials.
 
-import { PlaceOrderParams, OpenOrder, PositionRisk } from './binanceClient';
+import { AlgoOrder, PlaceOrderParams, OpenOrder, PositionRisk } from './binanceClient';
 import { KillSwitchState } from './killSwitch';
 import { reconcilePositionsAndOrders, ReconcileAnomaly } from './watchdog';
 import { SymbolFilters } from './precision';
@@ -35,8 +35,12 @@ import {
 export interface RunnerClient {
   getPositionRisk(symbol?: string): Promise<PositionRisk[]>;
   getOpenOrders(symbol?: string): Promise<OpenOrder[]>;
+  // 條件單（止損/止盈）2025-12 遷移後查詢端點跟 getOpenOrders 分開了，見
+  // watchdog.ts 頂部註解——沒有這個，watchdog 對每個有保護的部位都會誤報裸倉。
+  getOpenAlgoOrders(symbol?: string): Promise<AlgoOrder[]>;
   placeOrder(params: PlaceOrderParams): Promise<{ orderId: number; clientOrderId: string; status: string }>;
-  cancelOrder(symbol: string, orderId: number): Promise<{ orderId: number; status: string }>;
+  // isAlgoOrder：見 binanceClient.ts cancelOrder 的同名參數說明。
+  cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean): Promise<{ orderId: number; status: string }>;
 }
 
 export interface RunnerDeps {
@@ -109,11 +113,12 @@ export async function runMonitorCycle(deps: RunnerDeps, input: RunnerCycleInput)
   // Layer 3 (watchdog) always runs, even with the kill switch active — its
   // findings need to stay visible while the account is halted, not go dark.
   try {
-    const [positions, openOrders] = await Promise.all([
+    const [positions, openOrders, openAlgoOrders] = await Promise.all([
       deps.client.getPositionRisk(),
       deps.client.getOpenOrders(),
+      deps.client.getOpenAlgoOrders(),
     ]);
-    result.reconcileAnomalies = reconcilePositionsAndOrders(positions, openOrders);
+    result.reconcileAnomalies = reconcilePositionsAndOrders(positions, openOrders, openAlgoOrders);
   } catch (e) {
     result.errors.push(`對帳讀取失敗: ${String(e)}`);
   }
@@ -134,7 +139,7 @@ export async function runMonitorCycle(deps: RunnerDeps, input: RunnerCycleInput)
       continue;
     }
 
-    const outcome = await attemptCancel(deps.client, c.symbol, c.orderId, result);
+    const outcome = await attemptCancel(deps.client, c.symbol, c.orderId, result, false);
     if (outcome.kind === 'filled_before_cancel') {
       result.actionsTaken.push(
         `${c.symbol} 訂單 ${c.orderId} 撤單前已成交（race，最終部位 ${outcome.positionQty}）——需要走成交後的止損流程，不是取消`,
@@ -181,7 +186,9 @@ export async function runMonitorCycle(deps: RunnerDeps, input: RunnerCycleInput)
     }
 
     if (action.kind === 'replace') {
-      const outcome = await attemptCancel(deps.client, t.symbol, action.cancelOrderId, result);
+      // isAlgoOrder=true：這裡撤的一定是舊的 STOP_MARKET 移動止損單，2025-12
+      // 遷移後所有條件單都活在 algoOrder 端點，不是 order 端點。
+      const outcome = await attemptCancel(deps.client, t.symbol, action.cancelOrderId, result, true);
       if (outcome.kind === 'ambiguous') {
         // New stop is live either way — an unresolved old-stop cancel means two
         // protective orders briefly coexist, which orderLifecycle.ts's design
@@ -201,10 +208,10 @@ export async function runMonitorCycle(deps: RunnerDeps, input: RunnerCycleInput)
 // and trailing-stop-replace paths above so the -2011 handling (must requery
 // positionRisk, never assume success) lives in exactly one place.
 async function attemptCancel(
-  client: RunnerClient, symbol: string, orderId: number, result: RunnerCycleResult,
+  client: RunnerClient, symbol: string, orderId: number, result: RunnerCycleResult, isAlgoOrder: boolean,
 ) {
   try {
-    await client.cancelOrder(symbol, orderId);
+    await client.cancelOrder(symbol, orderId, isAlgoOrder);
     return resolveCancelOutcome({ success: true });
   } catch (e) {
     const code = extractBinanceErrorCode(e);
