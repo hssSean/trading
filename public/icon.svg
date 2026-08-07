@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0A0D11"/>
+  <text x="256" y="256" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="128" font-weight="700" fill="#2DD4BF"
+        text-anchor="middle" dominant-baseline="central" letter-spacing="4">[CT]</text>
+</svg>
