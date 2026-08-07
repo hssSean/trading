@@ -110,6 +110,25 @@ type CloseModalState = {
   entry: number; tp1: number; tp2: number; sl: number;
 } | null;
 
+// 2026-08-07：浮盈/浮虧 chip 的即時計數自己訂閱 usePriceStore，不讓價格
+// tick 逼整個交易紀錄頁（含分類按鈕列）每 3 秒重新 render 一次——同一個
+// 問題、同一個修法，7/29 對 TradeRow 做過一次，但那次沒處理到按鈕列本身
+// （它不在 TradeRow 裡）。實測連續快速點分類按鈕會漏掉部分點擊，console
+// 無錯誤，判斷是高頻率重繪造成的，不是例外中斷。
+const LiveCountLabel = memo(function LiveCountLabel({
+  trades, dir, fallback,
+}: { trades: TradeRecord[]; dir: 'up' | 'down'; fallback: string }) {
+  const prices = usePriceStore(s => s.prices);
+  let count = 0;
+  for (const t of trades) {
+    const px = prices[t.symbol]?.price;
+    if (!px) continue;
+    const pnl = t.direction === 'LONG' ? (px - t.entry) / t.entry : (t.entry - px) / t.entry;
+    if (dir === 'up' ? pnl > 0 : pnl < 0) count++;
+  }
+  return <>{count > 0 ? `${fallback} (${count})` : fallback}</>;
+});
+
 interface TradeRowProps {
   trade: TradeRecord;
   now: number;
@@ -554,8 +573,20 @@ export default function TradesPage() {
   // its own 30s poller, and that poller filtered out `status === 'waiting'` —
   // which is exactly why a fresh limit order's 現價/距進場 sat frozen at
   // whatever value happened to be in localStorage.
-  const prices = usePriceStore(s => s.prices);
-  const priceOf = useCallback((symbol: string) => prices[symbol]?.price ?? 0, [prices]);
+  //
+  // 2026-08-07：這裡原本用 `usePriceStore(s => s.prices)` 訂閱整包價格物件——
+  // 每次 PriceFeed 的 3 秒 tick，這個 selector 回傳一個新物件參考，讓「整個
+  // 交易紀錄頁」（不只卡片，連分類按鈕列都在同一個 function component 裡）
+  // 每 3 秒重新執行一次 render。TradeRow 在 7/29 已經改成各卡自己訂閱自己
+  // 那個幣種的價格（見上面 needsLivePrice），但那次的修法沒有處理到頁面
+  // 最外層——分類按鈕列不在 TradeRow 裡，完全沒被那次修法保護到。
+  //
+  // 實測重現：連續快速點擊分類按鈕時，部分點擊會被吃掉（畫面沒切換），且
+  // console 沒有任何錯誤——不是例外中斷，是這種高頻率重繪造成的。改成
+  // `getState()` 非響應式讀取，priceOf 呼叫當下永遠拿到最新價格，但不再
+  // 讓價格變動觸發整頁重繪。浮盈/浮虧 chip 需要的即時計數改用下面的
+  // LiveCountLabel，自己訂閱、自己重繪，不牽動這個頁面其他部分。
+  const priceOf = useCallback((symbol: string) => usePriceStore.getState().prices[symbol]?.price ?? 0, []);
 
   const [closeModal, setCloseModal] = useState<{
     id: string; symbol: string; direction: 'LONG' | 'SHORT';
@@ -601,17 +632,8 @@ export default function TradesPage() {
   );
   // 追蹤TP2 = TP1 hit, result locked as WIN_TP1, not yet finally closed
   const watchingTp2   = useMemo(() => trades.filter(t => t.status === 'tp1_hit' && t.result === 'WIN_TP1' && !t.closedAt), [trades]);
-  // Live-PnL counts so 浮盈/浮虧 chips show how many trades they'd match
-  const liveCounts    = useMemo(() => {
-    let up = 0, down = 0;
-    pending.forEach(t => {
-      const px = priceOf(t.symbol);
-      if (!px) return;
-      const pnl = t.direction === 'LONG' ? (px - t.entry) / t.entry : (t.entry - px) / t.entry;
-      if (pnl > 0) up++; else if (pnl < 0) down++;
-    });
-    return { up, down };
-  }, [pending, priceOf]);
+  // 浮盈/浮虧 chip 的即時計數改由 LiveCountLabel 元件自己訂閱價格計算
+  // （見該元件定義處的說明），這裡不再需要。
   const wins    = closedResults.filter(isWinTrade);
   const losses  = closedResults.filter(isLossTrade);
   const winRate = closedResults.length > 0 ? Math.round((wins.length / closedResults.length) * 100) : null;
@@ -1370,8 +1392,8 @@ export default function TradesPage() {
             ['PENDING',   `持倉 (${pending.length})`],
             ['WAITING',   waiting.length > 0 ? `等待進場 (${waiting.length})` : '等待進場'],
             ['CLOSED',    `結束 (${closed.length})`],
-            ['PROFIT',    liveCounts.up   > 0 ? `浮盈 (${liveCounts.up})`   : '浮盈'],
-            ['LOSS_LIVE', liveCounts.down > 0 ? `浮虧 (${liveCounts.down})` : '浮虧'],
+            ['PROFIT',    '浮盈'],
+            ['LOSS_LIVE', '浮虧'],
           ] as const).map(([f, label]) => (
             <button key={f} onClick={() => { setFilter(f); if (f !== 'CLOSED') setResultFilter('ALL'); }}
               className={`text-[11px] px-2.5 py-1 rounded border transition-colors ${
@@ -1385,7 +1407,9 @@ export default function TradesPage() {
                   : f === 'WAITING'   ? 'border-[#3A2F14] text-[#C99A2E]/70'
                   : 'border-[#1B222B] text-[#565E6B]'
               }`}>
-              {label}
+              {f === 'PROFIT'    ? <LiveCountLabel trades={pending} dir="up"   fallback={label} />
+               : f === 'LOSS_LIVE' ? <LiveCountLabel trades={pending} dir="down" fallback={label} />
+               : label}
             </button>
           ))}
         </div>
