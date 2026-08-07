@@ -890,6 +890,11 @@ export default function TradesPage() {
   }, [filter, resultFilter, dirFilter, dateFilter, sortBy, sortDir, pending, closed, waiting, unconfirmed, now, priceOf]);
 
   const [exporting, setExporting] = useState(false);
+  // 樣本外驗證用：只匯出這天之後開倉的交易，排除掉調參當時用來調門檻的舊資料
+  // （見 2026-08-08 策略分析討論——門檻是用歷史資料調出來的，拿同一批資料
+  // 回頭驗證會高估，要看「這之後」新產生的交易才乾淨）。空字串＝匯出全部，
+  // 沿用原本行為。
+  const [exportSince, setExportSince] = useState('');
 
   // 走 /api/trade-export（service role）而不是直接用記憶體裡的 closed 陣列：
   // 1. regime/confidence/funding_rate/suggested_risk_pct/suggested_leverage/
@@ -937,8 +942,10 @@ export default function TradesPage() {
       };
 
       // 只匯出真正終局的列（closed_at 有值）——還開著的部位沒有結果可分析。
+      const sinceTs = exportSince ? new Date(exportSince).getTime() : null;
       const rows = (rawRows ?? [])
         .filter(r => r.closed_at != null)
+        .filter(r => sinceTs === null || (r.opened_at as number) >= sinceTs)
         .map(r => {
           const entry      = r.entry as number;
           const stopLoss   = r.stop_loss as number;
@@ -1115,6 +1122,13 @@ export default function TradesPage() {
                 </span>
               ) : '同步紀錄'}
             </button>
+            <input
+              type="date"
+              value={exportSince}
+              onChange={e => setExportSince(e.target.value)}
+              title="只匯出這天之後開倉的交易（樣本外驗證用，留空＝匯出全部）"
+              className="text-[#8A94A2] text-[11px] px-1.5 py-1 border border-[#232B35] rounded bg-transparent"
+            />
             <button
               onClick={exportCsv}
               disabled={exporting}
