@@ -31,11 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-touch-fullscreen" content="yes" />
-        {/* 2026-08-07：原本指向 /icon-192.png，但那個檔案從專案建立以來就
-            沒被加入過（public/ 完全沒有點陣圖），這個 link 一直是 404。
-            iOS 的 apple-touch-icon 規格不支援 SVG，沒辦法用 public/icon.svg
-            頂替——拿掉死連結，iOS 沒讀到這個標籤時會退回用截圖當圖示，
-            至少不會一直打一個註定失敗的請求。待補：真正的 PNG icon。 */}
+        <link rel="apple-touch-icon" href="/icon-192.png" />
       </head>
       <body className="bg-[#0A0D11] min-h-dvh" suppressHydrationWarning>
         <div className="max-w-xl mx-auto flex flex-col min-h-dvh">
