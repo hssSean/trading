@@ -29,8 +29,17 @@ export function PriceProgressBar({ direction, stopLoss, entry, tp1, tp2, current
       <div className="flex justify-between text-[10px] num">
         <span className="text-down">止損 {formatPrice(stopLoss)}</span>
         <span className="text-text-s">進場 {formatPrice(entry)}</span>
-        <span className="text-accent">TP1 {formatPrice(tp1)}</span>
-        <span className="text-accent">TP2 {formatPrice(tp2)}</span>
+        {tp1 === tp2 ? (
+          // 均值回歸策略只有單一止盈目標（回到布林中軌），TP1/TP2 本來就同一個
+          // 值——不是 bug，見 signals.ts generateMeanReversionSignals 的
+          // takeProfits: [tp1, tp1]。分開顯示兩個一樣的數字容易讓人誤會是故障。
+          <span className="text-accent">止盈 {formatPrice(tp1)}</span>
+        ) : (
+          <>
+            <span className="text-accent">TP1 {formatPrice(tp1)}</span>
+            <span className="text-accent">TP2 {formatPrice(tp2)}</span>
+          </>
+        )}
       </div>
     </div>
   );

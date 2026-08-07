@@ -146,7 +146,12 @@ const MIN_SCORE          = 65; // tier A threshold
 // 也就是 B 級的正期望值完全由 3 個極端值撐著，中位數 (+0.24R) 撐不起手續費。
 // docs/TODO.md 🔬#8 當初以 10 筆樣本記下這個疑慮並要求「再跑一週」；樣本翻倍到
 // 19 筆後結論不變，才動手。55-59 這段是純虧損區，60-64 保留（樣本還不足以判定）。
-const MIN_SCORE_TIER_B   = 60; // tier B threshold (light position)
+//
+// 2026-08-08 再收緊 60 → 65（等於關掉 tier B）：60-64 樣本累積到 30 筆自然結算
+// （close_reason 精確分類後，排除掉先前誤判的「手動平倉」污染），avgR=−0.024、
+// t=−0.15，跟丟硬幣沒兩樣；同一批 A 級 33 筆 avgR=+0.636、t=2.92（顯著）。
+// B 級不是「樣本還不足」了，是打平帶手續費必虧——不用再等，直接關。
+const MIN_SCORE_TIER_B   = 65; // 2026-08-08: raised 60→65，B tier 名存實亡（見上）
 const MIN_SCORE_LONGTF   = 67; // 4h/1d tier A needs 2 extra points
 const MIN_RR_INTRADAY    = 1.2;
 const MIN_RR_SWING       = 2.0;
