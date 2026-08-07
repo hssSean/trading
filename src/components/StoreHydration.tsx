@@ -668,11 +668,22 @@ export async function saveToSupabase(userId: string) {
     ...(t.closeReason ? { close_reason: t.closeReason } : {}),
   }));
 
+  // 2026-08-07：這裡原本用 `Promise.all(rows.map(...))` 一口氣同時打出「每筆
+  // trade 各一個」的 UPDATE 請求——帳號累積到 145 筆已結束交易後，每次 4 秒
+  // debounce 存檔（store 有任何變動就觸發，不只是交易本身變動）就會同時發出
+  // 145+ 個併發請求。實測在正式站連續操作時，console 湧出上百筆
+  // `TypeError: Failed to fetch`（同一秒 141～396 筆），判斷是併發量超過瀏覽器
+  // /Supabase 能承受的範圍，不是真的網路離線。改成小批次依序送出，把單一次
+  // 存檔的併發量壓在合理範圍，不改變送出的內容或同步語意，只改「怎麼送」。
+  const UPDATE_BATCH_SIZE = 8;
   const updateTrades = async (rows: { id: string; [k: string]: unknown }[]) => {
-    await Promise.all(rows.map(async ({ id, ...patch }) => {
-      const { error } = await supabase.from('trades').update(patch).eq('id', id).eq('user_id', userId);
-      if (error) console.error('[saveToSupabase] update error:', error.code, error.message);
-    }));
+    for (let i = 0; i < rows.length; i += UPDATE_BATCH_SIZE) {
+      const batch = rows.slice(i, i + UPDATE_BATCH_SIZE);
+      await Promise.all(batch.map(async ({ id, ...patch }) => {
+        const { error } = await supabase.from('trades').update(patch).eq('id', id).eq('user_id', userId);
+        if (error) console.error('[saveToSupabase] update error:', error.code, error.message);
+      }));
+    }
   };
   await updateTrades(openRows);
   await updateTrades(finalizedRows);
