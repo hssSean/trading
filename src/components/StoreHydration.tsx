@@ -22,6 +22,12 @@ let isResetting = false;
 export function setIsResetting(v: boolean) { isResetting = v; }
 export function clearSessionDeletedIds() { sessionDeletedIds.clear(); }
 
+// Last-synced row content per trade id, keyed by trade id (server UUID, globally unique).
+// saveToSupabase diffs against this before sending an UPDATE — a closed trade whose
+// entry_notes nobody re-edits produces the same row forever, so after the first sync it's
+// skipped on every subsequent 4s debounce tick instead of being resent unchanged.
+const lastSyncedRowHash = new Map<string, string>();
+
 // IDs/symbols whose server-side delete has not yet been confirmed to succeed — persisted
 // so a closed tab/app doesn't lose track of them. sessionDeletedIds/sessionDeletedCoinSymbols
 // already hide them from the UI immediately; this queue is purely about eventually reaching
@@ -618,6 +624,7 @@ export async function saveToSupabase(userId: string) {
     if (serverResetAt > localResetAt) {
       useStore.setState({ trades: [], lastResetAt: serverResetAt });
       useStore.getState().clearSignals();
+      lastSyncedRowHash.clear(); // stale trade ids are gone; don't let their hashes linger
       return; // don't push stale data — next save will upload the (empty) clean state
     }
   } catch { /* network error — proceed optimistically; loadFromSupabase will catch it */ }
@@ -677,11 +684,16 @@ export async function saveToSupabase(userId: string) {
   // 存檔的併發量壓在合理範圍，不改變送出的內容或同步語意，只改「怎麼送」。
   const UPDATE_BATCH_SIZE = 8;
   const updateTrades = async (rows: { id: string; [k: string]: unknown }[]) => {
-    for (let i = 0; i < rows.length; i += UPDATE_BATCH_SIZE) {
-      const batch = rows.slice(i, i + UPDATE_BATCH_SIZE);
-      await Promise.all(batch.map(async ({ id, ...patch }) => {
+    // Skip rows whose content matches what was last successfully synced — a closed trade
+    // nobody touches again would otherwise be resent, unchanged, on every 4s debounce tick.
+    const changed = rows.filter(row => lastSyncedRowHash.get(row.id) !== JSON.stringify(row));
+    for (let i = 0; i < changed.length; i += UPDATE_BATCH_SIZE) {
+      const batch = changed.slice(i, i + UPDATE_BATCH_SIZE);
+      await Promise.all(batch.map(async (row) => {
+        const { id, ...patch } = row;
         const { error } = await supabase.from('trades').update(patch).eq('id', id).eq('user_id', userId);
         if (error) console.error('[saveToSupabase] update error:', error.code, error.message);
+        else lastSyncedRowHash.set(id, JSON.stringify(row));
       }));
     }
   };
