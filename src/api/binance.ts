@@ -78,30 +78,35 @@ function isRateLimit(err: unknown): boolean {
   return msg.includes('429') || msg.includes('418') || msg.includes('too many');
 }
 
-// Parallel price fetch for a symbol list. Replaces the old per-page
-// `for (sym of syms) { await fetch; await sleep(100) }` pattern, which cost
-// ~N × (roundtrip + 100ms) per round — 15 coins took 4-5s to refresh one cycle.
-// Here the whole set costs one roundtrip. Weight is 1/symbol, same as before.
+// 2026-08-07：這裡原本是「每個 symbol 各發一個獨立請求，Promise.allSettled
+// 全部同時打」——當初的假設是監控清單只有 15 個幣種（見下面保留的舊註解）。
+// 監控清單漲到 100 個之後，這個假設早就不成立：fast loop 每 3 秒同時發出
+// 100 個併發請求，遠超瀏覽器對同一 host 的連線數上限，大部分請求排隊甚至
+// 逾時——正式站實測首頁現價欄位持續顯示「—」，用瀏覽器連線工具查到的就是
+// 這個模式（跟 saveToSupabase 併發過多同一種 bug，只是這裡是每 3 秒發生
+// 一次，頻率高得多）。
 //
-// Not using the no-symbol batch endpoint (`/ticker/price` with no params):
-// it returns all ~500 perpetuals (~25KB) per call, which at a 3s interval is
-// ~500KB/min of mobile data for 15 coins' worth of information.
+// 改回批次端點，一次請求拿全市場約 500 個永續合約價格再篩選出要的——
+// 不管監控幾個幣種，每輪固定只有 1 個 HTTP 請求。舊註解擔心的「500 個
+// symbol 換 15 個要的資料，浪費」在監控清單只有 15 個時成立，100 個之後
+// 100 個獨立請求（含各自的 TLS/HTTP overhead、還會撞連線數上限被迫排隊）
+// 比 1 個 25KB 的批次請求還糟，前提變了決策就該跟著變。
 //
-// Partial failures are dropped, not thrown — one bad symbol must not blank out
-// the rest. A rate limit is the exception: it means back off entirely.
+// 錯誤處理維持原樣：rate limit 讓呼叫端知道要整體退避，其他錯誤（離線/
+// 逾時）原樣往上拋，呼叫端（PriceFeed.tsx）本來就靜默處理、等下一輪重試。
 export async function fetchPricesFor(symbols: string[]): Promise<Map<string, number>> {
-  const settled = await Promise.allSettled(
-    symbols.map(s => client.get('/ticker/price', { params: { symbol: s } })),
-  );
+  const wanted = new Set(symbols);
   const out = new Map<string, number>();
-  for (let i = 0; i < settled.length; i++) {
-    const r = settled[i];
-    if (r.status === 'fulfilled') {
-      const px = parseFloat(r.value.data.price);
-      if (Number.isFinite(px) && px > 0) out.set(symbols[i], px);
-    } else if (isRateLimit(r.reason)) {
-      throw new RateLimitedError();
+  try {
+    const res = await client.get('/ticker/price');
+    for (const t of res.data as { symbol: string; price: string }[]) {
+      if (!wanted.has(t.symbol)) continue;
+      const px = parseFloat(t.price);
+      if (Number.isFinite(px) && px > 0) out.set(t.symbol, px);
     }
+  } catch (err) {
+    if (isRateLimit(err)) throw new RateLimitedError();
+    throw err;
   }
   return out;
 }
@@ -112,26 +117,28 @@ export interface Ticker24h {
   priceChangePercent: number;
 }
 
-// Same parallel shape as fetchPricesFor, for the slower 24h-change refresh.
+// 同一批次改法，同一個理由（見 fetchPricesFor 上面的說明）——這個是慢迴圈
+// （60 秒一次），併發量沒有 fast loop 那麼致命，但同樣不該隨監控幣種數線性
+// 成長，一次批次請求解決。
 export async function fetchTickers24hFor(symbols: string[]): Promise<Map<string, Ticker24h>> {
-  const settled = await Promise.allSettled(
-    symbols.map(s => client.get('/ticker/24hr', { params: { symbol: s } })),
-  );
+  const wanted = new Set(symbols);
   const out = new Map<string, Ticker24h>();
-  for (let i = 0; i < settled.length; i++) {
-    const r = settled[i];
-    if (r.status === 'fulfilled') {
-      const price = parseFloat(r.value.data.lastPrice);
+  try {
+    const res = await client.get('/ticker/24hr');
+    for (const t of res.data as { symbol: string; lastPrice: string; priceChange: string; priceChangePercent: string }[]) {
+      if (!wanted.has(t.symbol)) continue;
+      const price = parseFloat(t.lastPrice);
       if (Number.isFinite(price) && price > 0) {
-        out.set(symbols[i], {
+        out.set(t.symbol, {
           price,
-          priceChange:        parseFloat(r.value.data.priceChange),
-          priceChangePercent: parseFloat(r.value.data.priceChangePercent),
+          priceChange:        parseFloat(t.priceChange),
+          priceChangePercent: parseFloat(t.priceChangePercent),
         });
       }
-    } else if (isRateLimit(r.reason)) {
-      throw new RateLimitedError();
     }
+  } catch (err) {
+    if (isRateLimit(err)) throw new RateLimitedError();
+    throw err;
   }
   return out;
 }
