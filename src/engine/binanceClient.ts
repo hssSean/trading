@@ -126,6 +126,18 @@ export interface PositionRisk {
   unRealizedProfit: string;
 }
 
+// GET /fapi/v1/leverageBracket 回傳的分級保證金資料——notional 越大，
+// maintMarginRatio 越高、cum（維持保證金扣除額）越大。強平價公式要用
+// 「持倉名目價值真正落在哪一階」對應的這兩個值，不能固定用第一階。
+export interface MarginBracket {
+  bracket: number;
+  initialLeverage: number;
+  notionalCap: number;
+  notionalFloor: number;
+  maintMarginRatio: number;
+  cum: number; // maintenance amount
+}
+
 export interface OpenOrder {
   symbol: string;
   orderId: number;
@@ -212,7 +224,9 @@ export class BinanceFuturesClient {
     return res.data;
   }
 
-  async getLeverageBrackets(symbol?: string): Promise<Array<{ symbol: string; brackets: Array<{ notionalCap: number; maintMarginRatio: number }> }>> {
+  // cum（maintenance amount）是強平價公式必要的一項——見 src/engine/liquidation.ts。
+  // 先前這裡漏了這個欄位，之前沒人用過強平價計算所以沒發現。
+  async getLeverageBrackets(symbol?: string): Promise<Array<{ symbol: string; brackets: MarginBracket[] }>> {
     return this.signedRequest('GET', '/v1/leverageBracket', { symbol });
   }
 
