@@ -66,3 +66,14 @@ export function formatPlanLine(plan: PositionPlan): string {
   const base = `倉位 ${plan.positionUSDT}U（本金 ${plan.marginUSDT}U ×${plan.leverage}倍）`;
   return plan.belowMinNotional ? `${base}⚠低於交易所最低5U` : base;
 }
+
+// 2026-08-08：從 api/analyze/route.ts 搬過來，讓 DB 模擬版（route.ts）跟
+// 真倉自動化（src/engine/tradeBridge.ts）用同一個上限，不要各自維護一份會
+// 走鐘的數字。
+//
+// 這是「持倉數量，按波動性加權」的量測代理值，NOT 真實帳戶風險% ——
+// suggested_risk_pct 是系統依 ATR 波動性給的建議倉位大小（0.5/1.0/1.5，
+// 資訊性質，使用者自己決定要不要照做），跟使用者自己設的 acctRiskPct
+// 完全無關。2026-07-31 把顯示文案（拒絕原因/BtcStatusBar/ScanStatusPanel）
+// 改過，不再暗示這是真實帳戶風險，數字/門檻本身沒動，只是改了怎麼稱呼它。
+export const MAX_TOTAL_RISK_PCT = 5;

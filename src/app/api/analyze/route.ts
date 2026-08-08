@@ -5,7 +5,7 @@ import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } fro
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
-import { calcPositionPlan, formatPlanLine, tierRiskMultiplier } from '@/lib/position';
+import { calcPositionPlan, formatPlanLine, tierRiskMultiplier, MAX_TOTAL_RISK_PCT } from '@/lib/position';
 import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, TP1_PARTIAL_FRACTION, applyStopSlippage, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
@@ -1317,8 +1317,6 @@ async function checkStratBPaused(symbol: string): Promise<boolean> {
     return false;
   }
 }
-
-const MAX_TOTAL_RISK_PCT = 5; // cap on summed suggested_risk_pct — see note below, NOT real account %
 
 // ── Phase 5: total open risk check ───────────────────────────
 // Sums suggested_risk_pct of all open trades for a user. suggested_risk_pct is
