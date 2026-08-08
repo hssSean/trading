@@ -92,7 +92,7 @@ export type TradeAction =
   | { kind: 'place_entry'; order: PlaceOrderParams; quantity: number }
   | { kind: 'wait_for_fill'; reason: string }
   | { kind: 'needs_reconcile'; reason: string }
-  | { kind: 'sync_closed_position'; avgExitPrice: number; realizedPnl: number }
+  | { kind: 'sync_closed_position'; avgExitPrice: number; realizedPnl: number; result: 'WIN_TP1' | 'LOSS' }
   | { kind: 'place_initial_stop'; order: PlaceOrderParams }
   | { kind: 'tp1_partial_close'; order: PlaceOrderParams; closeQty: number; remainingQty: number }
   | { kind: 'close_full_position'; order: PlaceOrderParams }
@@ -145,7 +145,20 @@ export function decideTradeAction(
   if (snapshot.positionQty === 0 && !snapshot.entryOrderStillOpen) {
     const summary = snapshot.recentTrades ? summarizeClosingTrades(snapshot.recentTrades) : null;
     if (summary) {
-      return { kind: 'sync_closed_position', avgExitPrice: summary.avgExitPrice, realizedPnl: summary.totalRealizedPnl };
+      // result 刻意只做「贏/輸」二元判斷（用真實 realizedPnl 正負號，不是
+      // 猜的），不嘗試從均價反推 WIN_TP1 vs WIN_TP2 這種細分類——多筆分批
+      // 出場（TP1 部分平倉 + 移動止損收尾）的加權均價無法可靠反推是哪個
+      // 關卡觸發的，硬猜會把不確定的分類寫進正式統計，汙染之後的策略分析
+      // （這正是 8/6 分析踩過的坑：tier 欄位用 `?? 'A'` 捏造出不存在的
+      // 標籤）。WIN_TP1/LOSS 這兩個值 trades/page.tsx 的 isWin() 判斷式已
+      // 經夠用（勝率計算只看 WIN_TP1||WIN_TP2 是不是其中之一），細分類
+      // 之後有更完整的成交歷史記錄再補。
+      return {
+        kind: 'sync_closed_position',
+        avgExitPrice: summary.avgExitPrice,
+        realizedPnl: summary.totalRealizedPnl,
+        result: summary.totalRealizedPnl >= 0 ? 'WIN_TP1' : 'LOSS',
+      };
     }
     return {
       kind: 'needs_reconcile',

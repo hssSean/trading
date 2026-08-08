@@ -97,6 +97,21 @@ describe('decideTradeAction — needs reconcile', () => {
     if (a.kind !== 'sync_closed_position') return;
     expect(a.avgExitPrice).toBe(67000);
     expect(a.realizedPnl).toBe(15);
+    expect(a.result).toBe('WIN_TP1'); // positive realizedPnl → 粗分類為贏
+  });
+
+  it('classifies a negative realizedPnl as LOSS (not WIN_TP1)', () => {
+    const trades: UserTrade[] = [
+      { id: 1, orderId: 999, symbol: 'BTCUSDT', side: 'SELL', price: '64000', qty: '0.01', quoteQty: '640', realizedPnl: '-10', commission: '0.5', commissionAsset: 'USDT', time: 1, maker: false, buyer: false },
+    ];
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111 }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: false, recentTrades: trades }),
+      risk(),
+    );
+    expect(a.kind).toBe('sync_closed_position');
+    if (a.kind !== 'sync_closed_position') return;
+    expect(a.result).toBe('LOSS');
   });
 
   it('falls back to needs_reconcile when recentTrades is provided but empty', () => {
