@@ -43,6 +43,11 @@ const CLOSE_REASON_LABEL: Record<string, string> = {
   cancel_tp1_direct:         '直達TP1未成交',
   cancel_thesis_invalidated: '結構失效未成交',
   manual:                    '手動平倉',
+  // 2026-08-08：live-runner 真倉自動同步——tradeExecutor.ts 對帳時只能用
+  // 真實 realizedPnl 正負號分 WIN_TP1/LOSS，反推不出是踩到 TP2 還是移動
+  // 止損收尾，用這個值標記「這筆是真倉自動判定，不是精確分類」，跟 DB
+  // 模擬版的其他 close_reason 區分開來。
+  live_auto_sync:            '真倉自動同步（贏/輸粗分類）',
 };
 const REGIME_LABEL: Record<string, string> = {
   trending: '趨勢', ranging: '盤整', transitional: '過渡',

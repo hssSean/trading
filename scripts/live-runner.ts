@@ -8,42 +8,317 @@
  *   npm run live-runner            # testnet，預設
  *   npm run live-runner -- --live  # 正式帳戶（目前不會走到這裡，見下方說明）
  *
- * 環境變數（跟 testnet-reconcile.ts 同一套，不要貼在 chat 裡，只設在主機上）：
+ * 環境變數（不要貼在 chat 裡，只設在主機/本機上）：
  *   BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET
  *   UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN（跟 Vercel 專案同一個
- *   Upstash 執行個體 —— kill switch 是共用狀態，Vercel 那邊的 /api/analyze
- *   跟這支 process 要看到同一個開關）
+ *     Upstash 執行個體 —— kill switch 是共用狀態，Vercel 那邊的 /api/analyze
+ *     跟這支 process 要看到同一個開關）
+ *   NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY（跟 Vercel 專案同一個
+ *     Supabase 專案，走 service role 不是 anon key，跟 route.ts 對 DB 的權限
+ *     一致）
+ *   TRADING_USER_ID：Supabase 的 profiles.id（UUID）——這支只服務單一使用者，
+ *     不走完整的登入流程，直接指定要監控誰的 trades
  *
- * ── 現在這版本能做到什麼、不能做到什麼 ──────────────────────────────────
- * 能做：跑起來會持續讀 kill switch 狀態、拉真實 testnet 持倉/掛單、跑
- * watchdog.reconcilePositionsAndOrders 對帳、把結果印出來。這部分本身就有
- * 用：能看見「裸倉」（有倉位沒止損）這類異常，不需要等下單邏輯完成。
+ * ── 這版本做的事 ────────────────────────────────────────────────────────
+ * 1. Kill switch 檢查（fail closed）——啟動中就整輪跳過，不做任何下單/改單。
+ * 2. 全帳戶對帳（watchdog.reconcilePositionsAndOrders）——涵蓋所有 symbol，
+ *    不只 DB 追蹤範圍內的，抓「DB 寫入失敗導致行方不明」這類 DB 追蹤不到的
+ *    裸倉異常。純觀察 log，不在這裡自動修復（不知道該修哪個 trade_id）。
+ * 3. 逐筆處理 Supabase 裡這個使用者所有還沒結束的 trades：組出交易所快照
+ *    （倉位/掛單/條件單/現價，需要時才查 ATR/歷史成交）→ decideTradeAction
+ *    決定該做什麼 → executeTradeAction 真的送出去 + 寫回 DB。
  *
- * 不能做：目前不會真的下單/改單/平倉。runMonitorCycle 需要的
- * RunnerCycleInput（哪些單要 TP1 部分平倉、哪些要移動止損）目前傳空陣列——
- * 因為「用真實交易所倉位狀態算出該做什麼動作」這層橋接邏輯還沒寫（策略層
- * api/analyze/route.ts 目前只對接 Supabase 的推薦單狀態，從沒讀過真實
- * 交易所倉位）。且 binanceClient.ts 的 placeOrder 對 STOP_MARKET/
- * TAKE_PROFIT_MARKET 還是打舊版 /v1/order，撞得到 -4120（幣安 2025-12
- * 條件單遷移到 /fapi/v1/algoOrder，新端點路徑待確認）。這兩塊都補上之前，
- * --live 旗標刻意不接真實帳戶 —— 現在跑這支腳本不會有下單風險，純觀察。
+ * ── 這版本還沒做的 ──────────────────────────────────────────────────────
+ * 時間止損/盤整停滯關單——需要 K 線掃描歷史（不只當下一根），decideTradeAction
+ * 本身沒做（見該檔案頂部說明），這裡自然也沒有。
+ *
+ * --live 旗標刻意 exit(1) 拒絕——這是本次改動唯一保留的安全閥，確保這支
+ * 腳本目前只會碰 testnet 帳戶，不會不小心連到正式帳戶。
  */
 
-import { BinanceFuturesClient, loadBinanceConfigFromEnv } from '../src/engine/binanceClient';
-import { runMonitorCycle, RunnerClient } from '../src/engine/runner';
-import { getKillSwitchState } from '../src/engine/killSwitch';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Redis } from '@upstash/redis';
+import {
+  BinanceFuturesClient, loadBinanceConfigFromEnv, MarginBracket,
+} from '../src/engine/binanceClient';
+import { getKillSwitchState } from '../src/engine/killSwitch';
+import { reconcilePositionsAndOrders } from '../src/engine/watchdog';
+import { findMarginBracket } from '../src/engine/liquidation';
+import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
+import {
+  decideTradeAction, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput,
+} from '../src/engine/tradeBridge';
+import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
+import { calcSimpleAtr } from '../src/lib/monitorMath';
+import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
+import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 
 const isLive = process.argv.includes('--live');
 if (isLive) {
-  console.error('❌ --live 尚未開放：下單橋接邏輯還沒寫，目前只支援 testnet 觀察模式。');
+  console.error('❌ --live 尚未開放：目前只支援 testnet。');
   process.exit(1);
 }
 
 const CYCLE_MS = 15_000; // 15 秒一輪，比 Vercel 5 分鐘 cron 細很多
+const DEFAULT_MAX_LEVERAGE = 10;
 
 function nowStr(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
+}
+
+interface DbTradeRow {
+  id: string;
+  symbol: string;
+  direction: 'LONG' | 'SHORT';
+  entry: number;
+  stop_loss: number;
+  tp1: number;
+  tp2: number;
+  strategy: string | null;
+  status: string;
+  suggested_risk_pct: number | null;
+  filled_at: number | null;
+  opened_at: number;
+  exchange_entry_order_id: number | null;
+  exchange_stop_algo_id: number | null;
+}
+
+function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
+  return {
+    id: row.id,
+    symbol: row.symbol,
+    isLong: row.direction === 'LONG',
+    entry: row.entry,
+    stopLoss: row.stop_loss,
+    tp1: row.tp1,
+    strategy: row.strategy === 'B' ? 'B' : 'A',
+    exchangeEntryOrderId: row.exchange_entry_order_id,
+    exchangeStopAlgoId: row.exchange_stop_algo_id,
+  };
+}
+
+// 每筆 trade 各自建立一個 persistence——比共用一個全域物件簡單，執行層本來
+// 就是逐筆呼叫，不需要跨 trade 共享狀態。
+function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersistence {
+  const logErr = (op: string, error: { code?: string; message: string } | null) => {
+    if (error) console.error(`[persist] ${op} ${row.id} 失敗: [${error.code}] ${error.message}`);
+  };
+  return {
+    async setEntryOrderId(tradeId, orderId) {
+      const { error } = await supabase.from('trades').update({ exchange_entry_order_id: orderId }).eq('id', tradeId);
+      logErr('setEntryOrderId', error);
+    },
+    async setStopAlgoId(tradeId, algoId) {
+      const { error } = await supabase.from('trades').update({ exchange_stop_algo_id: algoId }).eq('id', tradeId);
+      logErr('setStopAlgoId', error);
+    },
+    async markTp1Hit(tradeId) {
+      const { error } = await supabase.from('trades').update({ status: 'tp1_hit' }).eq('id', tradeId);
+      logErr('markTp1Hit', error);
+    },
+    async finalizeClosed(tradeId, result) {
+      // pnl_percent 維持跟 DB 模擬版同一個計算基礎（價格百分比，不是保證金
+      // ROI）——CLAUDE.md「損益一律用 R 倍數」，R = pnl_percent ÷ 止損距離%，
+      // 這個換算全站通用，這裡如果改用 realizedPnl/margin 算出來的 ROI%，
+      // 下游所有 R 倍數計算會全部跟著失真。realizedPnl（真實 USDT 金額）
+      // 另外沒有欄位可存，先不寫，之後要看要不要加欄位。
+      const pnlPercent = row.direction === 'LONG'
+        ? (result.exitPrice - row.entry) / row.entry * 100
+        : (row.entry - result.exitPrice) / row.entry * 100;
+      const { error } = await supabase.from('trades').update({
+        result: result.result,
+        exit_price: result.exitPrice,
+        pnl_percent: parseFloat(pnlPercent.toFixed(2)),
+        closed_at: Date.now(),
+        close_reason: 'live_auto_sync',
+      }).eq('id', tradeId);
+      logErr('finalizeClosed', error);
+    },
+  };
+}
+
+async function buildSnapshot(
+  binance: BinanceFuturesClient,
+  row: DbTradeRow,
+  filters: SymbolFilters,
+): Promise<BridgeExchangeSnapshot> {
+  const [positions, openOrders, openAlgoOrders, markPrice] = await Promise.all([
+    binance.getPositionRisk(row.symbol),
+    binance.getOpenOrders(row.symbol),
+    binance.getOpenAlgoOrders(row.symbol),
+    fetchCurrentPrice(row.symbol),
+  ]);
+
+  const positionQty = positions[0] ? Math.abs(parseFloat(positions[0].positionAmt)) : 0;
+  const entryOrderStillOpen = row.exchange_entry_order_id !== null
+    && openOrders.some(o => o.orderId === row.exchange_entry_order_id);
+
+  const stopOrder = row.exchange_stop_algo_id !== null
+    ? openAlgoOrders.find(a => a.algoId === row.exchange_stop_algo_id)
+    : undefined;
+  const currentStop = stopOrder
+    ? { algoId: stopOrder.algoId, triggerPrice: parseFloat(stopOrder.triggerPrice) }
+    : null;
+
+  // ATR 只有「策略A + 已經過 TP1」需要（移動止損棘輪）——其他情況不用多打
+  //一次 K 線請求。
+  let atr1h: number | undefined;
+  if (row.status === 'tp1_hit' && (row.strategy ?? 'A') === 'A') {
+    try {
+      const candles = await fetchCandles(row.symbol, '1h', 20);
+      atr1h = calcSimpleAtr(candles, 14);
+    } catch (e) {
+      console.error(`[snapshot] ${row.symbol} ATR 抓取失敗，這輪移動止損跳過: ${String(e).slice(0, 150)}`);
+    }
+  }
+
+  // recentTrades 只在「部位消失、需要對帳」那一刻才查——用 filled_at（沒有
+  // 就退回 opened_at）當時間下限，避免抓到同一個 symbol 更早、不相關的
+  // 歷史成交（trades 表有 one-open-per-symbol 限制，但關閉後同 symbol 可能
+  // 再開新單）。
+  let recentTrades;
+  if (positionQty === 0 && !entryOrderStillOpen && row.exchange_entry_order_id !== null) {
+    try {
+      const startTime = row.filled_at ?? row.opened_at;
+      recentTrades = await binance.getUserTrades(row.symbol, { startTime });
+    } catch (e) {
+      console.error(`[snapshot] ${row.symbol} getUserTrades 失敗，這輪標記需要對帳: ${String(e).slice(0, 150)}`);
+    }
+  }
+
+  return { positionQty, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h };
+}
+
+async function buildRiskInput(
+  binance: BinanceFuturesClient,
+  row: DbTradeRow,
+  totalOpenRiskPct: number,
+): Promise<RiskCheckInput | null> {
+  const balances = await binance.getBalance();
+  const usdt = balances.find(b => b.asset === 'USDT');
+  const accountEquity = usdt ? parseFloat(usdt.availableBalance) : 0;
+  const riskPct = row.suggested_risk_pct ?? 1;
+
+  const plan = calcPositionPlan(accountEquity, riskPct, row.entry, row.stop_loss, DEFAULT_MAX_LEVERAGE);
+  const positionUSDT = plan?.positionUSDT ?? 0;
+  const marginUSDT = plan?.marginUSDT ?? 0;
+
+  const bracketsRes = await binance.getLeverageBrackets(row.symbol);
+  const brackets: MarginBracket[] = bracketsRes[0]?.brackets ?? [];
+  if (brackets.length === 0) {
+    // 抓不到分級資料時寧可整個跳過這筆（下一輪重試），不要用 0 或任何猜測值
+    // 硬填——maintMarginRatio 填低了會讓 checkLiquidationSafety 算出的強平價
+    // 比實際更寬鬆（誤判成更安全），這是危險方向的錯誤，比「這筆晚一輪才
+    // 進場」嚴重得多。
+    console.error(`[risk] ${row.symbol} 抓不到 leverageBrackets 分級資料，這輪跳過進場判斷`);
+    return null;
+  }
+  const bracket = findMarginBracket(brackets, positionUSDT);
+
+  return {
+    positionUSDT,
+    totalOpenRiskPct,
+    thisTradeRiskPct: riskPct,
+    liquidation: {
+      isolatedMarginUSDT: marginUSDT,
+      maintMarginRatio: bracket.maintMarginRatio,
+      maintAmount: bracket.cum,
+    },
+  };
+}
+
+async function runCycle(
+  supabase: SupabaseClient,
+  binance: BinanceFuturesClient,
+  redis: Redis,
+  userId: string,
+): Promise<void> {
+  const ks = await getKillSwitchState(redis);
+  if (ks.active) {
+    console.log(`[${nowStr()}] kill switch 啟動中（${ks.reason ?? '無原因記錄'}）— 跳過整輪`);
+    return;
+  }
+
+  // 全帳戶對帳——涵蓋所有 symbol，抓 DB 追蹤不到的異常（見檔案頂部說明）。
+  try {
+    const [positions, openOrders, openAlgoOrders] = await Promise.all([
+      binance.getPositionRisk(),
+      binance.getOpenOrders(),
+      binance.getOpenAlgoOrders(),
+    ]);
+    const anomalies = reconcilePositionsAndOrders(positions, openOrders, openAlgoOrders);
+    if (anomalies.length > 0) {
+      console.log(`[${nowStr()}] ⚠ 全帳戶對帳異常 ${anomalies.length} 筆:`);
+      for (const a of anomalies) console.log(`   ${JSON.stringify(a)}`);
+    }
+  } catch (e) {
+    console.error(`[${nowStr()}] 全帳戶對帳讀取失敗: ${String(e).slice(0, 150)}`);
+  }
+
+  const { data: rows, error } = await supabase
+    .from('trades')
+    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,status,suggested_risk_pct,filled_at,opened_at,exchange_entry_order_id,exchange_stop_algo_id')
+    .eq('user_id', userId)
+    .is('closed_at', null);
+
+  if (error) {
+    console.error(`[${nowStr()}] 讀取 open trades 失敗: [${error.code}] ${error.message}`);
+    return;
+  }
+  const openTrades = (rows ?? []) as DbTradeRow[];
+  if (openTrades.length === 0) {
+    console.log(`[${nowStr()}] OK，目前沒有開著的推薦單`);
+    return;
+  }
+
+  const totalOpenRiskPct = openTrades.reduce((s, t) => s + (t.suggested_risk_pct ?? 1), 0);
+
+  const client: TradeExecutorClient = {
+    placeOrder: (params) => binance.placeOrder(params),
+    cancelOrder: (symbol, orderId, isAlgoOrder) => binance.cancelOrder(symbol, orderId, isAlgoOrder),
+  };
+
+  // exchangeInfo 是全市場共用的靜態精度資料，同一輪所有 trade 共用一份，
+  // 不用每筆各打一次。
+  const exchangeInfo = await binance.getExchangeInfo();
+  const filtersMap = parseSymbolFilters(exchangeInfo as Parameters<typeof parseSymbolFilters>[0]);
+
+  for (const row of openTrades) {
+    try {
+      const filters = filtersMap.get(row.symbol);
+      if (!filters) {
+        console.error(`[${nowStr()}] ${row.symbol} 找不到 exchangeInfo 精度設定，跳過這筆`);
+        continue;
+      }
+
+      const snapshot = await buildSnapshot(binance, row, filters);
+      const trade = toBridgeTradeRow(row);
+
+      // 風險輸入只有「還沒下過進場單」才需要（余額/槓桿分級都是額外的 API
+      // 呼叫，其他狀態下這筆單不會走到 decideTradeAction 的風險檢查分支）。
+      let risk: RiskCheckInput;
+      if (row.exchange_entry_order_id === null) {
+        const built = await buildRiskInput(binance, row, totalOpenRiskPct - (row.suggested_risk_pct ?? 1));
+        if (!built) continue; // 抓不到分級資料，這輪跳過，見 buildRiskInput 說明
+        risk = built;
+      } else {
+        risk = { positionUSDT: 0, totalOpenRiskPct: 0, thisTradeRiskPct: 0, liquidation: { isolatedMarginUSDT: 0, maintMarginRatio: 0, maintAmount: 0 } };
+      }
+
+      const action = decideTradeAction(trade, snapshot, risk);
+      const result = await executeTradeAction(client, makePersistence(supabase, row), row.id, action);
+
+      if (result.executed) {
+        console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
+      }
+      // hold/wait_for_fill 這類 no-op 不印，避免每輪洗版；needs_reconcile 值得看見。
+      else if (action.kind === 'needs_reconcile' || action.kind === 'skip_entry') {
+        console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
+      }
+    } catch (e) {
+      console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${String(e).slice(0, 200)}`);
+    }
+  }
 }
 
 async function main() {
@@ -51,19 +326,24 @@ async function main() {
     console.error('❌ UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN 未設定');
     process.exit(1);
   }
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('❌ NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 未設定');
+    process.exit(1);
+  }
+  if (!process.env.TRADING_USER_ID) {
+    console.error('❌ TRADING_USER_ID 未設定（Supabase profiles.id）');
+    process.exit(1);
+  }
+
   const redis = Redis.fromEnv();
+  const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
   const config = loadBinanceConfigFromEnv(true); // testnet 固定 true，直到 --live 開放
   const binance = new BinanceFuturesClient(config);
+  const userId = process.env.TRADING_USER_ID;
 
-  const client: RunnerClient = {
-    getPositionRisk:   (symbol) => binance.getPositionRisk(symbol),
-    getOpenOrders:     (symbol) => binance.getOpenOrders(symbol),
-    getOpenAlgoOrders: (symbol) => binance.getOpenAlgoOrders(symbol),
-    placeOrder:        (params) => binance.placeOrder(params),
-    cancelOrder:       (symbol, orderId, isAlgoOrder) => binance.cancelOrder(symbol, orderId, isAlgoOrder),
-  };
-
-  console.log(`[${nowStr()}] live-runner 啟動（testnet 觀察模式，${CYCLE_MS / 1000}秒/輪）`);
+  console.log(`[${nowStr()}] live-runner 啟動（testnet，${CYCLE_MS / 1000}秒/輪，會真的下單）`);
 
   let stopped = false;
   const stop = () => {
@@ -77,23 +357,7 @@ async function main() {
   while (!stopped) {
     const cycleStart = Date.now();
     try {
-      const result = await runMonitorCycle(
-        { client, getKillSwitchState: () => getKillSwitchState(redis) },
-        { pendingCancels: [], tp1Closes: [], trailingStopUpdates: [] }, // 見上方說明：橋接邏輯待補
-      );
-
-      if (result.killSwitchActive) {
-        console.log(`[${nowStr()}] kill switch 啟動中`);
-      }
-      if (result.reconcileAnomalies.length > 0) {
-        console.log(`[${nowStr()}] ⚠ 對帳異常 ${result.reconcileAnomalies.length} 筆:`);
-        for (const a of result.reconcileAnomalies) console.log(`   ${JSON.stringify(a)}`);
-      }
-      for (const e of result.errors) console.log(`[${nowStr()}] ❌ ${e}`);
-
-      if (result.reconcileAnomalies.length === 0 && result.errors.length === 0 && !result.killSwitchActive) {
-        console.log(`[${nowStr()}] OK，無異常`);
-      }
+      await runCycle(supabase, binance, redis, userId);
     } catch (e) {
       console.log(`[${nowStr()}] ❌ 這輪整個失敗（不影響下一輪）: ${String(e)}`);
     }
