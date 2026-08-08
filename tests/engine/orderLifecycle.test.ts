@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  calcTrailingStopTarget,
   decideEntryOrder,
+  decideFullClose,
   decideTp1PartialClose,
   decideTrailingStopReplace,
   EntryOrderInput,
+  FullCloseInput,
   Tp1PartialCloseInput,
   TrailingStopReplaceInput,
+  TrailingStopTargetInput,
 } from '../../src/engine/orderLifecycle';
 
 const filters = { stepSize: 0.001, tickSize: 0.1, minNotional: 5 };
@@ -251,5 +255,86 @@ describe('decideTrailingStopReplace', () => {
     expect(a2.kind).toBe('initialize');
     if (a1.kind !== 'initialize' || a2.kind !== 'initialize') return;
     expect(a1.place.newClientOrderId).toBe(a2.place.newClientOrderId);
+  });
+});
+
+function targetInput(overrides: Partial<TrailingStopTargetInput> = {}): TrailingStopTargetInput {
+  return {
+    isLong: true, entry: 65000, tp1: 67000, markPrice: 67000,
+    atr1h: 500, currentTrailingStop: 0,
+    ...overrides,
+  };
+}
+
+describe('calcTrailingStopTarget', () => {
+  it('leaves currentTrailingStop unchanged when atr1h is not available yet (<=0)', () => {
+    const t = calcTrailingStopTarget(targetInput({ atr1h: 0, currentTrailingStop: 66000 }));
+    expect(t).toBe(66000);
+  });
+
+  it('initializes at tp1 - 2*atr1h for LONG when that beats the entry floor', () => {
+    // tp1=67000, atr1h=500 → 67000-1000=66000, entry=65000 → max(66000,65000)=66000
+    const t = calcTrailingStopTarget(targetInput());
+    expect(t).toBe(66000);
+  });
+
+  it('floors the LONG initial stop at entry when tp1-2*atr1h would be worse', () => {
+    // tp1=65500, atr1h=2000 → 65500-4000=61500, entry=65000 → max(61500,65000)=65000
+    const t = calcTrailingStopTarget(targetInput({ tp1: 65500, atr1h: 2000 }));
+    expect(t).toBe(65000);
+  });
+
+  it('initializes at tp1 + 2*atr1h for SHORT when that beats the entry floor (mirror)', () => {
+    // entry=65000, tp1=63000, atr1h=500 → 63000+1000=64000, min(64000,65000)=64000
+    const t = calcTrailingStopTarget(targetInput({ isLong: false, entry: 65000, tp1: 63000, atr1h: 500 }));
+    expect(t).toBe(64000);
+  });
+
+  it('ratchets forward (LONG) when the new candidate is more favorable than the current stop', () => {
+    // already initialized at 66000; price moved to 68000, atr1h=500 → candidate=68000-1000=67000 > 66000
+    const t = calcTrailingStopTarget(targetInput({ currentTrailingStop: 66000, markPrice: 68000, atr1h: 500 }));
+    expect(t).toBe(67000);
+  });
+
+  it('does NOT ratchet backward (LONG) when the candidate would be worse than the current stop', () => {
+    // price pulled back to 66200, atr1h=500 → candidate=65700 < currentTrailingStop=66000 → keep 66000
+    const t = calcTrailingStopTarget(targetInput({ currentTrailingStop: 66000, markPrice: 66200, atr1h: 500 }));
+    expect(t).toBe(66000);
+  });
+
+  it('ratchets forward (SHORT) when the new candidate is more favorable (mirror)', () => {
+    // already initialized at 64000 (SHORT); price dropped to 62000, atr1h=500 → candidate=62000+1000=63000 < 64000
+    const t = calcTrailingStopTarget(targetInput({
+      isLong: false, currentTrailingStop: 64000, markPrice: 62000, atr1h: 500,
+    }));
+    expect(t).toBe(63000);
+  });
+});
+
+function fullCloseInput(overrides: Partial<FullCloseInput> = {}): FullCloseInput {
+  return { tradeId: 'trade-1', symbol: 'BTCUSDT', isLong: true, positionQty: 0.1, ...overrides };
+}
+
+describe('decideFullClose', () => {
+  it('closes the ENTIRE position with a reduceOnly MARKET order (LONG → SELL)', () => {
+    const d = decideFullClose(fullCloseInput());
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order).toEqual({
+      symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET',
+      quantity: 0.1, reduceOnly: true, newClientOrderId: 'trade-1-fullclose',
+    });
+  });
+
+  it('mirrors side for SHORT', () => {
+    const d = decideFullClose(fullCloseInput({ isLong: false }));
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order.side).toBe('BUY');
+  });
+
+  it('skips when there is no position to close', () => {
+    const d = decideFullClose(fullCloseInput({ positionQty: 0 }));
+    expect(d.skip).toBe(true);
   });
 });

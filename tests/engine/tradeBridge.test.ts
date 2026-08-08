@@ -10,7 +10,7 @@ const filters = { stepSize: 0.001, tickSize: 0.1, minNotional: 5 };
 function tradeRow(overrides: Partial<BridgeTradeRow> = {}): BridgeTradeRow {
   return {
     id: 'trade-1', symbol: 'BTCUSDT', isLong: true,
-    entry: 65000, stopLoss: 64000, tp1: 67000,
+    entry: 65000, stopLoss: 64000, tp1: 67000, strategy: 'A',
     exchangeEntryOrderId: null, exchangeStopAlgoId: null,
     ...overrides,
   };
@@ -195,5 +195,82 @@ describe('decideTradeAction — TP1 partial close', () => {
       risk(),
     );
     expect(a.kind).toBe('tp1_partial_close');
+  });
+});
+
+describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)', () => {
+  it('closes the FULL position (not a partial) once price touches the target', () => {
+    const a = decideTradeAction(
+      tradeRow({ strategy: 'B', exchangeEntryOrderId: 111 }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+        markPrice: 67100, // >= tp1
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('close_full_position');
+    if (a.kind !== 'close_full_position') return;
+    expect(a.order.quantity).toBe(0.01); // 全部部位，不是 50%
+  });
+
+  it('holds when price has not reached the target yet', () => {
+    const a = decideTradeAction(
+      tradeRow({ strategy: 'B', exchangeEntryOrderId: 111 }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+        markPrice: 66000, // < tp1
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
+  });
+});
+
+describe('decideTradeAction — strategy A trailing stop after TP1', () => {
+  it('updates the trailing stop when atr1h is available and the target is more favorable', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111 }),
+      snapshot({
+        positionQty: 0.005,
+        currentStop: { algoId: 222, triggerPrice: 66000 }, // 已經初始化過，不等於原始 stopLoss(64000)
+        markPrice: 68000,
+        atr1h: 500, // candidate = 68000-1000=67000 > 66000 → 更有利
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('update_trailing_stop');
+    if (a.kind !== 'update_trailing_stop') return;
+    expect(a.place.stopPrice).toBe(67000);
+    expect(a.cancelOrderId).toBe(222);
+  });
+
+  it('holds without moving the stop when no ATR data is available yet', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111 }),
+      snapshot({
+        positionQty: 0.005,
+        currentStop: { algoId: 222, triggerPrice: 66000 },
+        markPrice: 68000,
+        // atr1h 未提供
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
+  });
+
+  it('holds when the target is not more favorable than the current stop (no unnecessary order)', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111 }),
+      snapshot({
+        positionQty: 0.005,
+        currentStop: { algoId: 222, triggerPrice: 66000 },
+        markPrice: 66200,
+        atr1h: 500, // candidate = 66200-1000=65200 < 66000 → 沒有更有利
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
   });
 });

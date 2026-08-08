@@ -1,26 +1,20 @@
 // 主決策函數：「這筆 Supabase 推薦單，現在該對交易所做什麼」。這是把之前
-// 分別寫好、分別測過的積木（decideEntryOrder / decideTrailingStopReplace /
-// decideTp1PartialClose / checkLiquidationSafety）串成一條真的會動的線的
-// 地方——runner.ts 執行「怎麼做」，這裡決定「該做什麼」。
+// 分別寫好、分別測過的積木串成一條真的會動的線的地方——runner.ts 執行
+// 「怎麼做」，這裡決定「該做什麼」。
 //
 // 呼叫端（live-runner 的主迴圈，還沒接）每輪對每筆開著的 trade row 呼叫一次
 // 這個函數，餵進「DB 記的這筆單長怎樣」+「交易所上真實看到的快照」，拿回
 // 一個動作決定。
 //
 // 刻意不做的（明確範圍邊界，不是漏掉）：
-//   - 移動止損「目標價該設多少」——那是 route.ts 裡一大段 ATR 棘輪計算，
-//     需要 K 線資料，不是單純從交易所快照能推出來的。呼叫端如果已經另外
-//     算好 desiredStopPrice，直接呼叫 decideTrailingStopReplace 即可，
-//     不需要透過這個函數。
-//   - 部位消失但 DB 還記著開倉（needs_reconcile）——要查歷史成交
-//     （getUserTrades 之類，binanceClient.ts 目前沒有這個方法）才能判斷
-//     是 TP2/SL 觸發還是別的原因，這版只偵測出「需要處理」，不猜答案。
-//   - 時間止損/盤整停滯關單——同樣需要 K 線資料。
+//   - 時間止損/盤整停滯關單——需要 K 線掃描歷史（不只是當下一根），跟
+//     TP1/移動止損用「當下 markPrice/ATR」就能判斷的性質不同，這版沒做。
 
 import { PlaceOrderParams, UserTrade } from './binanceClient';
 import { SymbolFilters } from './precision';
 import {
-  decideEntryOrder, decideTp1PartialClose, decideTrailingStopReplace,
+  calcTrailingStopTarget, decideEntryOrder, decideFullClose,
+  decideTp1PartialClose, decideTrailingStopReplace,
 } from './orderLifecycle';
 import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
 import { MAX_TOTAL_RISK_PCT } from '@/lib/position';
@@ -63,6 +57,10 @@ export interface BridgeTradeRow {
   entry: number;
   stopLoss: number;
   tp1: number;
+  // 策略B（均值回歸）沒有兩階段 TP——tp1/tp2 是同一個值（[tp1, tp1]，見
+  // signals.ts generateMeanReversionSignals），觸價要整單了結，不是先平一半
+  // 留一半給移動止損。策略A才有 TP1 部分平倉 + 移動止損那一整套。
+  strategy: 'A' | 'B';
   exchangeEntryOrderId: number | null;
   exchangeStopAlgoId: number | null;
 }
@@ -77,6 +75,9 @@ export interface BridgeExchangeSnapshot {
   // 每輪都要查，只在真的需要對帳（positionQty 從有變 0）那一刻才查。有給
   // 就能直接算出關單結果，沒給就退回單純標記需要處理。
   recentTrades?: UserTrade[];
+  // 1小時 ATR(14期)，只有策略A的移動止損判斷需要。<= 0 或未提供都視為
+  // 「還沒有 ATR 資料」，不會亂算——見 calcTrailingStopTarget。
+  atr1h?: number;
 }
 
 export interface RiskCheckInput {
@@ -94,6 +95,8 @@ export type TradeAction =
   | { kind: 'sync_closed_position'; avgExitPrice: number; realizedPnl: number }
   | { kind: 'place_initial_stop'; order: PlaceOrderParams }
   | { kind: 'tp1_partial_close'; order: PlaceOrderParams; closeQty: number; remainingQty: number }
+  | { kind: 'close_full_position'; order: PlaceOrderParams }
+  | { kind: 'update_trailing_stop'; place: PlaceOrderParams; cancelOrderId?: number }
   | { kind: 'hold'; reason: string };
 
 export function decideTradeAction(
@@ -164,14 +167,24 @@ export function decideTradeAction(
     return { kind: 'hold', reason: '補止損決策回傳非預期結果' };
   }
 
-  // 5. 有止損。觸價 TP1、且目前止損還是「初始止損」（尚未做過 TP1 部分平倉，
-  //    用止損價跟 trade.stopLoss 是否相同來判斷——部分平倉後止損會被移動，
-  //    不會再等於原始 stopLoss）。
+  // 5. 有止損。觸價 tp1（策略B的 tp1==tp2，觸價即整單了結；策略A是分兩階段）。
   const isInitialStop = Math.abs(snapshot.currentStop.triggerPrice - trade.stopLoss) < 1e-8;
   const touchedTp1 = trade.isLong
     ? snapshot.markPrice >= trade.tp1
     : snapshot.markPrice <= trade.tp1;
 
+  if (trade.strategy === 'B') {
+    if (touchedTp1) {
+      const closeDecision = decideFullClose({
+        tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong, positionQty: snapshot.positionQty,
+      });
+      if (closeDecision.skip) return { kind: 'hold', reason: `整單平倉跳過：${closeDecision.reason}` };
+      return { kind: 'close_full_position', order: closeDecision.order };
+    }
+    return { kind: 'hold', reason: '策略B持有中，尚未觸及止盈目標' };
+  }
+
+  // 策略A：第一次觸及 TP1（止損還是原始值）→ 部分平倉。
   if (isInitialStop && touchedTp1) {
     const tp1Decision = decideTp1PartialClose({
       tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
@@ -184,8 +197,28 @@ export function decideTradeAction(
     };
   }
 
+  // 策略A：已經過了 TP1（止損不再是原始值，代表部分平倉/至少初始化過一次
+  // 移動止損）→ 持續棘輪。沒有 ATR 資料就不亂動，維持現狀。
+  if (!isInitialStop && snapshot.atr1h !== undefined && snapshot.atr1h > 0) {
+    const target = calcTrailingStopTarget({
+      isLong: trade.isLong, entry: trade.entry, tp1: trade.tp1, markPrice: snapshot.markPrice,
+      atr1h: snapshot.atr1h, currentTrailingStop: snapshot.currentStop.triggerPrice,
+    });
+    const stopDecision = decideTrailingStopReplace({
+      tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
+      currentStopOrder: { orderId: snapshot.currentStop.algoId, stopPrice: snapshot.currentStop.triggerPrice },
+      desiredStopPrice: target, filters: snapshot.filters,
+    });
+    if (stopDecision.kind === 'replace') {
+      return { kind: 'update_trailing_stop', place: stopDecision.place, cancelOrderId: stopDecision.cancelOrderId };
+    }
+    // kind: 'none'（目標沒有比現有止損更有利）或 'initialize'（不會發生——
+    // currentStopOrder 這裡一定非 null）都落到 hold，沒有動作可做。
+    return { kind: 'hold', reason: '持有中（TP1 已達標，移動止損暫無更有利的目標價）' };
+  }
+
   return {
     kind: 'hold',
-    reason: '持有中，等待下一個關卡（移動止損目標價計算不在這個函數內，見模組頂部說明）',
+    reason: '持有中，等待下一個關卡',
   };
 }

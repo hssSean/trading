@@ -145,6 +145,91 @@ export function decideTp1PartialClose(input: Tp1PartialCloseInput): Tp1PartialCl
   };
 }
 
+// ── Full close ───────────────────────────────────────────────────────────────
+//
+// 策略B（均值回歸）沒有 TP1/TP2 兩階段——signals.ts 的
+// generateMeanReversionSignals 故意把 takeProfits 寫成 [tp1, tp1]（見
+// PriceProgressBar.tsx 那次修正），觸價就是整單了結，不走 decideTp1PartialClose
+// 那條「先平一半、留一半給移動止損」的路。這是給那個情境用的。
+
+export interface FullCloseInput {
+  tradeId: string;
+  symbol: string;
+  isLong: boolean;
+  positionQty: number; // absolute filled quantity currently open
+}
+
+export type FullCloseDecision =
+  | { skip: true; reason: string }
+  | { skip: false; order: PlaceOrderParams };
+
+export function decideFullClose(input: FullCloseInput): FullCloseDecision {
+  if (input.positionQty <= 0) {
+    return { skip: true, reason: 'positionQty <= 0 — 沒有可平的部位' };
+  }
+  return {
+    skip: false,
+    order: {
+      symbol: input.symbol,
+      side: input.isLong ? 'SELL' : 'BUY',
+      type: 'MARKET',
+      quantity: input.positionQty,
+      reduceOnly: true,
+      // 同一筆 trade 的整單平倉只會發生一次，冪等 ID 避免重試造成二次平倉。
+      newClientOrderId: `${input.tradeId}-fullclose`,
+    },
+  };
+}
+
+// ── Trailing stop target price ──────────────────────────────────────────────
+//
+// route.ts's ATR ratchet (2026-08-08 移過來，數字/邏輯照抄，不是重新設計）：
+//   初始化（TP1 剛觸及那一刻）：
+//     LONG:  trailingStop = max(tp1 − 2×atr1h, entry)   — 保本地板，不會比進場價差
+//     SHORT: trailingStop = min(tp1 + 2×atr1h, entry)
+//   之後每次評估（TP1 已觸及後）：
+//     LONG:  candidate = 現價 − 2×atr1h；只在 candidate > 現有止損 時採用
+//     SHORT: candidate = 現價 + 2×atr1h；只在 candidate < 現有止損 時採用
+//   只有策略 A（趨勢）有這個機制——策略 B（均值回歸）只有單一止盈目標，
+//   TP1=TP2，不會走到「TP1 後移動止損」這段。
+//
+// route.ts 是「K 線掃描」架構，棘輪基準用每根 K 線的收盤價（c.close）；這裡
+// 是給即時輪詢用的 runner 用，沒有 K 線，用當下 markPrice 代替——跟
+// decideTradeAction 判斷 TP1 觸價時用 markPrice 代替 K 線 high/low 是同一類
+// 簡化（架構本質差異：K 線只在收盤動一次，即時輪詢每輪都可能動，方向一致，
+// 敏感度不同），不是另外設計的邏輯。
+export interface TrailingStopTargetInput {
+  isLong: boolean;
+  entry: number;
+  tp1: number;
+  markPrice: number;
+  atr1h: number;               // 1小時 ATR(14期)；<= 0 代表還沒有 ATR 資料
+  currentTrailingStop: number; // 0 = 尚未初始化過
+}
+
+// 回傳新的目標止損價；atr1h <= 0（還沒抓到 ATR 資料）時原樣傳回
+// currentTrailingStop，不亂算——route.ts 對這個情況的處理是「這輪不初始化」
+// （見 route.ts atr1h===0 的 console.error 分支），不是用 0 或任何猜測值硬算。
+export function calcTrailingStopTarget(input: TrailingStopTargetInput): number {
+  if (input.atr1h <= 0) return input.currentTrailingStop;
+
+  if (input.currentTrailingStop === 0) {
+    return input.isLong
+      ? Math.max(input.tp1 - 2 * input.atr1h, input.entry)
+      : Math.min(input.tp1 + 2 * input.atr1h, input.entry);
+  }
+
+  const candidate = input.isLong
+    ? input.markPrice - 2 * input.atr1h
+    : input.markPrice + 2 * input.atr1h;
+
+  const isMoreFavorable = input.isLong
+    ? candidate > input.currentTrailingStop
+    : candidate < input.currentTrailingStop;
+
+  return isMoreFavorable ? candidate : input.currentTrailingStop;
+}
+
 // ── Trailing stop replace ───────────────────────────────────────────────────
 //
 // The existing route.ts trailing-stop math (init at TP1∓2×ATR floored at entry,
