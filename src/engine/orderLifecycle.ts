@@ -14,6 +14,80 @@ import { PlaceOrderParams } from './binanceClient';
 import { SymbolFilters, roundToStepSize, roundToTickSize } from './precision';
 import { TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
 
+// ── Entry order ─────────────────────────────────────────────────────────────
+//
+// The one piece of "訊號 → 真的開倉" that didn't exist anywhere yet. Everything
+// else in this file assumes a position already exists on the exchange; this is
+// what creates the first order. positionUSDT comes from calcPositionPlan
+// (src/lib/position.ts) — same formula the App already shows the user, not a
+// second one invented here (CLAUDE.md: 倉位計畫...勿另寫倉位公式).
+//
+// Deliberately does NOT place the paired stop here — see the module doc at the
+// top of this file and docs/ANALYSIS-2026-08-06-自動交易缺口清單.md: the stop
+// can only be sized correctly once the entry is CONFIRMED filled (exact filled
+// qty, not the requested qty — a partial fill needs a smaller stop). The
+// initial stop is decideTrailingStopReplace() called with currentStopOrder:
+// null once the caller observes the position appear on positionRisk — that
+// function's 'initialize' branch already does exactly this, no new function
+// needed for it.
+
+export interface EntryOrderInput {
+  tradeId: string;
+  symbol: string;
+  isLong: boolean;
+  entry: number;
+  positionUSDT: number;   // caller has already run calcPositionPlan and decided this isn't belowMinNotional
+  filters: SymbolFilters;
+}
+
+export type EntryOrderDecision =
+  | { skip: true; reason: string }
+  | { skip: false; order: PlaceOrderParams; quantity: number };
+
+export function decideEntryOrder(input: EntryOrderInput): EntryOrderDecision {
+  if (input.entry <= 0) {
+    return { skip: true, reason: `entry ${input.entry} 無效（必須 > 0）` };
+  }
+  if (input.positionUSDT <= 0) {
+    return { skip: true, reason: `positionUSDT ${input.positionUSDT} 無效（必須 > 0）` };
+  }
+
+  const rawQty = input.positionUSDT / input.entry;
+  const quantity = roundToStepSize(rawQty, input.filters.stepSize);
+  if (quantity <= 0) {
+    return {
+      skip: true,
+      reason: `倉位 ${input.positionUSDT}U 換算數量後在 stepSize ${input.filters.stepSize} 下取整為 0，太小無法下單`,
+    };
+  }
+
+  const notional = quantity * input.entry;
+  if (notional < input.filters.minNotional) {
+    return {
+      skip: true,
+      reason: `取整後名目倉位 ${notional.toFixed(2)}U 低於交易所最低 ${input.filters.minNotional}U`,
+    };
+  }
+
+  return {
+    skip: false,
+    quantity,
+    order: {
+      symbol: input.symbol,
+      side: input.isLong ? 'BUY' : 'SELL',
+      type: 'LIMIT',
+      quantity,
+      price: roundToTickSize(input.entry, input.filters.tickSize),
+      timeInForce: 'GTC',
+      // Deterministic per trade — a re-run against the same tradeId (e.g. the
+      // caller retries after a network timeout without knowing if the first
+      // attempt landed) collapses to the same order and gets rejected as a
+      // duplicate (-4015) instead of opening a second, unintended position.
+      newClientOrderId: `${input.tradeId}-entry`,
+    },
+  };
+}
+
 // ── TP1 partial close ──────────────────────────────────────────────────────
 //
 // App-side (blendTp1PartialPnl) already treats TP1 as "50% locked in" for R

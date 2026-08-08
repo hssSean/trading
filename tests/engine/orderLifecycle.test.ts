@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  decideEntryOrder,
   decideTp1PartialClose,
   decideTrailingStopReplace,
+  EntryOrderInput,
   Tp1PartialCloseInput,
   TrailingStopReplaceInput,
 } from '../../src/engine/orderLifecycle';
@@ -18,6 +20,85 @@ function tp1Input(overrides: Partial<Tp1PartialCloseInput> = {}): Tp1PartialClos
     ...overrides,
   };
 }
+
+function entryInput(overrides: Partial<EntryOrderInput> = {}): EntryOrderInput {
+  return {
+    tradeId: 'trade-1',
+    symbol: 'BTCUSDT',
+    isLong: true,
+    entry: 65000,
+    positionUSDT: 650, // → 0.01 BTC at entry=65000
+    filters,
+    ...overrides,
+  };
+}
+
+describe('decideEntryOrder', () => {
+  it('places a LIMIT order for the correct quantity (LONG → BUY)', () => {
+    const d = decideEntryOrder(entryInput());
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.quantity).toBe(0.01);
+    expect(d.order).toEqual({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      type: 'LIMIT',
+      quantity: 0.01,
+      price: 65000,
+      timeInForce: 'GTC',
+      newClientOrderId: 'trade-1-entry',
+    });
+  });
+
+  it('mirrors side for SHORT (SELL)', () => {
+    const d = decideEntryOrder(entryInput({ isLong: false }));
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order.side).toBe('SELL');
+  });
+
+  it('rounds price to the NEAREST tickSize (not floored — a limit price can round either way)', () => {
+    const d = decideEntryOrder(entryInput({ entry: 65000.37, filters: { stepSize: 0.001, tickSize: 0.1, minNotional: 5 } }));
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order.price).toBe(65000.4);
+  });
+
+  it('skips when entry price is invalid', () => {
+    const d = decideEntryOrder(entryInput({ entry: 0 }));
+    expect(d.skip).toBe(true);
+  });
+
+  it('skips when positionUSDT is invalid', () => {
+    const d = decideEntryOrder(entryInput({ positionUSDT: 0 }));
+    expect(d.skip).toBe(true);
+  });
+
+  it('skips with a stepSize-rounding message when quantity rounds all the way down to 0', () => {
+    // 4.9 USDT at entry=65000 → rawQty ≈ 0.0000754, floors to 0 at stepSize=0.001
+    const d = decideEntryOrder(entryInput({ positionUSDT: 4.9, entry: 65000, filters: { stepSize: 0.001, tickSize: 0.1, minNotional: 5 } }));
+    expect(d.skip).toBe(true);
+    if (!d.skip) return;
+    expect(d.reason).toContain('取整為 0');
+  });
+
+  it('skips with a minNotional message when quantity rounds to something nonzero but still too small', () => {
+    // A low-priced coin: 4.9 USDT / 1 = 4.9 qty, survives stepSize rounding but the
+    // resulting notional (4.9) is still under minNotional=5 — a different failure
+    // mode than the stepSize-floors-to-zero case above, must produce a different reason.
+    const d = decideEntryOrder(entryInput({ positionUSDT: 4.9, entry: 1, filters: { stepSize: 0.001, tickSize: 0.0001, minNotional: 5 } }));
+    expect(d.skip).toBe(true);
+    if (!d.skip) return;
+    expect(d.reason).toContain('低於交易所最低');
+  });
+
+  it('is idempotent — same tradeId always produces the same newClientOrderId', () => {
+    const d1 = decideEntryOrder(entryInput());
+    const d2 = decideEntryOrder(entryInput());
+    if (d1.skip || d2.skip) throw new Error('unexpected skip');
+    expect(d1.order.newClientOrderId).toBe(d2.order.newClientOrderId);
+  });
+});
 
 describe('decideTp1PartialClose', () => {
   it('closes 50% of the position with a reduceOnly MARKET order (LONG → SELL)', () => {
