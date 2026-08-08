@@ -138,6 +138,26 @@ export interface MarginBracket {
   cum: number; // maintenance amount
 }
 
+// GET /fapi/v1/userTrades 回傳的單筆實際成交紀錄——跟 OpenOrder/AlgoOrder
+// 不同，這是「真的成交了」的事後紀錄，帶實際成交價跟已實現損益，是對帳時
+// 唯一可信的資料來源（positionRisk 消失只能告訴你「部位沒了」，告訴不了
+// 「用什麼價、賺賠多少」）。
+export interface UserTrade {
+  id: number;
+  orderId: number;
+  symbol: string;
+  side: OrderSide;
+  price: string;
+  qty: string;
+  quoteQty: string;
+  realizedPnl: string;
+  commission: string;
+  commissionAsset: string;
+  time: number;
+  maker: boolean;
+  buyer: boolean;
+}
+
 export interface OpenOrder {
   symbol: string;
   orderId: number;
@@ -209,6 +229,15 @@ export class BinanceFuturesClient {
 
   async getOpenOrders(symbol?: string): Promise<OpenOrder[]> {
     return this.signedRequest('GET', '/v1/openOrders', { symbol });
+  }
+
+  // GET /fapi/v1/userTrades — 對帳用：部位消失後，用這個查出真正的成交紀錄
+  // （實際成交價/realizedPnl），不用猜是 TP2/SL 還是別的原因關掉的。見
+  // tradeBridge.ts 的 needs_reconcile 分支。orderId 帶進去可以只查特定訂單
+  // 產生的成交（algoOrder 觸發後查 Query Algo Order 拿到的 actualOrderId，
+  // 用它查這裡才對得上）。
+  async getUserTrades(symbol: string, params: { orderId?: number; startTime?: number; endTime?: number; limit?: number } = {}): Promise<UserTrade[]> {
+    return this.signedRequest('GET', '/v1/userTrades', { symbol, ...params });
   }
 
   // 條件單專用查詢——見 AlgoOrder 註解，2025-12 遷移後止損/止盈單只會出現

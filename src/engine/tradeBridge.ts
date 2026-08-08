@@ -17,13 +17,44 @@
 //     是 TP2/SL 觸發還是別的原因，這版只偵測出「需要處理」，不猜答案。
 //   - 時間止損/盤整停滯關單——同樣需要 K 線資料。
 
-import { PlaceOrderParams } from './binanceClient';
+import { PlaceOrderParams, UserTrade } from './binanceClient';
 import { SymbolFilters } from './precision';
 import {
   decideEntryOrder, decideTp1PartialClose, decideTrailingStopReplace,
 } from './orderLifecycle';
 import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
 import { MAX_TOTAL_RISK_PCT } from '@/lib/position';
+
+// 對帳用：部位消失後，把 getUserTrades() 查回來的一批成交紀錄彙總成
+// 「加權平均出場價 + 總實現損益」——用 quoteQty/qty 算真正的成交均價，
+// 比對每筆成交價做簡單平均更準確（大單常常會拆成好幾筆不同價位成交）。
+export interface ClosingTradesSummary {
+  avgExitPrice: number;
+  totalQty: number;
+  totalRealizedPnl: number;
+  totalCommission: number;
+}
+
+export function summarizeClosingTrades(trades: UserTrade[]): ClosingTradesSummary | null {
+  if (trades.length === 0) return null;
+  let totalQty = 0;
+  let totalQuoteQty = 0;
+  let totalRealizedPnl = 0;
+  let totalCommission = 0;
+  for (const t of trades) {
+    totalQty += parseFloat(t.qty);
+    totalQuoteQty += parseFloat(t.quoteQty);
+    totalRealizedPnl += parseFloat(t.realizedPnl);
+    totalCommission += parseFloat(t.commission);
+  }
+  if (totalQty <= 0) return null;
+  return {
+    avgExitPrice: totalQuoteQty / totalQty,
+    totalQty,
+    totalRealizedPnl,
+    totalCommission,
+  };
+}
 
 export interface BridgeTradeRow {
   id: string;
@@ -42,6 +73,10 @@ export interface BridgeExchangeSnapshot {
   currentStop: { algoId: number; triggerPrice: number } | null;
   markPrice: number;
   filters: SymbolFilters;
+  // 只有在部位剛消失、呼叫端已經另外查過 getUserTrades() 時才會有值——不是
+  // 每輪都要查，只在真的需要對帳（positionQty 從有變 0）那一刻才查。有給
+  // 就能直接算出關單結果，沒給就退回單純標記需要處理。
+  recentTrades?: UserTrade[];
 }
 
 export interface RiskCheckInput {
@@ -56,6 +91,7 @@ export type TradeAction =
   | { kind: 'place_entry'; order: PlaceOrderParams; quantity: number }
   | { kind: 'wait_for_fill'; reason: string }
   | { kind: 'needs_reconcile'; reason: string }
+  | { kind: 'sync_closed_position'; avgExitPrice: number; realizedPnl: number }
   | { kind: 'place_initial_stop'; order: PlaceOrderParams }
   | { kind: 'tp1_partial_close'; order: PlaceOrderParams; closeQty: number; remainingQty: number }
   | { kind: 'hold'; reason: string };
@@ -100,12 +136,17 @@ export function decideTradeAction(
     return { kind: 'wait_for_fill', reason: '進場單尚未成交' };
   }
 
-  // 3. 沒部位、進場單也不在了——不知道是被取消還是已經平倉完，需要查歷史
-  //    成交才能判定，這版只偵測出來，不猜答案。
+  // 3. 沒部位、進場單也不在了——不知道是被取消還是已經平倉完。如果呼叫端
+  //    已經另外查過 getUserTrades() 並帶進 snapshot.recentTrades，直接算出
+  //    結果；沒有的話只標記需要處理，不猜答案。
   if (snapshot.positionQty === 0 && !snapshot.entryOrderStillOpen) {
+    const summary = snapshot.recentTrades ? summarizeClosingTrades(snapshot.recentTrades) : null;
+    if (summary) {
+      return { kind: 'sync_closed_position', avgExitPrice: summary.avgExitPrice, realizedPnl: summary.totalRealizedPnl };
+    }
     return {
       kind: 'needs_reconcile',
-      reason: '部位為空但進場單已消失——需要查歷史成交判斷原因（此版尚未實作，見模組頂部說明）',
+      reason: '部位為空但進場單已消失——需要查歷史成交判斷原因（呼叫端可查 getUserTrades 帶進 snapshot.recentTrades 讓這裡直接算出結果）',
     };
   }
 

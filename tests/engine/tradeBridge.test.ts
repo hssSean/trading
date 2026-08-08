@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { decideTradeAction, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput } from '../../src/engine/tradeBridge';
+import {
+  decideTradeAction, summarizeClosingTrades,
+  BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput,
+} from '../../src/engine/tradeBridge';
+import { UserTrade } from '../../src/engine/binanceClient';
 
 const filters = { stepSize: 0.001, tickSize: 0.1, minNotional: 5 };
 
@@ -78,6 +82,51 @@ describe('decideTradeAction — needs reconcile', () => {
       risk(),
     );
     expect(a.kind).toBe('needs_reconcile');
+  });
+
+  it('resolves to sync_closed_position when the caller has already fetched recentTrades', () => {
+    const trades: UserTrade[] = [
+      { id: 1, orderId: 999, symbol: 'BTCUSDT', side: 'SELL', price: '67000', qty: '0.01', quoteQty: '670', realizedPnl: '15', commission: '0.5', commissionAsset: 'USDT', time: 1, maker: false, buyer: false },
+    ];
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111 }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: false, recentTrades: trades }),
+      risk(),
+    );
+    expect(a.kind).toBe('sync_closed_position');
+    if (a.kind !== 'sync_closed_position') return;
+    expect(a.avgExitPrice).toBe(67000);
+    expect(a.realizedPnl).toBe(15);
+  });
+
+  it('falls back to needs_reconcile when recentTrades is provided but empty', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111 }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: false, recentTrades: [] }),
+      risk(),
+    );
+    expect(a.kind).toBe('needs_reconcile');
+  });
+});
+
+describe('summarizeClosingTrades', () => {
+  it('returns null for an empty list', () => {
+    expect(summarizeClosingTrades([])).toBeNull();
+  });
+
+  it('computes a quantity-weighted average exit price across multiple fills at different prices', () => {
+    const trades: UserTrade[] = [
+      { id: 1, orderId: 1, symbol: 'BTCUSDT', side: 'SELL', price: '66000', qty: '0.006', quoteQty: '396', realizedPnl: '6', commission: '0.3', commissionAsset: 'USDT', time: 1, maker: true, buyer: false },
+      { id: 2, orderId: 1, symbol: 'BTCUSDT', side: 'SELL', price: '68000', qty: '0.004', quoteQty: '272', realizedPnl: '9', commission: '0.2', commissionAsset: 'USDT', time: 2, maker: false, buyer: false },
+    ];
+    const s = summarizeClosingTrades(trades);
+    expect(s).not.toBeNull();
+    if (!s) return;
+    // (396+272)/(0.006+0.004) = 668/0.01 = 66800 — 加權平均，不是 (66000+68000)/2
+    expect(s.avgExitPrice).toBeCloseTo(66800, 6);
+    expect(s.totalQty).toBeCloseTo(0.01, 8);
+    expect(s.totalRealizedPnl).toBeCloseTo(15, 8);
+    expect(s.totalCommission).toBeCloseTo(0.5, 8);
   });
 });
 
