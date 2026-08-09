@@ -316,9 +316,21 @@ async function runCycle(
         console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
       }
     } catch (e) {
-      console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${String(e).slice(0, 200)}`);
+      console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${describeError(e)}`);
     }
   }
+}
+
+// axios 錯誤的 String(e) 只會印出 "AxiosError: Request failed with status
+// code 400" 這種泛用訊息——幣安真正的錯誤代碼/訊息在 err.response.data
+// 裡（比如 -1013 精度錯誤、-4164 低於最小名目值、-1121 symbol 不存在），
+// 不解開來看永遠不知道是哪一種。
+function describeError(e: unknown): string {
+  const resp = (e as { response?: { data?: { code?: number; msg?: string } } })?.response;
+  if (resp?.data) {
+    return `幣安回應 [${resp.data.code}] ${resp.data.msg}`;
+  }
+  return String(e).slice(0, 200);
 }
 
 async function main() {
