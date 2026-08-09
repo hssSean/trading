@@ -274,9 +274,15 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   // 顯示推薦單失效」。
   //
   // 排除已經開啟 live_trading_enabled 的使用者的所有 trades，不讓這支
-  // 再碰它們——一旦交給 live-runner，這支就完全讓路，不會因為 live-runner
-  // 短暫斷線就自動搶回接管（那樣反而更危險：兩邊各自以為自己是唯一真相
-  // 來源）。
+  // 再碰它們——一旦交給 live-runner，這支就讓路。
+  //
+  // 2026-08-10：但 live_trading_enabled=true 只代表「使用者選了 live-runner
+  // 模式」，不保證 process 真的還活著——使用者可能把 live-runner 關掉卻
+  // 忘記把這個欄位改回 false，這樣兩邊都不會處理這個使用者的 trades，
+  // 比他根本沒開自動交易還危險（完全沒有任何東西在監控）。用心跳判斷：
+  // live-runner 每輪（15秒）寫一次 Redis key（TTL 90秒，約 6 輪緩衝，
+  // 避免單輪延遲被誤判成停止），開關開著但心跳過期就當作 process 已經
+  // 停了，這支重新接手這個使用者的 trades。
   const { data: liveUsers, error: liveUsersErr } = await admin.from('profiles').select('id').eq('live_trading_enabled', true);
   if (liveUsersErr) {
     // 42703＝欄位還沒 ALTER TABLE。liveUserIds 留空陣列＝繼續原本全表掃描
@@ -284,7 +290,35 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     // 不要默默失效讓人以為修好了。
     console.error(`[monitor] 查 live_trading_enabled 失敗（可能欄位還沒 ALTER TABLE）: [${liveUsersErr.code}] ${liveUsersErr.message}`);
   }
-  const liveUserIds = (liveUsers ?? []).map((p: { id: string }) => p.id);
+  const liveTradingUserIds = (liveUsers ?? []).map((p: { id: string }) => p.id);
+
+  const heartbeatRedis = getRedis();
+  const liveUserIds: string[] = [];
+  if (liveTradingUserIds.length > 0) {
+    if (heartbeatRedis) {
+      try {
+        const heartbeats = await Promise.all(
+          liveTradingUserIds.map((id: string) => heartbeatRedis.get(`live-runner:heartbeat:${id}`)),
+        );
+        liveTradingUserIds.forEach((id: string, i: number) => {
+          if (heartbeats[i] !== null) {
+            liveUserIds.push(id);
+          } else {
+            console.log(`[monitor] userId=${id.slice(0, 8)} live_trading_enabled=true 但心跳已過期，這支重新接手監控`);
+          }
+        });
+      } catch (e) {
+        // Redis 查詢失敗：保守起見當作全部「還活著」（維持排除），不要因為
+        // Redis 暫時連不上就讓兩邊搶著處理同一批 trades——那樣的風險比
+        // 「這一輪繼續信任 live-runner 還在跑」更高。
+        console.error(`[monitor] 查心跳失敗，這輪維持排除已知的 live_trading_enabled 使用者: ${String(e).slice(0, 150)}`);
+        liveUserIds.push(...liveTradingUserIds);
+      }
+    } else {
+      // Redis 沒設定，沒辦法判斷心跳，同上邏輯：保守維持排除。
+      liveUserIds.push(...liveTradingUserIds);
+    }
+  }
 
   // ── Fetch waiting and active trades separately ────────────────
   // No user_id filter beyond the live-trading exclusion above: admin (service

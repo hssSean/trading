@@ -34,6 +34,11 @@
  * 的推播邏輯——這支必須自己補上通知，不然使用者完全不會知道 TP1/關單發生
  * 過（實測撞到：使用者是自己開 App 才發現 TP2 已經達標，不是被動收到推播）。
  *
+ * 2026-08-10：這支每輪會寫一個 Redis 心跳（TTL 90秒）。route.ts 用這個
+ * 心跳判斷「live_trading_enabled=true 是不是還有對應的 process 真的在
+ * 跑」——使用者可能把這支關掉卻忘記把那個欄位改回 false，沒有心跳的話
+ * route.ts 會自動接手，不然兩邊都不管，比使用者根本沒開自動交易還危險。
+ *
  * --live 旗標刻意 exit(1) 拒絕——這是本次改動唯一保留的安全閥，確保這支
  * 腳本目前只會碰 testnet 帳戶，不會不小心連到正式帳戶。
  */
@@ -65,6 +70,10 @@ if (isLive) {
 
 const CYCLE_MS = 15_000; // 15 秒一輪，比 Vercel 5 分鐘 cron 細很多
 const DEFAULT_MAX_LEVERAGE = 10;
+// route.ts 用同一個 key 前綴判斷這支還活著沒有。90 秒 ≈ 6 輪緩衝，避免
+// 單輪因為 API 延遲稍微拖長就被誤判成「process 已經停了」。
+const HEARTBEAT_KEY_PREFIX = 'live-runner:heartbeat:';
+const HEARTBEAT_TTL_SEC = 90;
 
 // 這些幣安錯誤代碼代表「這筆單本質上就不可能成功」——不是網路抖動、不是
 // 暫時性 rate limit，重試沒有意義，只會每輪浪費一次 API 呼叫、洗版 log。
@@ -289,12 +298,26 @@ async function notifyIfNeeded(userId: string, row: DbTradeRow, action: TradeActi
   }
 }
 
+// 不管 kill switch 有沒有啟動、這輪有沒有真的做任何動作，只要 process
+// 還活著就要回報心跳——kill switch 啟動中不代表「process 死了」，這兩件
+// 事不能混在一起判斷，不然 route.ts 會在 kill switch 啟動期間誤判成
+// live-runner 已經停止、搶著接手，兩邊同時碰同一批 trades。
+async function writeHeartbeat(redis: Redis, userId: string): Promise<void> {
+  try {
+    await redis.set(`${HEARTBEAT_KEY_PREFIX}${userId}`, Date.now(), { ex: HEARTBEAT_TTL_SEC });
+  } catch (e) {
+    console.error(`[heartbeat] 寫入失敗: ${String(e).slice(0, 150)}`);
+  }
+}
+
 async function runCycle(
   supabase: SupabaseClient,
   binance: BinanceFuturesClient,
   redis: Redis,
   userId: string,
 ): Promise<void> {
+  await writeHeartbeat(redis, userId);
+
   const ks = await getKillSwitchState(redis);
   if (ks.active) {
     console.log(`[${nowStr()}] kill switch 啟動中（${ks.reason ?? '無原因記錄'}）— 跳過整輪`);
