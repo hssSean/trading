@@ -48,6 +48,10 @@ const CLOSE_REASON_LABEL: Record<string, string> = {
   // 止損收尾，用這個值標記「這筆是真倉自動判定，不是精確分類」，跟 DB
   // 模擬版的其他 close_reason 區分開來。
   live_auto_sync:            '真倉自動同步（贏/輸粗分類）',
+  // 2026-08-09：live-runner 下單前不知道 symbol 在交易所那端目前是不是
+  // 真的能下單——實測 MMTUSDT 在 demo trading 撞到幣安 -4141（該交易對
+  // 目前關閉），下單當下才會發現，不是我方邏輯能提前判斷的。
+  symbol_unavailable:        '交易對目前無法下單（幣安端關閉/不存在）',
 };
 const REGIME_LABEL: Record<string, string> = {
   trending: '趨勢', ranging: '盤整', transitional: '過渡',

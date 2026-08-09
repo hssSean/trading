@@ -48,6 +48,7 @@ import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
 import {
   decideTradeAction, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput,
 } from '../src/engine/tradeBridge';
+import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
 import { calcSimpleAtr } from '../src/lib/monitorMath';
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
@@ -61,6 +62,14 @@ if (isLive) {
 
 const CYCLE_MS = 15_000; // 15 秒一輪，比 Vercel 5 分鐘 cron 細很多
 const DEFAULT_MAX_LEVERAGE = 10;
+
+// 這些幣安錯誤代碼代表「這筆單本質上就不可能成功」——不是網路抖動、不是
+// 暫時性 rate limit，重試沒有意義，只會每輪浪費一次 API 呼叫、洗版 log。
+// 見到就把這筆推薦單標記取消，不要無限重試。
+//   -4141 Symbol is closed（這個交易對目前不接受新單，2026-08-09 實測
+//         MMTUSDT 在 demo trading 撞到）
+//   -1121 Invalid symbol（symbol 打錯或這個交易對根本不存在）
+const NON_RETRYABLE_BINANCE_CODES = new Set([-4141, -1121]);
 
 function nowStr(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -316,7 +325,22 @@ async function runCycle(
         console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
       }
     } catch (e) {
-      console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${describeError(e)}`);
+      const code = extractBinanceErrorCode(e);
+      // 只有「還沒真的開倉」的推薦單才適合直接標記取消——已經有真實部位的
+      // 話，錯誤原因可能是別的操作（補止損/移動止損）失敗，部位還在，
+      // 亂標成 CANCELLED 會讓帳目跟交易所實際狀態脫鉤，比放著重試更危險。
+      if (code !== undefined && NON_RETRYABLE_BINANCE_CODES.has(code) && row.exchange_entry_order_id === null) {
+        const { error } = await supabase.from('trades').update({
+          status: 'cancelled', result: 'CANCELLED', closed_at: Date.now(), close_reason: 'symbol_unavailable',
+        }).eq('id', row.id);
+        if (error) {
+          console.error(`[${nowStr()}] ${row.symbol}（${row.id}）標記取消失敗: [${error.code}] ${error.message}`);
+        } else {
+          console.log(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 [${code}]，這個 symbol 目前不可交易，標記取消不再重試`);
+        }
+      } else {
+        console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${describeError(e)}`);
+      }
     }
   }
 }
