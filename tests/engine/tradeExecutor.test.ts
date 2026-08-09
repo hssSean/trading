@@ -26,10 +26,12 @@ class FakePersist implements TradePersistence {
   tp1HitCalls: string[] = [];
   finalizeCalls: Array<{ tradeId: string; result: unknown }> = [];
   neverFilledCalls: string[] = [];
+  filledCalls: Array<{ tradeId: string; filledAt: number }> = [];
 
   async setEntryOrderId(tradeId: string, orderId: number) { this.entryOrderIds.push({ tradeId, orderId }); }
   async setStopAlgoId(tradeId: string, algoId: number) { this.stopAlgoIds.push({ tradeId, algoId }); }
   async markTp1Hit(tradeId: string) { this.tp1HitCalls.push(tradeId); }
+  async markFilled(tradeId: string, filledAt: number) { this.filledCalls.push({ tradeId, filledAt }); }
   async finalizeClosed(tradeId: string, result: unknown) { this.finalizeCalls.push({ tradeId, result }); }
   async markEntryNeverFilled(tradeId: string) { this.neverFilledCalls.push(tradeId); }
 }
@@ -61,6 +63,19 @@ describe('executeTradeAction — place_initial_stop', () => {
 
     expect(client.placeOrderCalls).toEqual([stopOrder]);
     expect(persist.stopAlgoIds).toEqual([{ tradeId: 'trade-1', algoId: 1000 }]);
+  });
+
+  it('also marks the trade as filled — this is the first point decideTradeAction confirms a real fill (2026-08-10 regression: status stayed "waiting" forever, App never showed the position as open)', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    const stopOrder: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 64000, closePosition: true };
+    const action: TradeAction = { kind: 'place_initial_stop', order: stopOrder };
+
+    await executeTradeAction(client, persist, 'trade-1', action);
+
+    expect(persist.filledCalls).toHaveLength(1);
+    expect(persist.filledCalls[0].tradeId).toBe('trade-1');
+    expect(typeof persist.filledCalls[0].filledAt).toBe('number');
   });
 });
 

@@ -162,6 +162,15 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
       }).eq('id', tradeId);
       logErr('markEntryNeverFilled', error);
     },
+    async markFilled(tradeId, filledAt) {
+      // status='active' 是 trades/page.tsx 判斷「已經進場、脫離等待進場」
+      // 的欄位——跟 route.ts 的 Phase 1 fill-detection 寫的是同一個值，
+      // filled_at 也是同一個欄位，全站對「進場了沒」的判斷方式維持一致。
+      const { error } = await supabase.from('trades').update({
+        status: 'active', filled_at: filledAt,
+      }).eq('id', tradeId);
+      logErr('markFilled', error);
+    },
   };
 }
 

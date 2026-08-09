@@ -25,6 +25,13 @@ export interface TradePersistence {
   // 進場單消失但查無任何成交紀錄——從未真的開過倉，沒有損益可對帳，跟
   // finalizeClosed（曾經開倉、現在要記最終結果）是不同語意，分開一個方法。
   markEntryNeverFilled(tradeId: string): Promise<void>;
+  // 2026-08-10：實測撞到——decideTradeAction 從沒有一步把 DB 的 status 從
+  // 'waiting' 改成 'active'，place_entry 只記 orderId，place_initial_stop
+  // 只記 algoId，都沒動 status。結果單真的成交、止損也補上了，App 卻一直
+  // 顯示「等待進場」。place_initial_stop 這個時刻本身就隱含「已經確認
+  // 成交」（decideTradeAction 第 4 步只有 positionQty>0 才會走到），是
+  // 標記 filled 最自然的地方。
+  markFilled(tradeId: string, filledAt: number): Promise<void>;
 }
 
 export interface ExecutionResult {
@@ -47,7 +54,14 @@ export async function executeTradeAction(
 
     case 'place_initial_stop': {
       const res = await client.placeOrder(action.order);
-      await persist.setStopAlgoId(tradeId, res.orderId);
+      const filledAt = Date.now();
+      // 這裡才第一次確認「真的成交了」（decideTradeAction 第 4 步只有
+      // positionQty>0 才會走到這個分支）——filledAt 用發現的當下時間，不是
+      // 真正成交那一刻，最大誤差是一個輪詢週期，可接受。
+      await Promise.all([
+        persist.setStopAlgoId(tradeId, res.orderId),
+        persist.markFilled(tradeId, filledAt),
+      ]);
       return { executed: true, note: `初始止損已送出 algoId=${res.orderId}` };
     }
 
