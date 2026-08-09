@@ -266,12 +266,39 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   const { createClient } = await import('@supabase/supabase-js');
   const admin = createClient(url, key);
 
+  // 2026-08-09：live-runner 出現後，DB 模擬監控（這支）跟真倉自動化
+  // （live-runner 的 decideTradeAction）現在有兩條獨立路徑會寫同一批
+  // trades——實測 MMTUSDT 撞到：這支的 K 線模擬一直把它判定「持倉中」，
+  // live-runner 接手後在交易所端撞到 -4141（symbol 關閉），把它標記
+  // CANCELLED，蓋掉了這支還在維護的模擬狀態，使用者端看到「突然消失、
+  // 顯示推薦單失效」。
+  //
+  // 排除已經開啟 live_trading_enabled 的使用者的所有 trades，不讓這支
+  // 再碰它們——一旦交給 live-runner，這支就完全讓路，不會因為 live-runner
+  // 短暫斷線就自動搶回接管（那樣反而更危險：兩邊各自以為自己是唯一真相
+  // 來源）。
+  const { data: liveUsers, error: liveUsersErr } = await admin.from('profiles').select('id').eq('live_trading_enabled', true);
+  if (liveUsersErr) {
+    // 42703＝欄位還沒 ALTER TABLE。liveUserIds 留空陣列＝繼續原本全表掃描
+    // 的行為，不會讓整個 monitor 掛掉，但這代表排除機制沒生效——loudly log，
+    // 不要默默失效讓人以為修好了。
+    console.error(`[monitor] 查 live_trading_enabled 失敗（可能欄位還沒 ALTER TABLE）: [${liveUsersErr.code}] ${liveUsersErr.message}`);
+  }
+  const liveUserIds = (liveUsers ?? []).map((p: { id: string }) => p.id);
+
   // ── Fetch waiting and active trades separately ────────────────
-  // No user_id filter: admin (service role) has full table access and should
-  // process all open trades. notifyOk (below, per loop) guards against pushing
-  // about a stray/legacy row whose user_id doesn't match the resolved profileId.
-  const baseQ = () =>
-    admin.from('trades').select('*').is('result', null);
+  // No user_id filter beyond the live-trading exclusion above: admin (service
+  // role) has full table access and should process all open trades EXCEPT
+  // those handed off to live-runner. notifyOk (below, per loop) guards against
+  // pushing about a stray/legacy row whose user_id doesn't match the resolved
+  // profileId.
+  // Postgrest-js 的 query builder 沒有共通的「.select 後」型別可以宣告成
+  // helper 的參數型別而不整包鴨子定型，直接用 generic 讓 excludeLiveUsers
+  // 對 baseQ()／tp1WatchRaw 兩種不同起手式的 query 都能用。
+  const excludeLiveUsers = <T extends { not: (col: string, op: string, val: string) => T }>(q: T): T =>
+    liveUserIds.length > 0 ? q.not('user_id', 'in', `(${liveUserIds.join(',')})`) : q;
+
+  const baseQ = () => excludeLiveUsers(admin.from('trades').select('*').is('result', null));
 
   // 2026-07-26: NULL status used to be swept into the ACTIVE net ("status column
   // didn't exist yet" legacy assumption). But a NEW trade can also land with status
@@ -293,8 +320,8 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   ] = await Promise.all([
     baseQ().or('status.eq.waiting,status.is.null'),
     baseQ().or('status.eq.active,status.eq.tp1_hit'),
-    admin.from('trades').select('*')
-      .eq('status', 'tp1_hit').eq('result', 'WIN_TP1').is('closed_at', null),
+    excludeLiveUsers(admin.from('trades').select('*')
+      .eq('status', 'tp1_hit').eq('result', 'WIN_TP1').is('closed_at', null)),
   ]);
 
   if (waitErr)  console.error('[monitor] waiting query error:', waitErr.message);
