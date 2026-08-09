@@ -355,6 +355,18 @@ async function runCycle(
 
       const snapshot = await buildSnapshot(binance, row, filters);
       const trade = toBridgeTradeRow(row);
+      const persist = makePersistence(supabase, row);
+
+      // 自我修復：真的有部位（交易所端確認）但 DB 的 status 還停在
+      // 'waiting'，同步一次。不是只靠 place_initial_stop 那一次性時機——
+      // 那個時機點在這次修復上線前就已經發生過的舊資料（實測撞到
+      // ACEUSDT），永遠不會再觸發，只能靠這種「發現不一致就修」的機制
+      // 補回來，之後任何原因造成的同類不一致（比如 DB 寫入當下失敗）也
+      // 一併自我修復，不用每種情況各寫一次特殊處理。
+      if (snapshot.positionQty > 0 && row.status === 'waiting') {
+        await persist.markFilled(row.id, row.filled_at ?? Date.now());
+        row.status = 'active'; // 這一輪剩下的邏輯（例如 ATR 抓取判斷）跟著用新狀態
+      }
 
       // 風險輸入只有「還沒下過進場單」才需要（余額/槓桿分級都是額外的 API
       // 呼叫，其他狀態下這筆單不會走到 decideTradeAction 的風險檢查分支）。
@@ -368,7 +380,7 @@ async function runCycle(
       }
 
       const action = decideTradeAction(trade, snapshot, risk);
-      const result = await executeTradeAction(client, makePersistence(supabase, row), row.id, action);
+      const result = await executeTradeAction(client, persist, row.id, action);
 
       if (result.executed) {
         console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
