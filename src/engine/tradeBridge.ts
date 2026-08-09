@@ -99,6 +99,7 @@ export type TradeAction =
   | { kind: 'tp1_partial_close'; order: PlaceOrderParams; closeQty: number; remainingQty: number }
   | { kind: 'close_full_position'; order: PlaceOrderParams }
   | { kind: 'update_trailing_stop'; place: PlaceOrderParams; cancelOrderId?: number }
+  | { kind: 'entry_never_filled'; reason: string }
   | { kind: 'hold'; reason: string };
 
 // 任何「本來要 hold」的情況，先檢查一次時間止損（盤整停滯／到期自動平倉）
@@ -189,6 +190,21 @@ export function decideTradeAction(
         avgExitPrice: summary.avgExitPrice,
         realizedPnl: summary.totalRealizedPnl,
         result: summary.totalRealizedPnl >= 0 ? 'WIN_TP1' : 'LOSS',
+      };
+    }
+    // 2026-08-09：recentTrades 是「查過、確認結果」跟「根本沒查」要分開看，
+    // 之前混在一起都走 needs_reconcile 卡死——實測撞到 SOLUSDT：LIMIT
+    // 進場單送出後在交易所端自己消失（過期/取消），從未真的成交過，
+    // getUserTrades 查回來的自然是空陣列（不是查詢失敗，是真的沒有任何
+    // 成交紀錄）。這種情況跟「曾經開倉、現在要對帳最終結果」是不同問題：
+    // 根本沒開過倉，沒有損益可對帳，一直卡在 needs_reconcile 只會每輪
+    // 白跑一次 getUserTrades。查過且明確是空陣列 → 判定為進場單從未成交，
+    // 直接標記取消。呼叫端沒查（undefined）才是真的「還不知道」，維持
+    // needs_reconcile 讓下一輪帶著 recentTrades 再來一次。
+    if (snapshot.recentTrades && snapshot.recentTrades.length === 0) {
+      return {
+        kind: 'entry_never_filled',
+        reason: '進場單消失但查無任何成交紀錄——判定從未真的成交，標記取消',
       };
     }
     return {

@@ -22,6 +22,9 @@ export interface TradePersistence {
   setStopAlgoId(tradeId: string, algoId: number): Promise<void>;
   markTp1Hit(tradeId: string): Promise<void>;
   finalizeClosed(tradeId: string, result: { result: 'WIN_TP1' | 'LOSS'; exitPrice: number; realizedPnl: number }): Promise<void>;
+  // 進場單消失但查無任何成交紀錄——從未真的開過倉，沒有損益可對帳，跟
+  // finalizeClosed（曾經開倉、現在要記最終結果）是不同語意，分開一個方法。
+  markEntryNeverFilled(tradeId: string): Promise<void>;
 }
 
 export interface ExecutionResult {
@@ -79,6 +82,11 @@ export async function executeTradeAction(
         result: action.result, exitPrice: action.avgExitPrice, realizedPnl: action.realizedPnl,
       });
       return { executed: true, note: `關單結果已同步：${action.result} @ ${action.avgExitPrice}（實現損益 ${action.realizedPnl}）` };
+    }
+
+    case 'entry_never_filled': {
+      await persist.markEntryNeverFilled(tradeId);
+      return { executed: true, note: action.reason };
     }
 
     // skip_entry / wait_for_fill / needs_reconcile / hold：沒有動作要執行，

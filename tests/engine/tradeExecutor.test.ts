@@ -25,11 +25,13 @@ class FakePersist implements TradePersistence {
   stopAlgoIds: Array<{ tradeId: string; algoId: number }> = [];
   tp1HitCalls: string[] = [];
   finalizeCalls: Array<{ tradeId: string; result: unknown }> = [];
+  neverFilledCalls: string[] = [];
 
   async setEntryOrderId(tradeId: string, orderId: number) { this.entryOrderIds.push({ tradeId, orderId }); }
   async setStopAlgoId(tradeId: string, algoId: number) { this.stopAlgoIds.push({ tradeId, algoId }); }
   async markTp1Hit(tradeId: string) { this.tp1HitCalls.push(tradeId); }
   async finalizeClosed(tradeId: string, result: unknown) { this.finalizeCalls.push({ tradeId, result }); }
+  async markEntryNeverFilled(tradeId: string) { this.neverFilledCalls.push(tradeId); }
 }
 
 const order: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 0.01, price: 65000 };
@@ -150,5 +152,19 @@ describe('executeTradeAction — no-op actions', () => {
 
     expect(client.placeOrderCalls).toEqual([]);
     expect(client.cancelOrderCalls).toEqual([]);
+  });
+});
+
+describe('executeTradeAction — entry_never_filled', () => {
+  it('marks the trade as never filled without touching the exchange', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    const action: TradeAction = { kind: 'entry_never_filled', reason: '進場單消失但查無任何成交紀錄' };
+
+    const r = await executeTradeAction(client, persist, 'trade-1', action);
+
+    expect(r.executed).toBe(true);
+    expect(client.placeOrderCalls).toEqual([]); // 沒有交易所動作，純 DB 標記
+    expect(persist.neverFilledCalls).toEqual(['trade-1']);
   });
 });

@@ -153,6 +153,15 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
       }).eq('id', tradeId);
       logErr('finalizeClosed', error);
     },
+    async markEntryNeverFilled(tradeId) {
+      // 進場單消失但查無任何成交紀錄——從未真的開過倉，result 用
+      // CANCELLED（既有 enum 值，跟 route.ts 的「掛單過期」同一個語意），
+      // 不用 WIN_TP1/LOSS（那兩個是「真的開過倉」才有意義的分類）。
+      const { error } = await supabase.from('trades').update({
+        status: 'cancelled', result: 'CANCELLED', closed_at: Date.now(), close_reason: 'live_entry_expired',
+      }).eq('id', tradeId);
+      logErr('markEntryNeverFilled', error);
+    },
   };
 }
 

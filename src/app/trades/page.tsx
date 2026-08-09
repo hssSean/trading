@@ -52,6 +52,10 @@ const CLOSE_REASON_LABEL: Record<string, string> = {
   // 真的能下單——實測 MMTUSDT 在 demo trading 撞到幣安 -4141（該交易對
   // 目前關閉），下單當下才會發現，不是我方邏輯能提前判斷的。
   symbol_unavailable:        '交易對目前無法下單（幣安端關閉/不存在）',
+  // 2026-08-09：live-runner 送出的 LIMIT 進場單在交易所端自己消失（過期/
+  // 被取消），查 getUserTrades 確認完全沒有任何成交紀錄——從未真的開過
+  // 倉，不是「開倉後平倉」，跟 live_auto_sync 是不同情境。
+  live_entry_expired:        '真倉進場單過期未成交（真實從未開倉）',
 };
 const REGIME_LABEL: Record<string, string> = {
   trending: '趨勢', ranging: '盤整', transitional: '過渡',

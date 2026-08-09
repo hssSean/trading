@@ -115,10 +115,23 @@ describe('decideTradeAction — needs reconcile', () => {
     expect(a.result).toBe('LOSS');
   });
 
-  it('falls back to needs_reconcile when recentTrades is provided but empty', () => {
+  it('resolves to entry_never_filled when recentTrades was queried and is confirmed empty (entry order vanished, never actually filled)', () => {
+    // 2026-08-09：實測撞到 SOLUSDT——LIMIT 進場單在交易所端自己消失（過期/
+    // 取消），從未真的成交過，getUserTrades 查回來自然是空陣列，不是查
+    // 詢失敗。這種情況不該卡在 needs_reconcile：查過、確認過，答案就是
+    // 「這筆單沒開過倉」。
     const a = decideTradeAction(
       tradeRow({ exchangeEntryOrderId: 111 }),
       snapshot({ positionQty: 0, entryOrderStillOpen: false, recentTrades: [] }),
+      risk(),
+    );
+    expect(a.kind).toBe('entry_never_filled');
+  });
+
+  it('still falls back to needs_reconcile when recentTrades was never queried (undefined, not empty)', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111 }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: false }), // recentTrades undefined
       risk(),
     );
     expect(a.kind).toBe('needs_reconcile');
