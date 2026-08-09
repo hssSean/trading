@@ -11,6 +11,7 @@ function tradeRow(overrides: Partial<BridgeTradeRow> = {}): BridgeTradeRow {
   return {
     id: 'trade-1', symbol: 'BTCUSDT', isLong: true,
     entry: 65000, stopLoss: 64000, tp1: 67000, strategy: 'A',
+    timeframe: '1h', filledAt: 0, // filledAt=now=0 → 時間止損兩個門檻都不會觸發，不干擾既有測試
     exchangeEntryOrderId: null, exchangeStopAlgoId: null,
     ...overrides,
   };
@@ -19,7 +20,7 @@ function tradeRow(overrides: Partial<BridgeTradeRow> = {}): BridgeTradeRow {
 function snapshot(overrides: Partial<BridgeExchangeSnapshot> = {}): BridgeExchangeSnapshot {
   return {
     positionQty: 0, entryOrderStillOpen: false, currentStop: null,
-    markPrice: 65000, filters,
+    markPrice: 65000, filters, now: 0,
     ...overrides,
   };
 }

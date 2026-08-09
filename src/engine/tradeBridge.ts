@@ -2,13 +2,9 @@
 // 分別寫好、分別測過的積木串成一條真的會動的線的地方——runner.ts 執行
 // 「怎麼做」，這裡決定「該做什麼」。
 //
-// 呼叫端（live-runner 的主迴圈，還沒接）每輪對每筆開著的 trade row 呼叫一次
-// 這個函數，餵進「DB 記的這筆單長怎樣」+「交易所上真實看到的快照」，拿回
-// 一個動作決定。
-//
-// 刻意不做的（明確範圍邊界，不是漏掉）：
-//   - 時間止損/盤整停滯關單——需要 K 線掃描歷史（不只是當下一根），跟
-//     TP1/移動止損用「當下 markPrice/ATR」就能判斷的性質不同，這版沒做。
+// 呼叫端（live-runner 的主迴圈）每輪對每筆開著的 trade row 呼叫一次這個
+// 函數，餵進「DB 記的這筆單長怎樣」+「交易所上真實看到的快照」，拿回一個
+// 動作決定。
 
 import { PlaceOrderParams, UserTrade } from './binanceClient';
 import { SymbolFilters } from './precision';
@@ -17,6 +13,7 @@ import {
   decideTp1PartialClose, decideTrailingStopReplace,
 } from './orderLifecycle';
 import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
+import { decideTimeStop, TimeStopTimeframe } from './timeStop';
 import { MAX_TOTAL_RISK_PCT } from '@/lib/position';
 
 // 對帳用：部位消失後，把 getUserTrades() 查回來的一批成交紀錄彙總成
@@ -61,6 +58,8 @@ export interface BridgeTradeRow {
   // signals.ts generateMeanReversionSignals），觸價要整單了結，不是先平一半
   // 留一半給移動止損。策略A才有 TP1 部分平倉 + 移動止損那一整套。
   strategy: 'A' | 'B';
+  timeframe: TimeStopTimeframe;
+  filledAt: number | null; // 還沒真的成交過時是 null——這個檢查點理論上不會用到（見 decideTradeAction 內部）
   exchangeEntryOrderId: number | null;
   exchangeStopAlgoId: number | null;
 }
@@ -71,6 +70,9 @@ export interface BridgeExchangeSnapshot {
   currentStop: { algoId: number; triggerPrice: number } | null;
   markPrice: number;
   filters: SymbolFilters;
+  // 呼叫端傳入，函式內部絕不呼叫 Date.now()——維持這個檔案所有函式「同樣
+  // 輸入永遠同樣輸出」，時間止損判斷才能在測試裡固定時間戳重現。
+  now: number;
   // 只有在部位剛消失、呼叫端已經另外查過 getUserTrades() 時才會有值——不是
   // 每輪都要查，只在真的需要對帳（positionQty 從有變 0）那一刻才查。有給
   // 就能直接算出關單結果，沒給就退回單純標記需要處理。
@@ -98,6 +100,35 @@ export type TradeAction =
   | { kind: 'close_full_position'; order: PlaceOrderParams }
   | { kind: 'update_trailing_stop'; place: PlaceOrderParams; cancelOrderId?: number }
   | { kind: 'hold'; reason: string };
+
+// 任何「本來要 hold」的情況，先檢查一次時間止損（盤整停滯／到期自動平倉）
+// 才真的 hold——route.ts 這兩個機制是全局的，不分策略 A/B、不分是否已過
+// TP1（isTp1Hit 只影響 decideTimeStop 內部走哪個分支），見 timeStop.ts。
+// filledAt 是 null（理論上不該發生在這個檢查點——都已經有 currentStop
+// 了，代表一定成交過）時直接 hold，不硬跑判斷。
+function holdOrTimeStop(
+  trade: BridgeTradeRow,
+  snapshot: BridgeExchangeSnapshot,
+  isTp1Hit: boolean,
+  holdReason: string,
+): TradeAction {
+  if (trade.filledAt !== null) {
+    const timeStop = decideTimeStop({
+      isLong: trade.isLong, entry: trade.entry, stopLoss: trade.stopLoss,
+      timeframe: trade.timeframe, filledAt: trade.filledAt, now: snapshot.now,
+      markPrice: snapshot.markPrice, isTp1Hit, trailingStop: snapshot.currentStop?.triggerPrice ?? 0,
+    });
+    if (timeStop.fired) {
+      const closeDecision = decideFullClose({
+        tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong, positionQty: snapshot.positionQty,
+      });
+      if (!closeDecision.skip) {
+        return { kind: 'close_full_position', order: closeDecision.order };
+      }
+    }
+  }
+  return { kind: 'hold', reason: holdReason };
+}
 
 export function decideTradeAction(
   trade: BridgeTradeRow,
@@ -194,7 +225,8 @@ export function decideTradeAction(
       if (closeDecision.skip) return { kind: 'hold', reason: `整單平倉跳過：${closeDecision.reason}` };
       return { kind: 'close_full_position', order: closeDecision.order };
     }
-    return { kind: 'hold', reason: '策略B持有中，尚未觸及止盈目標' };
+    // 策略B從不進入 tp1_hit 這種中間態（沒有兩階段 TP），isTp1Hit 固定傳 false。
+    return holdOrTimeStop(trade, snapshot, false, '策略B持有中，尚未觸及止盈目標');
   }
 
   // 策略A：第一次觸及 TP1（止損還是原始值）→ 部分平倉。
@@ -227,11 +259,10 @@ export function decideTradeAction(
     }
     // kind: 'none'（目標沒有比現有止損更有利）或 'initialize'（不會發生——
     // currentStopOrder 這裡一定非 null）都落到 hold，沒有動作可做。
-    return { kind: 'hold', reason: '持有中（TP1 已達標，移動止損暫無更有利的目標價）' };
+    return holdOrTimeStop(trade, snapshot, true, '持有中（TP1 已達標，移動止損暫無更有利的目標價）');
   }
 
-  return {
-    kind: 'hold',
-    reason: '持有中，等待下一個關卡',
-  };
+  // 策略A，還沒觸及 TP1（isInitialStop 仍為 true）——時間止損的盤整停滯
+  // 判斷主要就是保護這個狀態。
+  return holdOrTimeStop(trade, snapshot, false, '持有中，等待下一個關卡');
 }

@@ -84,6 +84,7 @@ interface DbTradeRow {
   tp1: number;
   tp2: number;
   strategy: string | null;
+  timeframe: string | null;
   status: string;
   suggested_risk_pct: number | null;
   filled_at: number | null;
@@ -91,6 +92,8 @@ interface DbTradeRow {
   exchange_entry_order_id: number | null;
   exchange_stop_algo_id: number | null;
 }
+
+const VALID_TIMEFRAMES = new Set(['5m', '15m', '1h', '4h', '1d']);
 
 function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
   return {
@@ -101,6 +104,10 @@ function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
     stopLoss: row.stop_loss,
     tp1: row.tp1,
     strategy: row.strategy === 'B' ? 'B' : 'A',
+    // 資料庫欄位是自由字串，時間止損只認得這五種——不認得的一律當 1h
+    // （route.ts tfBarMinutes 的 default 分支同一個處理方式，不是另外發明的）。
+    timeframe: (VALID_TIMEFRAMES.has(row.timeframe ?? '') ? row.timeframe : '1h') as BridgeTradeRow['timeframe'],
+    filledAt: row.filled_at ?? row.opened_at ?? null,
     exchangeEntryOrderId: row.exchange_entry_order_id,
     exchangeStopAlgoId: row.exchange_stop_algo_id,
   };
@@ -195,7 +202,7 @@ async function buildSnapshot(
     }
   }
 
-  return { positionQty, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h };
+  return { positionQty, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h, now: Date.now() };
 }
 
 async function buildRiskInput(
@@ -266,7 +273,7 @@ async function runCycle(
 
   const { data: rows, error } = await supabase
     .from('trades')
-    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,status,suggested_risk_pct,filled_at,opened_at,exchange_entry_order_id,exchange_stop_algo_id')
+    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,exchange_entry_order_id,exchange_stop_algo_id')
     .eq('user_id', userId)
     .is('closed_at', null);
 
