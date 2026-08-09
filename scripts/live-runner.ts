@@ -26,11 +26,13 @@
  *    裸倉異常。純觀察 log，不在這裡自動修復（不知道該修哪個 trade_id）。
  * 3. 逐筆處理 Supabase 裡這個使用者所有還沒結束的 trades：組出交易所快照
  *    （倉位/掛單/條件單/現價，需要時才查 ATR/歷史成交）→ decideTradeAction
- *    決定該做什麼 → executeTradeAction 真的送出去 + 寫回 DB。
+ *    決定該做什麼（含時間止損／盤整停滯）→ executeTradeAction 真的送出去
+ *    + 寫回 DB → TP1 部分平倉/最終出場時推播 Web Push 通知。
  *
- * ── 這版本還沒做的 ──────────────────────────────────────────────────────
- * 時間止損/盤整停滯關單——需要 K 線掃描歷史（不只當下一根），decideTradeAction
- * 本身沒做（見該檔案頂部說明），這裡自然也沒有。
+ * 2026-08-09：使用者一旦設定 profiles.live_trading_enabled=true，route.ts
+ * 的 DB 模擬監控會完全排除這個使用者（見 route.ts 頂部說明），包括它原本
+ * 的推播邏輯——這支必須自己補上通知，不然使用者完全不會知道 TP1/關單發生
+ * 過（實測撞到：使用者是自己開 App 才發現 TP2 已經達標，不是被動收到推播）。
  *
  * --live 旗標刻意 exit(1) 拒絕——這是本次改動唯一保留的安全閥，確保這支
  * 腳本目前只會碰 testnet 帳戶，不會不小心連到正式帳戶。
@@ -46,13 +48,14 @@ import { reconcilePositionsAndOrders } from '../src/engine/watchdog';
 import { findMarginBracket } from '../src/engine/liquidation';
 import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
 import {
-  decideTradeAction, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput,
+  decideTradeAction, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
 } from '../src/engine/tradeBridge';
 import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
 import { calcSimpleAtr } from '../src/lib/monitorMath';
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
+import { sendWebPushToUser } from '../src/lib/webpush';
 
 const isLive = process.argv.includes('--live');
 if (isLive) {
@@ -243,6 +246,31 @@ async function buildRiskInput(
   };
 }
 
+// route.ts 沒了這個使用者之後不會再推播——見檔案頂部說明。只有兩個時刻值得
+// 通知：TP1 部分平倉（第一次獲利了結）、最終出場（sync_closed_position，
+// 這時候才有真實成交價/損益可以講，close_full_position 本身只是送出關單，
+// 還不知道最終結果，不在那個分支推播）。
+async function notifyIfNeeded(userId: string, row: DbTradeRow, action: TradeAction): Promise<void> {
+  const sym = row.symbol.replace('USDT', '/USDT');
+  const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
+
+  if (action.kind === 'tp1_partial_close') {
+    await sendWebPushToUser(userId, {
+      title: `🎯 TP1 達標 ${sym}`,
+      body: `${dir} 部分平倉已送出，剩餘倉位交給 live-runner 自動管理移動止損`,
+      tag: `tp1-${row.id}`,
+    });
+  } else if (action.kind === 'sync_closed_position') {
+    const label = action.result === 'WIN_TP1' ? '✅ 出場獲利' : '❌ 止損出場';
+    const pnlStr = `${action.realizedPnl >= 0 ? '+' : ''}${action.realizedPnl.toFixed(2)} USDT`;
+    await sendWebPushToUser(userId, {
+      title: `${label} ${sym}`,
+      body: `${dir} 出場 $${action.avgExitPrice.toFixed(4)} ｜ 實現損益 ${pnlStr}`,
+      tag: `close-${row.id}`,
+    });
+  }
+}
+
 async function runCycle(
   supabase: SupabaseClient,
   binance: BinanceFuturesClient,
@@ -326,6 +354,7 @@ async function runCycle(
 
       if (result.executed) {
         console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
+        await notifyIfNeeded(userId, row, action);
       }
       // hold/wait_for_fill 這類 no-op 不印，避免每輪洗版；needs_reconcile 值得看見。
       else if (action.kind === 'needs_reconcile' || action.kind === 'skip_entry') {

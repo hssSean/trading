@@ -63,8 +63,14 @@ function fmtPrice(p: number) {
   return p.toFixed(6);
 }
 
+// 2026-08-09：原本沒指定 timeZone，會照裝置本地時區顯示——多數情況下
+// 裝置時區就是台灣沒差，但只要裝置時區設定跟台灣不同（例如這次接上跑在
+// 東京 AWS 主機上的 live-runner，順手用同一台裝置查看紀錄頁），時間就會
+// 跑掉。固定用 Asia/Taipei，不管使用者裝置的系統時區是什麼都顯示台灣時間。
 function fmtDate(ts: number) {
-  return new Date(ts).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return new Date(ts).toLocaleString('zh-TW', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Taipei',
+  });
 }
 
 function fmtDuration(ms: number) {
