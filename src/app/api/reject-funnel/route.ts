@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 import { Redis } from '@upstash/redis';
 import { aggregateTimeStopShadows, type TimeStopShadow } from '@/lib/timeStopShadow';
 import { aggregateCancelShadows, type CancelShadow } from '@/lib/cancelShadow';
@@ -6,13 +7,41 @@ import { aggregateCancelShadows, type CancelShadow } from '@/lib/cancelShadow';
 export const dynamic = 'force-dynamic';
 
 // Same auth contract as /api/analyze: webhook secret via header or query param.
-function checkAuth(req: NextRequest): boolean {
+function checkWebhookSecret(req: NextRequest): boolean {
   const envSecret = process.env.WEBHOOK_SECRET;
   // No secret configured: fail-open only outside production, fail-closed on production
   // (待修改事項.md P2-1).
   if (!envSecret) return process.env.VERCEL_ENV !== 'production';
   const provided = req.headers.get('x-webhook-secret') ?? req.nextUrl.searchParams.get('secret');
   return provided === envSecret;
+}
+
+// 2026-08-10：這支原本只給外部 cron/管理工具用 webhook secret 查——使用者
+// 自己想看拒絕漏斗數據時，Vercel 環境變數從沒設過 WEBHOOK_SECRET，變成
+// 完全查不到。資料本身（Redis 的 reject_funnel/shadow_trades 等 key）是
+// 全站共用、不分使用者、不含個資的策略診斷數據，加一條「已登入的 App
+// 使用者」就能看的路徑，跟 push-test API 同一種模式：帶 Supabase JWT
+// 過來，驗證是真的登入使用者就放行，不需要另外管理一組 secret。
+async function checkUserSession(req: NextRequest): Promise<boolean> {
+  const authHeader = req.headers.get('authorization') ?? '';
+  const jwt = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!jwt) return false;
+
+  const anonUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
+  if (!anonUrl || !anonKey) return false;
+
+  const userClient = createClient(anonUrl, anonKey, {
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const { data: { user }, error } = await userClient.auth.getUser();
+  return !error && !!user;
+}
+
+async function checkAuth(req: NextRequest): Promise<boolean> {
+  if (checkWebhookSecret(req)) return true;
+  return checkUserSession(req);
 }
 
 interface FunnelEntry {
@@ -74,7 +103,7 @@ function aggregateShadows(shadows: ShadowEntry[]): Record<string, ShadowStat> {
 
 // v2.1 §0: aggregate the reject funnel — which gate kills the most candidates.
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!(await checkAuth(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
     return NextResponse.json({ ok: false, reason: 'redis-not-configured' });
