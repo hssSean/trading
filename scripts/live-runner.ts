@@ -299,6 +299,22 @@ async function buildRiskInput(
 // 2026-08-10：TP1 改成預掛條件單後，「TP1 達標」不再是某個 action 執行完
 // 當下就知道的事（見 tradeBridge.ts 第5步說明）——是主迴圈自我修復偵測到
 // 部位變小才發現，通知呼叫點跟著搬到那裡，這裡只保留 sync_closed_position。
+// 2026-08-10：實測撞到——使用者開了 live_trading_enabled 後完全收不到任何
+// 推播。route.ts 的「掛單成交」通知（第 562 行附近）因為這個使用者被
+// excludeLiveUsers 排除而不會跑；這支原本只補了 TP1 達標跟最終出場兩個
+// 時機，漏掉「進場成交」這個最先觸發、使用者最常見到的通知——如果一筆單
+// 進場後還沒到 TP1、也還沒出場，使用者會覺得「開了自動交易後什麼通知都
+// 沒有」，其實是這個時機點沒補上，不是推播機制本身壞了。
+async function notifyFilled(userId: string, row: DbTradeRow, fillPrice: number): Promise<void> {
+  const sym = row.symbol.replace('USDT', '/USDT');
+  const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
+  await sendWebPushToUser(userId, {
+    title: `✅ 掛單成交 ${sym}`,
+    body: `${dir} 成交價 $${fillPrice} ｜ TP1 $${row.tp1} ｜ SL $${row.stop_loss}`,
+    tag: `fill-${row.id}`,
+  });
+}
+
 async function notifyTp1Hit(userId: string, row: DbTradeRow): Promise<void> {
   const sym = row.symbol.replace('USDT', '/USDT');
   const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
@@ -413,6 +429,7 @@ async function runCycle(
       if (snapshot.positionQty > 0 && row.status === 'waiting') {
         await persist.markFilled(row.id, row.filled_at ?? Date.now());
         row.status = 'active'; // 這一輪剩下的邏輯（例如 ATR 抓取判斷）跟著用新狀態
+        await notifyFilled(userId, row, snapshot.markPrice);
       }
 
       // 自我修復：entry_qty 是 tradeBridge.ts 判斷「TP1 是否已發生」的基準
