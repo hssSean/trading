@@ -2244,11 +2244,8 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      // ── Phase 4: Fetch funding rate + OI change (both cached 10min) ───────────
-      const [symbolFundingRate, oiChangePct] = await Promise.all([
-        fetchFundingRate(symbol).catch(() => 0),
-        fetchOpenInterestChange(symbol).catch(() => null),
-      ]);
+      // ── Phase 4: Fetch funding rate (cached 10min) ───────────
+      const symbolFundingRate = await fetchFundingRate(symbol).catch(() => 0);
 
       // Direction unification: highest TF's direction is master, drop conflicting signals
       const unified    = unifySignalDirection(allSignals);
@@ -2327,14 +2324,6 @@ export async function GET(req: NextRequest) {
       unified.forEach(s => {
         s.fundingRate = symbolFundingRate;
         s.confidence  = computeConfidence(s, symbolAdx, symbolFundingRate, agreeTFs);
-        // 2026-08-10：拒絕漏斗診斷後續清單 #7——OI（未平倉合約）變化率，
-        // 純資訊顯示，不影響 score/confidence。還沒有拒絕漏斗歷史數據
-        // 驗證這個指標對這個策略有沒有用，先讓使用者看得到，之後累積
-        // 數據再決定要不要拿來加減分或擋單（CLAUDE.md 調參紀律）。
-        if (oiChangePct !== null) {
-          const drift = oiChangePct > 5 ? '，疑似新資金進場' : oiChangePct < -5 ? '，疑似減倉/回補' : '';
-          s.reasons.push(`OI(未平倉合約) 4h變化 ${oiChangePct >= 0 ? '+' : ''}${oiChangePct.toFixed(1)}%${drift}`);
-        }
         // v2.1 §2: tier B = half risk (0.5%) and leverage ≤5x regardless of ATR percentile
         const tierRisk = s.tier === 'B' ? 0.5 : suggestedRiskPct;
         s.suggestedRiskPct = tierRisk;
@@ -2344,6 +2333,26 @@ export async function GET(req: NextRequest) {
           : 1;
         s.suggestedLeverage = s.tier === 'B' ? Math.min(lev, 5) : lev;
       });
+
+      // 2026-08-10：CPU 精省——OI（未平倉合約）查詢原本對 unified 裡每個
+      // 候選訊號都查一次（每個 symbol 每個時框都可能各自產生候選），但大
+      // 部分候選最後會被後面的濾網（locked/cooldown/confluence/risk cap
+      // 等）擋掉，使用者根本看不到，查了也是白查。Vercel Hobby 免費方案
+      // 的 CPU 額度被打爆（Fluid Active CPU 4h13m/4h，導致 Phase 1/2 監控
+      // 迴圈的推播來不及執行——使用者反映「掛單成交/TP1/移動止損/最終
+      // 出場通知全部收不到，只有新訊號通知還在」，查證是這個），這裡改成
+      // 只在確定 entrySignal 存在（真的可能要 insert/推播）才查一次，只
+      // 加進這一個訊號的 reasons，不是每個候選都查。這個 symbol 之後仍可
+      // 能被其他 gate 擋掉不真的 insert，還不是最緊的做法，但已經把查詢
+      // 量從「每個候選」降到「每個 symbol 最多一次」，先觀察 CPU 用量再
+      // 決定要不要收得更緊。
+      if (entrySignal) {
+        const oiChangePct = await fetchOpenInterestChange(symbol).catch(() => null);
+        if (oiChangePct !== null) {
+          const drift = oiChangePct > 5 ? '，疑似新資金進場' : oiChangePct < -5 ? '，疑似減倉/回補' : '';
+          entrySignal.reasons.push(`OI(未平倉合約) 4h變化 ${oiChangePct >= 0 ? '+' : ''}${oiChangePct.toFixed(1)}%${drift}`);
+        }
+      }
 
       // Read lock from Redis (persistent across cold starts)
       const last      = await getLock(symbol);
