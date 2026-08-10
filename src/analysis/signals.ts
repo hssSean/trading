@@ -265,6 +265,8 @@ export function generateSignals(
   // Penalties are uncapped and applied after grouping.
   let lTrend = 0, lMom = 0, lStruct = 0, lVol = 0, lPA = 0, lPenalties = 0;
   const longReasons: string[] = [];
+  const lMomTags: string[] = [];
+  const lPATags: string[] = [];
   let longOB:  OrderBlock | undefined;
   let longFVG: FairValueGap | undefined;
   let longSR:  SRLevel | undefined;
@@ -280,13 +282,13 @@ export function generateSignals(
     // Momentum group
     // Oversold favours reversal entries; the 45-65 rising branch rewards
     // trend-following pullbacks where RSI never reaches oversold.
-    if (ind.rsi < 35)      { lMom += 5; longReasons.push(`RSI 超賣 ${ind.rsi.toFixed(1)}`); }
-    else if (ind.rsi < 45) { lMom += 3; longReasons.push(`RSI 超賣回升 ${ind.rsi.toFixed(1)}`); }
+    if (ind.rsi < 35)      { lMom += 5; longReasons.push(`RSI 超賣 ${ind.rsi.toFixed(1)}`); lMomTags.push('rsi_extreme'); }
+    else if (ind.rsi < 45) { lMom += 3; longReasons.push(`RSI 超賣回升 ${ind.rsi.toFixed(1)}`); lMomTags.push('rsi_recovering'); }
     else if (ind.rsi > 70) { lPenalties -= 3; }
-    else if (ind.rsi <= 65 && ind.rsi > prevInd.rsi + 0.5) { lMom += 3; longReasons.push(`RSI 健康區回升 ${ind.rsi.toFixed(1)}`); }
-    if (divergence.bullish) { lMom += 4; longReasons.push('RSI 看漲背離'); }
-    if (ind.macdHistogram > 0 && ind.macd > ind.macdSignal) { lMom += 3; longReasons.push('MACD 黃金交叉'); }
-    if (ind.macdHistogram > prevInd.macdHistogram)          { lMom += 2; longReasons.push('MACD 動能改善'); }
+    else if (ind.rsi <= 65 && ind.rsi > prevInd.rsi + 0.5) { lMom += 3; longReasons.push(`RSI 健康區回升 ${ind.rsi.toFixed(1)}`); lMomTags.push('rsi_healthy_pullback'); }
+    if (divergence.bullish) { lMom += 4; longReasons.push('RSI 看漲背離'); lMomTags.push('rsi_divergence'); }
+    if (ind.macdHistogram > 0 && ind.macd > ind.macdSignal) { lMom += 3; longReasons.push('MACD 黃金交叉'); lMomTags.push('macd_cross'); }
+    if (ind.macdHistogram > prevInd.macdHistogram)          { lMom += 2; longReasons.push('MACD 動能改善'); lMomTags.push('macd_momentum_shift'); }
 
     // Structure group
     if (structure.trend === 'bullish')                { lStruct += 3; longReasons.push('結構做多（HH HL）'); }
@@ -313,8 +315,8 @@ export function generateSignals(
     else if (volRatio >= 1.3 && isBullishCandle) { lVol = 3;  longReasons.push(`多頭量能放大 ${volRatio.toFixed(1)}×`); }
 
     // Price Action group
-    if (patterns.bullishEngulfing) { lPA += 7; longReasons.push('看漲吞噬K線'); }
-    if (patterns.hammer)           { lPA += 5; longReasons.push('錘子線'); }
+    if (patterns.bullishEngulfing) { lPA += 7; longReasons.push('看漲吞噬K線'); lPATags.push('engulfing'); }
+    if (patterns.hammer)           { lPA += 5; longReasons.push('錘子線'); lPATags.push('reversal_candle'); }
 
     if (atrPct > HIGH_VOLIT_PCT) { lPenalties -= 3; longReasons.push(`高波動（ATR ${(atrPct * 100).toFixed(1)}%）-3分`); }
   }
@@ -322,6 +324,8 @@ export function generateSignals(
   // ── SHORT SCORING (§4.2 v2 group-capped) ─────────────────────
   let sTrend = 0, sMom = 0, sStruct = 0, sVol = 0, sPA = 0, sPenalties = 0;
   const shortReasons: string[] = [];
+  const sMomTags: string[] = [];
+  const sPATags: string[] = [];
   let shortOB:  OrderBlock | undefined;
   let shortFVG: FairValueGap | undefined;
   let shortSR:  SRLevel | undefined;
@@ -335,13 +339,13 @@ export function generateSignals(
     if (ema50Slope === 'down')  { sTrend += 2; shortReasons.push('EMA50 斜率向下'); }
 
     // Momentum group (mirror of LONG: overbought reversal + trend-following weakness)
-    if (ind.rsi > 65)      { sMom += 5; shortReasons.push(`RSI 超買 ${ind.rsi.toFixed(1)}`); }
-    else if (ind.rsi > 55) { sMom += 3; shortReasons.push(`RSI 超買回落 ${ind.rsi.toFixed(1)}`); }
+    if (ind.rsi > 65)      { sMom += 5; shortReasons.push(`RSI 超買 ${ind.rsi.toFixed(1)}`); sMomTags.push('rsi_extreme'); }
+    else if (ind.rsi > 55) { sMom += 3; shortReasons.push(`RSI 超買回落 ${ind.rsi.toFixed(1)}`); sMomTags.push('rsi_recovering'); }
     else if (ind.rsi < 30) { sPenalties -= 3; }
-    else if (ind.rsi >= 35 && ind.rsi < prevInd.rsi - 0.5) { sMom += 3; shortReasons.push(`RSI 弱勢區下行 ${ind.rsi.toFixed(1)}`); }
-    if (divergence.bearish) { sMom += 4; shortReasons.push('RSI 看跌背離'); }
-    if (ind.macdHistogram < 0 && ind.macd < ind.macdSignal) { sMom += 3; shortReasons.push('MACD 死亡交叉'); }
-    if (ind.macdHistogram < prevInd.macdHistogram)          { sMom += 2; shortReasons.push('MACD 動能轉弱'); }
+    else if (ind.rsi >= 35 && ind.rsi < prevInd.rsi - 0.5) { sMom += 3; shortReasons.push(`RSI 弱勢區下行 ${ind.rsi.toFixed(1)}`); sMomTags.push('rsi_healthy_pullback'); }
+    if (divergence.bearish) { sMom += 4; shortReasons.push('RSI 看跌背離'); sMomTags.push('rsi_divergence'); }
+    if (ind.macdHistogram < 0 && ind.macd < ind.macdSignal) { sMom += 3; shortReasons.push('MACD 死亡交叉'); sMomTags.push('macd_cross'); }
+    if (ind.macdHistogram < prevInd.macdHistogram)          { sMom += 2; shortReasons.push('MACD 動能轉弱'); sMomTags.push('macd_momentum_shift'); }
 
     // Structure group
     if (structure.trend === 'bearish')                { sStruct += 3; shortReasons.push('結構做空（LH LL）'); }
@@ -368,8 +372,8 @@ export function generateSignals(
     else if (volRatio >= 1.3 && !isBullishCandle) { sVol = 3;  shortReasons.push(`空頭量能放大 ${volRatio.toFixed(1)}×`); }
 
     // Price Action group
-    if (patterns.bearishEngulfing) { sPA += 7; shortReasons.push('看跌吞噬K線'); }
-    if (patterns.shootingStar)     { sPA += 5; shortReasons.push('流星線'); }
+    if (patterns.bearishEngulfing) { sPA += 7; shortReasons.push('看跌吞噬K線'); sPATags.push('engulfing'); }
+    if (patterns.shootingStar)     { sPA += 5; shortReasons.push('流星線'); sPATags.push('reversal_candle'); }
 
     if (atrPct > HIGH_VOLIT_PCT) { sPenalties -= 3; shortReasons.push(`⚠ 高波動（ATR ${(atrPct * 100).toFixed(1)}%）-3分`); }
   }
@@ -637,6 +641,8 @@ export function generateSignals(
         extensionAtr: roundAtr(extAtrRaw),
         // 正值 = 進場價低於現價，要等回調才會成交；越大代表回調要越深
         entryDistAtr: roundAtr(longEntryDistAtr),
+        momentumTags: lMomTags,
+        priceActionTags: lPATags,
       },
     });
     if (longTier === 'B') longReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');
@@ -683,6 +689,8 @@ export function generateSignals(
         extensionAtr: roundAtr(-extAtrRaw),
         // 正值 = 進場價高於現價，要等反彈才會成交
         entryDistAtr: roundAtr(shortEntryDistAtr),
+        momentumTags: sMomTags,
+        priceActionTags: sPATags,
       },
     });
     if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');

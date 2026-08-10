@@ -97,6 +97,51 @@ describe('analyzeScoreAttribution — factorGroupByDirection', () => {
   });
 });
 
+describe('analyzeScoreAttribution — tagStats', () => {
+  it('aggregates win rate / avg R per momentum/priceAction sub-condition tag', () => {
+    const trades = [
+      trade({
+        result: 'WIN_TP1', pnlPercent: 4,
+        scoreBreakdown: { trend: 0, momentum: 5, structure: 0, volume: 0, priceAction: 0, penalties: 0, momentumTags: ['rsi_extreme'] },
+      }),
+      trade({
+        result: 'LOSS', pnlPercent: -2,
+        scoreBreakdown: { trend: 0, momentum: 5, structure: 0, volume: 0, priceAction: 0, penalties: 0, momentumTags: ['rsi_extreme'] },
+      }),
+      trade({
+        result: 'WIN_TP1', pnlPercent: 2,
+        scoreBreakdown: { trend: 0, momentum: 3, structure: 0, volume: 0, priceAction: 0, penalties: 0, momentumTags: ['rsi_healthy_pullback'] },
+      }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.tagStats.rsi_extreme.count).toBe(2);
+    expect(r.tagStats.rsi_extreme.winRate).toBe(50);
+    expect(r.tagStats.rsi_healthy_pullback.count).toBe(1);
+    expect(r.tagStats.rsi_healthy_pullback.winRate).toBe(100);
+  });
+
+  it('counts a trade under both its momentum and priceAction tags when it hits both', () => {
+    const trades = [
+      trade({
+        result: 'WIN_TP1', pnlPercent: 2,
+        scoreBreakdown: {
+          trend: 0, momentum: 3, structure: 0, volume: 0, priceAction: 7, penalties: 0,
+          momentumTags: ['macd_cross'], priceActionTags: ['engulfing'],
+        },
+      }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.tagStats.macd_cross.count).toBe(1);
+    expect(r.tagStats.engulfing.count).toBe(1);
+  });
+
+  it('omits tags with zero hits rather than returning a zeroed-out entry', () => {
+    const trades = [trade({ scoreBreakdown: { trend: 0, momentum: 0, structure: 0, volume: 0, priceAction: 0, penalties: 0 } })];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.tagStats.rsi_extreme).toBeUndefined();
+  });
+});
+
 describe('analyzeScoreAttribution — extensionAtrBuckets', () => {
   it('only includes trades where extensionAtr is defined', () => {
     const trades = [

@@ -23,6 +23,8 @@ export interface AttrScoreBreakdown {
   penalties: number;
   extensionAtr?: number;
   entryDistAtr?: number;
+  momentumTags?: string[];
+  priceActionTags?: string[];
 }
 
 export interface AttributionTrade {
@@ -131,8 +133,20 @@ export interface AttributionResult {
   // 經走很強的證據，而那正是進場位置最差的時候」。如果「高」桶（延伸越
   // 多）avgR 反而更差，這個假說成立。
   extensionAtrBuckets: BucketStat[];
+  // 2026-08-11：momentum/priceAction 這兩組「分數越高、結果越差」——但組
+  // 總分看不出是哪個子條件在拖累。momentum 組混了語意矛盾的訊號（RSI 極端
+  // 值設計給反轉進場、RSI 健康區回升設計給趨勢跟隨回調，方向相反卻疊加
+  // 成同一個分數，見 ScoreBreakdown 型別註解）。這裡按子條件 tag 拆開算
+  // 命中率/勝率/平均R，不看總分——才能回答「具體是哪個 if 在反著算」。
+  // 每個 tag 各自獨立統計（一筆訊號可能同時命中多個 tag，不互斥）。
+  tagStats: Record<string, { count: number; winRate: number; avgR: number }>;
   sampleSize: { total: number; withBreakdown: number };
 }
+
+const KNOWN_TAGS = [
+  'rsi_extreme', 'rsi_recovering', 'rsi_healthy_pullback', 'rsi_divergence',
+  'macd_cross', 'macd_momentum_shift', 'engulfing', 'reversal_candle',
+];
 
 export function analyzeScoreAttribution(trades: AttributionTrade[]): AttributionResult {
   const withBreakdown = trades.filter(t => t.scoreBreakdown !== null);
@@ -157,10 +171,20 @@ export function analyzeScoreAttribution(trades: AttributionTrade[]): Attribution
   const withExtension = withBreakdown.filter(t => t.scoreBreakdown!.extensionAtr !== undefined);
   const extensionAtrBuckets = bucketStats(withExtension, t => t.scoreBreakdown!.extensionAtr!);
 
+  const tagStats: AttributionResult['tagStats'] = {};
+  for (const tag of KNOWN_TAGS) {
+    const hits = withBreakdown.filter(t =>
+      t.scoreBreakdown!.momentumTags?.includes(tag) || t.scoreBreakdown!.priceActionTags?.includes(tag));
+    if (hits.length === 0) continue;
+    const s = summarize(hits);
+    tagStats[tag] = { count: s.count, winRate: s.winRate, avgR: s.avgR };
+  }
+
   return {
     byFactorBucket,
     factorGroupByDirection,
     extensionAtrBuckets,
+    tagStats,
     sampleSize: { total: trades.length, withBreakdown: withBreakdown.length },
   };
 }

@@ -113,6 +113,21 @@ export interface ScoreBreakdown {
   // entryDistAtr：掛單進場價離訊號當下價格幾個 ATR。值越大代表要等越深的
   //   回調才會成交——直接對應「53% 推薦單失效」那個問題。
   entryDistAtr?: number;
+  // 2026-08-11：/attribution 頁面用 134 筆真實結果驗證了上面那個假說的
+  // 姐妹版——動能、K線這兩組「分數越高、結果越差」（單調遞減，不是U型）。
+  // 但 momentum/priceAction 目前只存「組總分」，看不出來是哪個子條件在
+  // 拖累：momentum 組混了兩種語意矛盾的訊號在同一個分數桶——RSI 超賣
+  // （設計給「反轉進場」用，頂部註解自己也承認）跟 RSI 45-65 健康區回升
+  // （設計給「趨勢跟隨回調」用），一個代表回調可能已經深到接近反轉、
+  // 一個代表回調健康、動能還在，語意完全相反卻疊加成同一個數字。
+  //
+  // 這兩個陣列記錄「這次命中了哪些子條件」（值中立，不分 LONG/SHORT，
+  // 例如 RSI 超賣跟超買都記 'rsi_oversold'，讓兩個方向的樣本能合併看），
+  // 不改變任何評分邏輯本身——先把資料收集做細，累積足夠樣本後才能精確
+  // 回答「momentum 組裡具體是哪個子條件在反著算」，不是現在就憑邏輯推理
+  // 貿然調整權重（CLAUDE.md 調參紀律：先看數據再決定）。
+  momentumTags?: string[];
+  priceActionTags?: string[];
 }
 
 export interface TradingSignal {

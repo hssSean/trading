@@ -22,12 +22,19 @@ interface FactorGroupDirectionAvg {
   overallAvg: number;
 }
 
+interface TagStat {
+  count: number;
+  winRate: number;
+  avgR: number;
+}
+
 interface AttributionResponse {
   ok: boolean;
   reason?: string;
   byFactorBucket?: Record<string, BucketStat[]>;
   factorGroupByDirection?: FactorGroupDirectionAvg[];
   extensionAtrBuckets?: BucketStat[];
+  tagStats?: Record<string, TagStat>;
   sampleSize?: { total: number; withBreakdown: number };
 }
 
@@ -37,6 +44,19 @@ const FACTOR_LABEL: Record<string, string> = {
   structure: '結構',
   volume: '量能',
   priceAction: 'K線',
+};
+
+// 2026-08-11：momentum/priceAction 組總分「分數越高、結果越差」查到這裡——
+// 拆到子條件層級才看得出具體是哪一個。
+const TAG_LABEL: Record<string, string> = {
+  rsi_extreme: 'RSI極端值(超賣/超買)',
+  rsi_recovering: 'RSI回升/回落區間',
+  rsi_healthy_pullback: 'RSI健康區回調',
+  rsi_divergence: 'RSI背離',
+  macd_cross: 'MACD黃金/死亡交叉',
+  macd_momentum_shift: 'MACD動能改善/轉弱',
+  engulfing: '吞噬K線',
+  reversal_candle: '錘子/流星線',
 };
 
 // 高桶表現沒有比低桶好（甚至更差）= 這組因子在虛高，不是真正的品質訊號。
@@ -208,6 +228,31 @@ export default function AttributionPage() {
                 )}
               </div>
             </div>
+
+            {Object.keys(data.tagStats ?? {}).length > 0 && (
+              <div>
+                <p className="text-[#3A424E] text-[9px] uppercase font-bold tracking-widest mb-1.5 px-0.5">
+                  動能/K線子條件拆解 — 哪個具體規則在拖累結果
+                </p>
+                <div className="space-y-1.5">
+                  {Object.entries(data.tagStats ?? {})
+                    .sort((a, b) => a[1].avgR - b[1].avgR)
+                    .map(([tag, s]) => (
+                      <div key={tag} className="bg-[#0D0D16] border border-[#1B222B] rounded-xl p-3 flex items-center justify-between num">
+                        <p className="text-[#E8ECF1] text-xs">{TAG_LABEL[tag] ?? tag}</p>
+                        <p className="text-[#565E6B] text-[10px]">{s.count}筆</p>
+                        <p className="text-[#8A94A2] text-[11px]">{s.winRate}%勝率</p>
+                        <p className={`text-[11px] font-medium ${s.avgR >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+                          {s.avgR >= 0 ? '+' : ''}{s.avgR}R/筆
+                        </p>
+                      </div>
+                    ))}
+                </div>
+                <p className="text-[#565E6B] text-[10px] mt-1.5 px-0.5">
+                  按平均R由差到好排序,最上面的是最可疑的子規則。這是 8/11 才開始記錄的資料,樣本會隨時間累積
+                </p>
+              </div>
+            )}
           </>
         )}
       </div>
