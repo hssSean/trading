@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
-import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate } from '@/api/binance';
+import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange } from '@/api/binance';
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
@@ -2244,8 +2244,11 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      // ── Phase 4: Fetch funding rate (cached 10min) ───────────
-      const symbolFundingRate = await fetchFundingRate(symbol).catch(() => 0);
+      // ── Phase 4: Fetch funding rate + OI change (both cached 10min) ───────────
+      const [symbolFundingRate, oiChangePct] = await Promise.all([
+        fetchFundingRate(symbol).catch(() => 0),
+        fetchOpenInterestChange(symbol).catch(() => null),
+      ]);
 
       // Direction unification: highest TF's direction is master, drop conflicting signals
       const unified    = unifySignalDirection(allSignals);
@@ -2324,6 +2327,14 @@ export async function GET(req: NextRequest) {
       unified.forEach(s => {
         s.fundingRate = symbolFundingRate;
         s.confidence  = computeConfidence(s, symbolAdx, symbolFundingRate, agreeTFs);
+        // 2026-08-10：拒絕漏斗診斷後續清單 #7——OI（未平倉合約）變化率，
+        // 純資訊顯示，不影響 score/confidence。還沒有拒絕漏斗歷史數據
+        // 驗證這個指標對這個策略有沒有用，先讓使用者看得到，之後累積
+        // 數據再決定要不要拿來加減分或擋單（CLAUDE.md 調參紀律）。
+        if (oiChangePct !== null) {
+          const drift = oiChangePct > 5 ? '，疑似新資金進場' : oiChangePct < -5 ? '，疑似減倉/回補' : '';
+          s.reasons.push(`OI(未平倉合約) 4h變化 ${oiChangePct >= 0 ? '+' : ''}${oiChangePct.toFixed(1)}%${drift}`);
+        }
         // v2.1 §2: tier B = half risk (0.5%) and leverage ≤5x regardless of ATR percentile
         const tierRisk = s.tier === 'B' ? 0.5 : suggestedRiskPct;
         s.suggestedRiskPct = tierRisk;

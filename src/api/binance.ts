@@ -191,6 +191,43 @@ export async function fetchFundingRate(symbol: string): Promise<number> {
   }
 }
 
+// ── Open Interest change ─────────────────────────────────────
+// 2026-08-10：拒絕漏斗診斷後續清單 #7——未平倉合約(OI)變化率，用來輔助
+// 判斷「新資金進場」還是「空頭回補」。先做顯示（訊號分析依據多一條
+// 資訊），不做硬性擋單——還沒有拒絕漏斗歷史數據驗證這個指標對這個策略
+// 有沒有用，貿然拿來擋單風險高（CLAUDE.md 調參紀律：先看數據再決定）。
+//
+// 用 /futures/data/openInterestHist——不在 /fapi/v1 base path 下，這裡
+// 用絕對 URL 覆蓋 client 的 baseURL（axios 對絕對 URL 會忽略 baseURL，
+// 不用另外建一個 axios instance）。只能查最近 30 天資料；period 用 1h
+// 跟其他指標的時間粒度一致。抓 lookbackHours+1 筆，用最舊/最新兩筆算
+// 變化率——不自己維護歷史狀態（Redis/DB），每次直接跟交易所要，簡單可靠。
+const _oiCache = new Map<string, { changePct: number; at: number }>();
+const OI_TTL_MS = 10 * 60 * 1000; // 跟 funding rate 同樣的 TTL
+
+export async function fetchOpenInterestChange(symbol: string, lookbackHours = 4): Promise<number | null> {
+  const cached = _oiCache.get(symbol);
+  if (cached && Date.now() - cached.at < OI_TTL_MS) return cached.changePct;
+
+  try {
+    const res = await client.get('https://fapi.binance.com/futures/data/openInterestHist', {
+      params: { symbol, period: '1h', limit: lookbackHours + 1 },
+    });
+    const rows: Array<{ sumOpenInterest: string }> = res.data;
+    if (!Array.isArray(rows) || rows.length < 2) return null;
+    const oldest = parseFloat(rows[0].sumOpenInterest);
+    const latest = parseFloat(rows[rows.length - 1].sumOpenInterest);
+    if (!(oldest > 0)) return null;
+    const changePct = ((latest - oldest) / oldest) * 100;
+    _oiCache.set(symbol, { changePct, at: Date.now() });
+    return changePct;
+  } catch {
+    // API 失敗回傳 null（不是 0）——0 代表「沒變化」是一個具體的判斷結果，
+    // null 才是「不知道」，呼叫端要能區分兩者，不然會誤判成「OI 真的沒變」。
+    return null;
+  }
+}
+
 export async function fetchTopCoinsByVolume(limit = 10): Promise<string[]> {
   // Use exchangeInfo to get only PERPETUAL symbols, then sort by volume
   const [infoRes, tickerRes] = await Promise.all([
