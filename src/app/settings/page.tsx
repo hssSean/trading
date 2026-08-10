@@ -803,6 +803,15 @@ export default function SettingsPage() {
           </p>
         </Section>
 
+        <Section title="診斷">
+          <button
+            onClick={() => router.push('/funnel')}
+            className="w-full py-3 rounded-full border border-accent/30 text-accent text-sm"
+          >
+            拒絕漏斗診斷（各關卡擋單統計 + 影子模擬淨R）
+          </button>
+        </Section>
+
         {/* Build version — a PWA tab can sit open on a stale bundle for days;
             this makes it obvious whether you're actually looking at the latest deploy. */}
         <p className="text-text-m text-[10px] text-center num pb-2">
