@@ -12,6 +12,7 @@ import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry
 import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib/cancelShadow';
+import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
 
@@ -2317,6 +2318,20 @@ export async function GET(req: NextRequest) {
           s.score >= STRONG_THRESHOLD + 10 &&
           s.direction === entryTfBias &&
           s.strategy !== 'B');
+      }
+
+      // 2026-08-11：拒絕漏斗診斷後續 #1——cancel_tp1_direct/cancel_ran_away
+      // 影子模擬顯示死等 EMA20 回調常常等不到、錯過整段行情。詳細說明見
+      // src/lib/marketEntryException.ts 頂部註解。門檻沿用上面
+      // Entry-TF fallback 已經在用的同一個 margin，不是另外發明的數字。
+      if (entrySignal && shouldEnterAtMarket(entrySignal, STRONG_THRESHOLD + 10, biasConfirmed)) {
+        const shifted = shiftSignalToMarketEntry(entrySignal);
+        entrySignal.entry = shifted.entry;
+        entrySignal.stopLoss = shifted.stopLoss;
+        entrySignal.takeProfits = shifted.takeProfits;
+        entrySignal.reasons.push(
+          `⚡ 訊號夠強+4H確認，直接以市價 $${fmtPrice(shifted.entry)} 進場，不等回調（原設計進場 $${fmtPrice(shifted.originalEntry)}）`,
+        );
       }
 
       // ── Phase 4+5: Annotate unified signals with fundingRate, confidence, position sizing ──
