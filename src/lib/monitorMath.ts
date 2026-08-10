@@ -209,6 +209,25 @@ export function calcDrawdown(points: EquityPoint[]): DrawdownState {
   return { peak, current: equity, drawdown: Math.max(0, peak - equity) };
 }
 
+// 2026-08-10：使用者拒絕漏斗診斷後續清單 #6——funding rate 擁擠扣分。
+// route.ts 的 computeConfidence 早就有這個判斷（LONG 且 funding>0.1% 或
+// SHORT 且 funding<-0.05% 扣 20 分），但那個 confidence 欄位頭部註解明講
+// 「does NOT affect the STRONG_THRESHOLD gate yet」——純顯示，從沒真的
+// 影響過訊號放不放行。這次要讓它真的影響 score（決定放行的分數），不是
+// 另外發明一套新邏輯，門檻照抄 computeConfidence 已經在用的那兩個數字。
+//
+// 扣分幅度刻意保守（-5，不是 computeConfidence 那個 -20）：這是這個分數
+// 「第一次」真的用來擋單，沒有拒絕漏斗歷史數據驗證這個扣分幅度對這個策略
+// 有沒有用——CLAUDE.md 調參紀律要求先觀察再調，貿然套用 confidence 那個
+// -20（在 0-100 顯示尺度上設計的，score 尺度基礎是 40 不是 50，兩者不能
+// 直接套用同一個數字）風險太高，可能一次打掉太多原本能過關的訊號。
+export function applyFundingRateCrowdingPenalty(
+  score: number, direction: 'LONG' | 'SHORT', fundingRate: number,
+): number {
+  const crowded = direction === 'LONG' ? fundingRate > 0.001 : fundingRate < -0.0005;
+  return crowded ? Math.max(0, score - 5) : score;
+}
+
 export function walkTpSl(
   candles: WalkCandle[],
   afterMs: number,

@@ -6,7 +6,7 @@ import { generateSignals, generateMeanReversionSignals, unifySignalDirection } f
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier, MAX_TOTAL_RISK_PCT } from '@/lib/position';
-import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, TP1_PARTIAL_FRACTION, applyStopSlippage, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
+import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, TP1_PARTIAL_FRACTION, applyStopSlippage, applyFundingRateCrowdingPenalty, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
 import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
@@ -2249,6 +2249,10 @@ export async function GET(req: NextRequest) {
 
       // Direction unification: highest TF's direction is master, drop conflicting signals
       const unified    = unifySignalDirection(allSignals);
+      // 2026-08-10：funding rate 擁擠扣分要在這裡（STRONG_THRESHOLD 篩選之前）
+      // 套用，扣完的分數才是真正決定放不放行的依據——跟 computeConfidence
+      // 那個純顯示用的欄位是兩回事，見 applyFundingRateCrowdingPenalty 說明。
+      unified.forEach(s => { s.score = applyFundingRateCrowdingPenalty(s.score, s.direction, symbolFundingRate); });
       const strong     = unified.filter(s => s.score >= minScore).sort((a, b) => b.score - a.score);
       const topStrong  = strong.find(isStrongEnough);
       // Entry signal: only from the designated entry TF. Multi-TF confluence confirms direction;
