@@ -2268,7 +2268,20 @@ export async function GET(req: NextRequest) {
       const biasConfirmed  = !!masterDir && entryTfBias === masterDir;
       // Strategy B is single-TF by design (BB+RSI confirmation is its own confluence)
       const isStratBSignal = allSignals.some(s => s.strategy === 'B');
-      const confluenceMet  = agreeTFs >= 2 || biasConfirmed || isStratBSignal;
+      // 2026-08-10：reject-funnel 影子模擬顯示這關淨R +10.39（42筆候選，6勝
+      // 6負30到期1追蹤中）——擋掉的候選人如果放行，淨值是正的，代表擋太嚴。
+      // 抽樣看實際擋單明細：卡住的幾乎都是 agreeTFs=1（entry TF 自己撐著，
+      // 沒有其他時框佐證）且 entryTfBias 是「中性」（4H 沒有明確方向意見，
+      // biasConfirmed 這條路完全走不通）——這種情況下唯一活路只剩
+      // agreeTFs>=2，門檻比 §3-A 原意「4H 判方向、1H 找進場點」還嚴，因為
+      // 4H 中性代表大盤沒表態，不是「反對」。
+      //
+      // 只放寬這個具體缺口：4H 中性 + entry TF 自己撐著方向，就算過關。
+      // 4H 有明確方向但跟 entry 訊號衝突（逆勢單）維持原樣擋下——那是不同
+      // 風險等級，這次沒有數據佐證放寬它，CLAUDE.md 調參紀律：一次只動
+      // 一個缺口，不夠確定就先不動。
+      const confluenceMet  = agreeTFs >= 2 || biasConfirmed || isStratBSignal
+                            || (entryTfBias === null && agreeTFs >= 1);
 
       // ⚡短線 channel: a 15m signal at normal tier thresholds whose direction
       // matches the 4H bias becomes a scalp order when the entry TF (1h) has
