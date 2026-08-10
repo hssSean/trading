@@ -285,10 +285,19 @@ const TradeRow = memo(function TradeRow({
               : RESULT_COLOR[trade.result!];
             // 2026-08-05：伺服器端的時間止損／到期平倉也是寫 result='MANUAL_CLOSE'，
             // 只看 result 會一律標成「手動平倉」，使用者因此以為是自己或某個 bug
-            // 把單平掉的（實際是系統依規則關的）。有 close_reason 時優先用它，
-            // 只有真的是使用者按平倉（close_reason='manual'）或舊資料沒有這個
-            // 欄位時，才退回 RESULT_LABEL。
-            const label = isManual && trade.closeReason
+            // 把單平掉的（實際是系統依規則關的）。
+            //
+            // 2026-08-10：這個 close_reason 優先顯示的邏輯原本只限定
+            // MANUAL_CLOSE——但 result='WIN_TP1' 底下同樣藏著兩種不同語意：
+            // 「還在追蹤 TP2 中途」（isWatchingTp2 已經在上面攔截掉了，走不到
+            // 這裡）跟「已經真的用移動止損/到期方式結束」，這裡永遠只顯示
+            // 籠統的「TP1 達標」，讓使用者誤以為還沒結束或搞不清楚怎麼結束
+            // 的（實測：ZEC 移動止損後打平出場，卡片一直顯示「TP1 達標」，
+            // 使用者反映「找不到止損那筆」——其實找到了，只是標籤沒講清楚）。
+            // 不再限定只有 MANUAL_CLOSE 才查 close_reason，任何已結束的交易
+            // 有 close_reason 就優先顯示精確原因，跟 CSV 匯出（第996行附近）
+            // 同一套邏輯，沒有才退回籠統的 RESULT_LABEL。
+            const label = trade.closeReason
               ? (CLOSE_REASON_LABEL[trade.closeReason] ?? RESULT_LABEL[trade.result!])
               : RESULT_LABEL[trade.result!];
             return <PillBadge label={label} color={color} />;
