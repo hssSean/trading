@@ -325,10 +325,54 @@ async function notifyTp1Hit(userId: string, row: DbTradeRow): Promise<void> {
   });
 }
 
-async function notifyIfNeeded(userId: string, row: DbTradeRow, action: TradeAction): Promise<void> {
-  if (action.kind !== 'sync_closed_position') return;
+// 2026-08-10：使用者要求「跟開自動交易之前一樣，每個通知都要有」——盤點
+// route.ts 原本對這個使用者發過的所有推播時機，逐一補齊，不是只挑「看起來
+// 重要」的兩三個。route.ts 的六個推播點：①掛單成交②推薦單失效（掛單過期）
+// ③移動止損上移④TP1達標⑤最終出場⑥新訊號通知。⑥完全不受
+// excludeLiveUsers 影響（新訊號推播跟這筆使用者是不是交給 live-runner 無
+// 關），一直都在；①④已經補了（notifyFilled/notifyTp1Hit）；這裡補②③。
+//
+// prevStopTriggerPrice：只有 update_trailing_stop 用得到——算「這次移動
+// 鎖住了多少 R」要跟移動前的止損價比較，這個值只存在於呼叫端手上的
+// snapshot（action 本身沒有帶舊止損價），所以用參數傳進來而不是塞進
+// TradeAction 型別（那個型別是 tradeBridge.ts 的純決策輸出，不該為了
+// 通知這種副作用需求污染它的形狀）。
+async function notifyIfNeeded(
+  userId: string, row: DbTradeRow, action: TradeAction, prevStopTriggerPrice: number | null,
+): Promise<void> {
   const sym = row.symbol.replace('USDT', '/USDT');
   const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
+
+  if (action.kind === 'entry_never_filled') {
+    await sendWebPushToUser(userId, {
+      title: `推薦單失效 ${sym}`,
+      body: `${dir} 未進場，掛單已取消（非持倉）`,
+      tag: `cancel-${row.id}`,
+    });
+    return;
+  }
+
+  if (action.kind === 'update_trailing_stop') {
+    // route.ts 同款節流：只在鎖住的 R 提升 ≥0.15 才推播，避免棘輪每輪
+    // 微幅移動就洗版（見 route.ts:851 同一道門檻，數字照抄不是重新設計）。
+    const isLong = row.direction === 'LONG';
+    const riskDist = Math.abs(row.entry - row.stop_loss);
+    if (riskDist > 0 && prevStopTriggerPrice !== null) {
+      const rOf = (stop: number) => (isLong ? stop - row.entry : row.entry - stop) / riskDist;
+      const prevR = rOf(prevStopTriggerPrice);
+      const newR = rOf(action.place.stopPrice as number);
+      if (newR > prevR + 0.15) {
+        await sendWebPushToUser(userId, {
+          title: `🛡 ${sym} 移動止損上移`,
+          body: `${dir} 止損上移至 $${action.place.stopPrice}（鎖 +${newR.toFixed(1)}R），續抱等出場`,
+          tag: `trail-${row.id}`,
+        });
+      }
+    }
+    return;
+  }
+
+  if (action.kind !== 'sync_closed_position') return;
   const label = action.result === 'WIN_TP1' ? '✅ 出場獲利' : '❌ 止損出場';
   const pnlStr = `${action.realizedPnl >= 0 ? '+' : ''}${action.realizedPnl.toFixed(2)} USDT`;
   await sendWebPushToUser(userId, {
@@ -481,7 +525,7 @@ async function runCycle(
 
       if (result.executed) {
         console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
-        await notifyIfNeeded(userId, row, action);
+        await notifyIfNeeded(userId, row, action, snapshot.currentStop?.triggerPrice ?? null);
       }
       // hold/wait_for_fill 這類 no-op 不印，避免每輪洗版；needs_reconcile 值得看見。
       else if (action.kind === 'needs_reconcile' || action.kind === 'skip_entry') {
