@@ -257,7 +257,7 @@ async function buildRiskInput(
   binance: BinanceFuturesClient,
   row: DbTradeRow,
   totalOpenRiskPct: number,
-): Promise<RiskCheckInput | null> {
+): Promise<(RiskCheckInput & { leverage: number }) | null> {
   const balances = await binance.getBalance();
   const usdt = balances.find(b => b.asset === 'USDT');
   const accountEquity = usdt ? parseFloat(usdt.availableBalance) : 0;
@@ -266,6 +266,10 @@ async function buildRiskInput(
   const plan = calcPositionPlan(accountEquity, riskPct, row.entry, row.stop_loss, DEFAULT_MAX_LEVERAGE);
   const positionUSDT = plan?.positionUSDT ?? 0;
   const marginUSDT = plan?.marginUSDT ?? 0;
+  // checkLiquidationSafety（下面呼叫端）用這個 marginUSDT 當 isolatedMarginUSDT
+  // 去預測強平價，這個預測只有在幣安帳戶端真的用同一個槓桿倍數下單時才成立
+  // ——leverage 帶出去讓呼叫端在真的送出第一張進場單前呼叫 setLeverage 對齊。
+  const leverage = plan?.leverage ?? 1;
 
   const bracketsRes = await binance.getLeverageBrackets(row.symbol);
   const brackets: MarginBracket[] = bracketsRes[0]?.brackets ?? [];
@@ -288,6 +292,7 @@ async function buildRiskInput(
       maintMarginRatio: bracket.maintMarginRatio,
       maintAmount: bracket.cum,
     },
+    leverage,
   };
 }
 
@@ -511,16 +516,54 @@ async function runCycle(
 
       // 風險輸入只有「還沒下過進場單」才需要（余額/槓桿分級都是額外的 API
       // 呼叫，其他狀態下這筆單不會走到 decideTradeAction 的風險檢查分支）。
-      let risk: RiskCheckInput;
+      let risk: RiskCheckInput & { leverage: number };
       if (row.exchange_entry_order_id === null) {
         const built = await buildRiskInput(binance, row, totalOpenRiskPct - (row.suggested_risk_pct ?? 1));
         if (!built) continue; // 抓不到分級資料，這輪跳過，見 buildRiskInput 說明
         risk = built;
       } else {
-        risk = { positionUSDT: 0, totalOpenRiskPct: 0, thisTradeRiskPct: 0, liquidation: { isolatedMarginUSDT: 0, maintMarginRatio: 0, maintAmount: 0 } };
+        // leverage 只有 place_entry 分支會用到（見下方），這裡永遠不會走到
+        // 那個分支（exchangeEntryOrderId !== null 代表已經下過進場單），
+        // 1 只是型別要求的佔位值。
+        risk = { positionUSDT: 0, totalOpenRiskPct: 0, thisTradeRiskPct: 0, liquidation: { isolatedMarginUSDT: 0, maintMarginRatio: 0, maintAmount: 0 }, leverage: 1 };
       }
 
       const action = decideTradeAction(trade, snapshot, risk);
+
+      // 2026-08-11：資金安全缺口——checkLiquidationSafety（tradeBridge.ts
+      // 第1步風控閘門）整套強平價公式是為 isolated margin + 這裡算好的
+      // leverage 設計的（見 src/engine/liquidation.ts 頂部說明，含
+      // TMM=0/UPNL=0 化簡），但這支從沒真的呼叫過 setMarginType/setLeverage
+      // 讓幣安帳戶端符合這個假設——如果帳戶這個 symbol 預設是 cross margin
+      // 或槓桿倍數對不上，強平價算出來的數字跟真實情況會有落差，實測撞到：
+      // 使用者 ACEUSDT 那筆倉位幣安介面顯示「保證金 11.40 USDT（全倉）」。
+      //
+      // 只在真的要送出第一張進場單那一刻呼叫——setMarginType 有部位/掛單
+      // 時會被幣安拒絕（-4046），這個時間點（action.kind==='place_entry'）
+      // 保證 symbol 還是空手，是唯一安全的呼叫窗口。已經開著的舊倉位（下單
+      // 當時是 cross margin）不會被這裡追溯修正，checkLiquidationSafety
+      // 只在進場前的一次性風控閘門用到，不會對已開部位持續套用，所以舊倉位
+      // 不會被這個公式誤判——只是它們的強平風險本來就沒有被這套系統持續
+      // 追蹤（另一個可以做的加強，這次先只處理「新倉位開始前先鎖定假設
+      // 成立」這一步）。
+      if (action.kind === 'place_entry') {
+        try {
+          await binance.setMarginType(row.symbol, 'ISOLATED');
+        } catch (e) {
+          const code = extractBinanceErrorCode(e);
+          if (code !== -4046) { // -4046 = 已經是 ISOLATED，不算錯誤
+            console.error(`[${nowStr()}] ${row.symbol} setMarginType 失敗，這輪跳過進場（強平價假設不成立前不安全下單）: ${describeError(e)}`);
+            continue;
+          }
+        }
+        try {
+          await binance.setLeverage(row.symbol, risk.leverage);
+        } catch (e) {
+          console.error(`[${nowStr()}] ${row.symbol} setLeverage(${risk.leverage}) 失敗，這輪跳過進場: ${describeError(e)}`);
+          continue;
+        }
+      }
+
       const result = await executeTradeAction(client, persist, row.id, action);
 
       if (result.executed) {
