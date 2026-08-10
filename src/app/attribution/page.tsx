@@ -35,8 +35,15 @@ interface AttributionResponse {
   factorGroupByDirection?: FactorGroupDirectionAvg[];
   extensionAtrBuckets?: BucketStat[];
   tagStats?: Record<string, TagStat>;
+  byRegime?: Record<string, TagStat>;
   sampleSize?: { total: number; withBreakdown: number };
 }
+
+const REGIME_LABEL: Record<string, string> = {
+  trending: '趨勢盤(策略A)',
+  ranging: '盤整盤(策略B)',
+  transitional: '過渡區(不進場)',
+};
 
 const FACTOR_LABEL: Record<string, string> = {
   trend: '趨勢',
@@ -142,6 +149,28 @@ export default function AttributionPage() {
                 </p>
               )}
             </div>
+
+            {Object.keys(data.byRegime ?? {}).length > 0 && (
+              <div>
+                <p className="text-[#3A424E] text-[9px] uppercase font-bold tracking-widest mb-1.5 px-0.5">
+                  Regime(4H ADX判定) vs 結果
+                </p>
+                <div className="bg-[#0D0D16] border border-[#1B222B] rounded-xl p-3 grid grid-cols-3 gap-2 num">
+                  {Object.entries(data.byRegime ?? {}).map(([regime, s]) => (
+                    <div key={regime} className="bg-[#141A21] rounded-lg px-2 py-1.5">
+                      <p className="text-[#5A7A8A] text-[9px] mb-0.5">{REGIME_LABEL[regime] ?? regime} · {s.count}筆</p>
+                      <p className="text-[#E8ECF1] text-[11px]">{s.winRate}% 勝率</p>
+                      <p className={`text-[11px] ${s.avgR >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+                        {s.avgR >= 0 ? '+' : ''}{s.avgR}R/筆
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[#565E6B] text-[10px] mt-1.5 px-0.5">
+                  趨勢盤表現變差 = regime判斷本身可能失準；只是整體筆數變少 = 判斷正常，是別的原因(比如市場波動性下降)
+                </p>
+              </div>
+            )}
 
             <div>
               <p className="text-[#3A424E] text-[9px] uppercase font-bold tracking-widest mb-1.5 px-0.5">

@@ -34,6 +34,12 @@ export interface AttributionTrade {
   entry: number;
   stopLoss: number;
   scoreBreakdown: AttrScoreBreakdown | null;
+  // 2026-08-11：策略#3——使用者觀察到 8月比7月明顯轉差（75%→56%勝率），
+  // 假說是 market regime 轉盤整了。這個欄位（trending/ranging/
+  // transitional，4H ADX 判定）其實從 v2.1 就一直隨每筆訊號寫進 DB
+  // （route.ts insertData 的 regime 欄位），只是從沒被拿來做歸因分析過
+  // ——不需要等新資料，用既有歷史資料就能驗證這個假說。
+  regime?: string | null;
 }
 
 const FACTOR_GROUPS = ['trend', 'momentum', 'structure', 'volume', 'priceAction'] as const;
@@ -140,6 +146,11 @@ export interface AttributionResult {
   // 命中率/勝率/平均R，不看總分——才能回答「具體是哪個 if 在反著算」。
   // 每個 tag 各自獨立統計（一筆訊號可能同時命中多個 tag，不互斥）。
   tagStats: Record<string, { count: number; winRate: number; avgR: number }>;
+  // 2026-08-11——regime（trending/ranging/transitional，4H ADX 判定）跟
+  // 結果的關聯。驗證「8月轉差是不是策略A在盤整格局被誤判成trending硬做」
+  // 這個假說：如果 trending 的表現本身沒有隨時間變差，代表 regime 判斷
+  // 機制運作正常，問題在別的地方，不該去調 ADX 門檻。
+  byRegime: Record<string, { count: number; winRate: number; avgR: number }>;
   sampleSize: { total: number; withBreakdown: number };
 }
 
@@ -180,11 +191,20 @@ export function analyzeScoreAttribution(trades: AttributionTrade[]): Attribution
     tagStats[tag] = { count: s.count, winRate: s.winRate, avgR: s.avgR };
   }
 
+  const byRegime: AttributionResult['byRegime'] = {};
+  const regimeKeys = Array.from(new Set(trades.map(t => t.regime).filter((r): r is string => !!r)));
+  for (const regime of regimeKeys) {
+    const s = summarize(trades.filter(t => t.regime === regime));
+    if (s.count === 0) continue;
+    byRegime[regime] = { count: s.count, winRate: s.winRate, avgR: s.avgR };
+  }
+
   return {
     byFactorBucket,
     factorGroupByDirection,
     extensionAtrBuckets,
     tagStats,
+    byRegime,
     sampleSize: { total: trades.length, withBreakdown: withBreakdown.length },
   };
 }

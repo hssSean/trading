@@ -97,6 +97,33 @@ describe('analyzeScoreAttribution — factorGroupByDirection', () => {
   });
 });
 
+describe('analyzeScoreAttribution — byRegime', () => {
+  it('aggregates win rate / avg R per regime (trending/ranging/transitional)', () => {
+    const trades = [
+      trade({ regime: 'trending', result: 'WIN_TP1', pnlPercent: 4 }),
+      trade({ regime: 'trending', result: 'LOSS', pnlPercent: -2 }),
+      trade({ regime: 'ranging', result: 'WIN_TP1', pnlPercent: 2 }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.byRegime.trending.count).toBe(2);
+    expect(r.byRegime.trending.winRate).toBe(50);
+    expect(r.byRegime.ranging.count).toBe(1);
+    expect(r.byRegime.ranging.winRate).toBe(100);
+  });
+
+  it('omits regimes with no data rather than a zeroed-out entry', () => {
+    const trades = [trade({ regime: null })];
+    const r = analyzeScoreAttribution(trades);
+    expect(Object.keys(r.byRegime)).toHaveLength(0);
+  });
+
+  it('does not require scoreBreakdown to be present — regime is a top-level field', () => {
+    const trades = [trade({ regime: 'trending', scoreBreakdown: null })];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.byRegime.trending.count).toBe(1);
+  });
+});
+
 describe('analyzeScoreAttribution — tagStats', () => {
   it('aggregates win rate / avg R per momentum/priceAction sub-condition tag', () => {
     const trades = [
