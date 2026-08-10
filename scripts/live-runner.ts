@@ -39,6 +39,12 @@
  * 跑」——使用者可能把這支關掉卻忘記把那個欄位改回 false，沒有心跳的話
  * route.ts 會自動接手，不然兩邊都不管，比使用者根本沒開自動交易還危險。
  *
+ * 2026-08-10：TP1 從「輪詢比價、觸價才送 MARKET 單」改成「一有止損就順便
+ * 預掛 TAKE_PROFIT_MARKET 條件單」——輪詢式如果價格插針式碰到 tp1 又馬上
+ * 彈回去（兩輪之間 15 秒），下一輪就再也偵測不到，TP1 部分平倉的機會真的
+ * 會錯過；改成掛在交易所端，觸發跟止損一樣即時，不怕插針。詳見
+ * src/engine/orderLifecycle.ts 的 decideTp1OrderPlacement 說明。
+ *
  * --live 旗標刻意 exit(1) 拒絕——這是本次改動唯一保留的安全閥，確保這支
  * 腳本目前只會碰 testnet 帳戶，不會不小心連到正式帳戶。
  */
@@ -57,7 +63,7 @@ import {
 } from '../src/engine/tradeBridge';
 import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
-import { calcSimpleAtr } from '../src/lib/monitorMath';
+import { calcSimpleAtr, TP1_PARTIAL_FRACTION } from '../src/lib/monitorMath';
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
@@ -101,8 +107,10 @@ interface DbTradeRow {
   suggested_risk_pct: number | null;
   filled_at: number | null;
   opened_at: number;
+  entry_qty: number | null;
   exchange_entry_order_id: number | null;
   exchange_stop_algo_id: number | null;
+  exchange_tp1_algo_id: number | null;
 }
 
 const VALID_TIMEFRAMES = new Set(['5m', '15m', '1h', '4h', '1d']);
@@ -120,8 +128,10 @@ function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
     // （route.ts tfBarMinutes 的 default 分支同一個處理方式，不是另外發明的）。
     timeframe: (VALID_TIMEFRAMES.has(row.timeframe ?? '') ? row.timeframe : '1h') as BridgeTradeRow['timeframe'],
     filledAt: row.filled_at ?? row.opened_at ?? null,
+    entryQty: row.entry_qty,
     exchangeEntryOrderId: row.exchange_entry_order_id,
     exchangeStopAlgoId: row.exchange_stop_algo_id,
+    exchangeTp1AlgoId: row.exchange_tp1_algo_id,
   };
 }
 
@@ -139,6 +149,10 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
     async setStopAlgoId(tradeId, algoId) {
       const { error } = await supabase.from('trades').update({ exchange_stop_algo_id: algoId }).eq('id', tradeId);
       logErr('setStopAlgoId', error);
+    },
+    async setTp1AlgoId(tradeId, algoId) {
+      const { error } = await supabase.from('trades').update({ exchange_tp1_algo_id: algoId }).eq('id', tradeId);
+      logErr('setTp1AlgoId', error);
     },
     async markTp1Hit(tradeId) {
       const { error } = await supabase.from('trades').update({ status: 'tp1_hit' }).eq('id', tradeId);
@@ -179,6 +193,10 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
         status: 'active', filled_at: filledAt,
       }).eq('id', tradeId);
       logErr('markFilled', error);
+    },
+    async setEntryQty(tradeId, entryQty) {
+      const { error } = await supabase.from('trades').update({ entry_qty: entryQty }).eq('id', tradeId);
+      logErr('setEntryQty', error);
     },
   };
 }
@@ -274,28 +292,34 @@ async function buildRiskInput(
 }
 
 // route.ts 沒了這個使用者之後不會再推播——見檔案頂部說明。只有兩個時刻值得
-// 通知：TP1 部分平倉（第一次獲利了結）、最終出場（sync_closed_position，
-// 這時候才有真實成交價/損益可以講，close_full_position 本身只是送出關單，
-// 還不知道最終結果，不在那個分支推播）。
-async function notifyIfNeeded(userId: string, row: DbTradeRow, action: TradeAction): Promise<void> {
+// 通知：TP1 達標（第一次獲利了結）、最終出場（sync_closed_position，這時候
+// 才有真實成交價/損益可以講，close_full_position 本身只是送出關單，還不
+// 知道最終結果，不在那個分支推播）。
+//
+// 2026-08-10：TP1 改成預掛條件單後，「TP1 達標」不再是某個 action 執行完
+// 當下就知道的事（見 tradeBridge.ts 第5步說明）——是主迴圈自我修復偵測到
+// 部位變小才發現，通知呼叫點跟著搬到那裡，這裡只保留 sync_closed_position。
+async function notifyTp1Hit(userId: string, row: DbTradeRow): Promise<void> {
   const sym = row.symbol.replace('USDT', '/USDT');
   const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
+  await sendWebPushToUser(userId, {
+    title: `🎯 TP1 達標 ${sym}`,
+    body: `${dir} 部分平倉已成交，剩餘倉位交給 live-runner 自動管理移動止損`,
+    tag: `tp1-${row.id}`,
+  });
+}
 
-  if (action.kind === 'tp1_partial_close') {
-    await sendWebPushToUser(userId, {
-      title: `🎯 TP1 達標 ${sym}`,
-      body: `${dir} 部分平倉已送出，剩餘倉位交給 live-runner 自動管理移動止損`,
-      tag: `tp1-${row.id}`,
-    });
-  } else if (action.kind === 'sync_closed_position') {
-    const label = action.result === 'WIN_TP1' ? '✅ 出場獲利' : '❌ 止損出場';
-    const pnlStr = `${action.realizedPnl >= 0 ? '+' : ''}${action.realizedPnl.toFixed(2)} USDT`;
-    await sendWebPushToUser(userId, {
-      title: `${label} ${sym}`,
-      body: `${dir} 出場 $${action.avgExitPrice.toFixed(4)} ｜ 實現損益 ${pnlStr}`,
-      tag: `close-${row.id}`,
-    });
-  }
+async function notifyIfNeeded(userId: string, row: DbTradeRow, action: TradeAction): Promise<void> {
+  if (action.kind !== 'sync_closed_position') return;
+  const sym = row.symbol.replace('USDT', '/USDT');
+  const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
+  const label = action.result === 'WIN_TP1' ? '✅ 出場獲利' : '❌ 止損出場';
+  const pnlStr = `${action.realizedPnl >= 0 ? '+' : ''}${action.realizedPnl.toFixed(2)} USDT`;
+  await sendWebPushToUser(userId, {
+    title: `${label} ${sym}`,
+    body: `${dir} 出場 $${action.avgExitPrice.toFixed(4)} ｜ 實現損益 ${pnlStr}`,
+    tag: `close-${row.id}`,
+  });
 }
 
 // 不管 kill switch 有沒有啟動、這輪有沒有真的做任何動作，只要 process
@@ -342,7 +366,7 @@ async function runCycle(
 
   const { data: rows, error } = await supabase
     .from('trades')
-    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,exchange_entry_order_id,exchange_stop_algo_id')
+    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,exchange_stop_algo_id,exchange_tp1_algo_id')
     .eq('user_id', userId)
     .is('closed_at', null);
 
@@ -389,6 +413,39 @@ async function runCycle(
       if (snapshot.positionQty > 0 && row.status === 'waiting') {
         await persist.markFilled(row.id, row.filled_at ?? Date.now());
         row.status = 'active'; // 這一輪剩下的邏輯（例如 ATR 抓取判斷）跟著用新狀態
+      }
+
+      // 自我修復：entry_qty 是 tradeBridge.ts 判斷「TP1 是否已發生」的基準
+      // 值（部位比這個值小才算數），null 代表還沒記過——涵蓋兩種情況：這筆
+      // 剛確認成交（上面那段自我修復第一次跑），或者是這次改動上線前就已經
+      // active 的舊資料（永遠不會再進 status==='waiting' 那個分支）。
+      //
+      // 舊資料裡如果止損已經不是原始值（trailingStop !== stop_loss），代表
+      // 舊邏輯下 TP1 早就發生過、部位已經打折——這種情況直接用目前部位反推
+      // 回「打折前」的量（÷(1-50%)），讓 tp1Happened 立刻判定為 true，避免
+      // 誤判成「還沒發生」而重新掛一次 TP1 條件單：如果之後價格真的又碰到
+      // tp1，用打折後的部位再算一次 50% 會變成部位只剩 25%，跟移動止損棘輪
+      // 的語意（TP1 後只剩「棘輪保護」不再減倉）互相打架。
+      if (snapshot.positionQty > 0 && row.entry_qty === null) {
+        const stopAlreadyMoved = snapshot.currentStop !== null
+          && Math.abs(snapshot.currentStop.triggerPrice - row.stop_loss) > 1e-8;
+        const entryQty = stopAlreadyMoved
+          ? snapshot.positionQty / (1 - TP1_PARTIAL_FRACTION)
+          : snapshot.positionQty;
+        await persist.setEntryQty(row.id, entryQty);
+        row.entry_qty = entryQty;
+      }
+
+      // 自我修復：部位比 entry_qty 小（TP1 真的發生了）但 DB 還沒標記——
+      // 跟上面 waiting→active 同一種模式，不依賴「我們自己主動下單」這個
+      // 時機點，只要事實跟記錄不一致就修正。
+      if (
+        row.entry_qty !== null && snapshot.positionQty > 0
+        && snapshot.positionQty < row.entry_qty * 0.99 && row.status !== 'tp1_hit'
+      ) {
+        await persist.markTp1Hit(row.id);
+        row.status = 'tp1_hit';
+        await notifyTp1Hit(userId, row);
       }
 
       // 風險輸入只有「還沒下過進場單」才需要（余額/槓桿分級都是額外的 API

@@ -3,23 +3,25 @@ import {
   calcTrailingStopTarget,
   decideEntryOrder,
   decideFullClose,
-  decideTp1PartialClose,
+  decideTp1OrderPlacement,
   decideTrailingStopReplace,
   EntryOrderInput,
   FullCloseInput,
-  Tp1PartialCloseInput,
+  Tp1OrderInput,
   TrailingStopReplaceInput,
   TrailingStopTargetInput,
 } from '../../src/engine/orderLifecycle';
 
 const filters = { stepSize: 0.001, tickSize: 0.1, minNotional: 5 };
 
-function tp1Input(overrides: Partial<Tp1PartialCloseInput> = {}): Tp1PartialCloseInput {
+function tp1Input(overrides: Partial<Tp1OrderInput> = {}): Tp1OrderInput {
   return {
     tradeId: 'trade-1',
     symbol: 'BTCUSDT',
     isLong: true,
+    strategy: 'A',
     positionQty: 0.1,
+    tp1: 67000,
     filters,
     ...overrides,
   };
@@ -104,55 +106,89 @@ describe('decideEntryOrder', () => {
   });
 });
 
-describe('decideTp1PartialClose', () => {
-  it('closes 50% of the position with a reduceOnly MARKET order (LONG → SELL)', () => {
-    const d = decideTp1PartialClose(tp1Input());
+describe('decideTp1OrderPlacement — strategy A (partial, quantity-based)', () => {
+  it('places a TAKE_PROFIT_MARKET order for 50% of the position, reduceOnly (LONG → SELL)', () => {
+    const d = decideTp1OrderPlacement(tp1Input());
     expect(d.skip).toBe(false);
     if (d.skip) return;
-    expect(d.closeQty).toBe(0.05);
-    expect(d.remainingQty).toBe(0.05);
     expect(d.order).toEqual({
       symbol: 'BTCUSDT',
       side: 'SELL',
-      type: 'MARKET',
+      type: 'TAKE_PROFIT_MARKET',
+      stopPrice: 67000,
       quantity: 0.05,
       reduceOnly: true,
-      newClientOrderId: 'trade-1-tp1close',
+      newClientOrderId: 'trade-1-tp1order',
     });
   });
 
   it('mirrors side for SHORT (BUY to reduce a short)', () => {
-    const d = decideTp1PartialClose(tp1Input({ isLong: false }));
+    const d = decideTp1OrderPlacement(tp1Input({ isLong: false }));
     expect(d.skip).toBe(false);
     if (d.skip) return;
     expect(d.order.side).toBe('BUY');
   });
 
-  it('floors to stepSize rather than rounding up (never close more than intended)', () => {
-    // 0.0033 * 0.5 = 0.00165 → floors to 0.001 at stepSize 0.001, not 0.002
-    const d = decideTp1PartialClose(tp1Input({ positionQty: 0.0033 }));
+  it('rounds stopPrice to tickSize', () => {
+    const d = decideTp1OrderPlacement(tp1Input({ tp1: 67012.34 }));
     expect(d.skip).toBe(false);
     if (d.skip) return;
-    expect(d.closeQty).toBe(0.001);
+    expect(d.order.stopPrice).toBe(67012.3);
+  });
+
+  it('floors to stepSize rather than rounding up (never close more than intended)', () => {
+    // 0.0033 * 0.5 = 0.00165 → floors to 0.001 at stepSize 0.001, not 0.002
+    const d = decideTp1OrderPlacement(tp1Input({ positionQty: 0.0033 }));
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order.quantity).toBe(0.001);
   });
 
   it('skips when the halved quantity floors to zero (stepSize too coarse)', () => {
-    const d = decideTp1PartialClose(tp1Input({ positionQty: 0.0015, filters: { ...filters, stepSize: 0.01 } }));
+    const d = decideTp1OrderPlacement(tp1Input({ positionQty: 0.0015, filters: { ...filters, stepSize: 0.01 } }));
     expect(d.skip).toBe(true);
   });
 
-  it('skips when there is no position left to close', () => {
-    const d = decideTp1PartialClose(tp1Input({ positionQty: 0 }));
+  it('skips when there is no position left to protect', () => {
+    const d = decideTp1OrderPlacement(tp1Input({ positionQty: 0 }));
     expect(d.skip).toBe(true);
   });
 
-  it('produces a deterministic clientOrderId so retries dedupe instead of double-closing', () => {
-    const d1 = decideTp1PartialClose(tp1Input());
-    const d2 = decideTp1PartialClose(tp1Input());
+  it('produces a deterministic clientOrderId so retries dedupe instead of double-placing', () => {
+    const d1 = decideTp1OrderPlacement(tp1Input());
+    const d2 = decideTp1OrderPlacement(tp1Input());
     expect(d1.skip).toBe(false);
     expect(d2.skip).toBe(false);
     if (d1.skip || d2.skip) return;
     expect(d1.order.newClientOrderId).toBe(d2.order.newClientOrderId);
+  });
+});
+
+describe('decideTp1OrderPlacement — strategy B (full close, closePosition-based)', () => {
+  it('places a TAKE_PROFIT_MARKET order with closePosition=true, no quantity (LONG → SELL)', () => {
+    const d = decideTp1OrderPlacement(tp1Input({ strategy: 'B' }));
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order).toEqual({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      type: 'TAKE_PROFIT_MARKET',
+      stopPrice: 67000,
+      closePosition: true,
+      newClientOrderId: 'trade-1-tp1order',
+    });
+  });
+
+  it('mirrors side for SHORT', () => {
+    const d = decideTp1OrderPlacement(tp1Input({ strategy: 'B', isLong: false }));
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order.side).toBe('BUY');
+  });
+
+  it('skips when there is no position left to protect', () => {
+    const d = decideTp1OrderPlacement(tp1Input({ strategy: 'B', positionQty: 0 }));
+    expect(d.skip).toBe(true);
   });
 });
 

@@ -23,17 +23,21 @@ class FakeClient implements TradeExecutorClient {
 class FakePersist implements TradePersistence {
   entryOrderIds: Array<{ tradeId: string; orderId: number }> = [];
   stopAlgoIds: Array<{ tradeId: string; algoId: number }> = [];
+  tp1AlgoIds: Array<{ tradeId: string; algoId: number }> = [];
   tp1HitCalls: string[] = [];
   finalizeCalls: Array<{ tradeId: string; result: unknown }> = [];
   neverFilledCalls: string[] = [];
   filledCalls: Array<{ tradeId: string; filledAt: number }> = [];
+  entryQtyCalls: Array<{ tradeId: string; entryQty: number }> = [];
 
   async setEntryOrderId(tradeId: string, orderId: number) { this.entryOrderIds.push({ tradeId, orderId }); }
   async setStopAlgoId(tradeId: string, algoId: number) { this.stopAlgoIds.push({ tradeId, algoId }); }
+  async setTp1AlgoId(tradeId: string, algoId: number) { this.tp1AlgoIds.push({ tradeId, algoId }); }
   async markTp1Hit(tradeId: string) { this.tp1HitCalls.push(tradeId); }
   async markFilled(tradeId: string, filledAt: number) { this.filledCalls.push({ tradeId, filledAt }); }
   async finalizeClosed(tradeId: string, result: unknown) { this.finalizeCalls.push({ tradeId, result }); }
   async markEntryNeverFilled(tradeId: string) { this.neverFilledCalls.push(tradeId); }
+  async setEntryQty(tradeId: string, entryQty: number) { this.entryQtyCalls.push({ tradeId, entryQty }); }
 }
 
 const order: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 0.01, price: 65000 };
@@ -79,17 +83,17 @@ describe('executeTradeAction — place_initial_stop', () => {
   });
 });
 
-describe('executeTradeAction — tp1_partial_close', () => {
-  it('places the partial-close order and marks TP1 hit', async () => {
+describe('executeTradeAction — place_tp1_order', () => {
+  it('places the TP1 condition order and persists the algoId', async () => {
     const client = new FakeClient();
     const persist = new FakePersist();
-    const closeOrder: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.005, reduceOnly: true };
-    const action: TradeAction = { kind: 'tp1_partial_close', order: closeOrder, closeQty: 0.005, remainingQty: 0.005 };
+    const tp1Order: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'TAKE_PROFIT_MARKET', stopPrice: 67000, quantity: 0.005, reduceOnly: true };
+    const action: TradeAction = { kind: 'place_tp1_order', order: tp1Order };
 
     await executeTradeAction(client, persist, 'trade-1', action);
 
-    expect(client.placeOrderCalls).toEqual([closeOrder]);
-    expect(persist.tp1HitCalls).toEqual(['trade-1']);
+    expect(client.placeOrderCalls).toEqual([tp1Order]);
+    expect(persist.tp1AlgoIds).toEqual([{ tradeId: 'trade-1', algoId: 1000 }]);
   });
 });
 

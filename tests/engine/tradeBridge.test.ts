@@ -12,7 +12,8 @@ function tradeRow(overrides: Partial<BridgeTradeRow> = {}): BridgeTradeRow {
     id: 'trade-1', symbol: 'BTCUSDT', isLong: true,
     entry: 65000, stopLoss: 64000, tp1: 67000, strategy: 'A',
     timeframe: '1h', filledAt: 0, // filledAt=now=0 → 時間止損兩個門檻都不會觸發，不干擾既有測試
-    exchangeEntryOrderId: null, exchangeStopAlgoId: null,
+    entryQty: null,
+    exchangeEntryOrderId: null, exchangeStopAlgoId: null, exchangeTp1AlgoId: null,
     ...overrides,
   };
 }
@@ -173,83 +174,72 @@ describe('decideTradeAction — filled position, no stop yet (the naked-position
   });
 });
 
-describe('decideTradeAction — TP1 partial close', () => {
-  it('triggers TP1 partial close when price touches tp1 and the stop is still the original one', () => {
+describe('decideTradeAction — TP1 order placement (strategy A, partial)', () => {
+  it('places the TP1 condition order when none is placed yet and TP1 has not happened', () => {
     const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111 }),
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: null }),
       snapshot({
-        positionQty: 0.01,
-        currentStop: { algoId: 222, triggerPrice: 64000 }, // 等於 trade.stopLoss → 還是初始止損
-        markPrice: 67100, // >= tp1
-      }),
-      risk(),
-    );
-    expect(a.kind).toBe('tp1_partial_close');
-  });
-
-  it('does NOT re-trigger TP1 close once the stop has already moved off the original stopLoss', () => {
-    const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111 }),
-      snapshot({
-        positionQty: 0.005,
-        currentStop: { algoId: 222, triggerPrice: 65500 }, // 已經移動過，不是原始 stopLoss 64000
-        markPrice: 67100,
-      }),
-      risk(),
-    );
-    expect(a.kind).toBe('hold');
-  });
-
-  it('holds when price has not reached tp1 yet', () => {
-    const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111 }),
-      snapshot({
-        positionQty: 0.01,
+        positionQty: 0.01, // 還是滿倉，等於 entryQty
         currentStop: { algoId: 222, triggerPrice: 64000 },
-        markPrice: 66000, // < tp1 (67000)
       }),
       risk(),
     );
-    expect(a.kind).toBe('hold');
+    expect(a.kind).toBe('place_tp1_order');
+    if (a.kind !== 'place_tp1_order') return;
+    expect(a.order.type).toBe('TAKE_PROFIT_MARKET');
+    expect(a.order.quantity).toBe(0.005); // 一半，不是全部
+    expect(a.order.side).toBe('SELL');
   });
 
-  it('mirrors TP1 touch direction for SHORT (price at or below tp1)', () => {
+  it('mirrors side for SHORT', () => {
     const a = decideTradeAction(
-      tradeRow({ isLong: false, entry: 65000, stopLoss: 66000, tp1: 63000, exchangeEntryOrderId: 111 }),
+      tradeRow({ isLong: false, entry: 65000, stopLoss: 66000, tp1: 63000, exchangeEntryOrderId: 111, entryQty: 0.01 }),
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 66000 },
-        markPrice: 62900, // <= tp1
       }),
       risk(),
     );
-    expect(a.kind).toBe('tp1_partial_close');
+    expect(a.kind).toBe('place_tp1_order');
+    if (a.kind !== 'place_tp1_order') return;
+    expect(a.order.side).toBe('BUY');
+  });
+
+  it('holds (waiting for the exchange to trigger it) once the TP1 order is already placed and position has not shrunk', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
+      snapshot({
+        positionQty: 0.01, // 還是滿倉
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
   });
 });
 
 describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)', () => {
-  it('closes the FULL position (not a partial) once price touches the target', () => {
+  it('places a full-close TP1 condition order (closePosition) when none is placed yet', () => {
     const a = decideTradeAction(
-      tradeRow({ strategy: 'B', exchangeEntryOrderId: 111 }),
+      tradeRow({ strategy: 'B', exchangeEntryOrderId: 111, exchangeTp1AlgoId: null }),
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
-        markPrice: 67100, // >= tp1
       }),
       risk(),
     );
-    expect(a.kind).toBe('close_full_position');
-    if (a.kind !== 'close_full_position') return;
-    expect(a.order.quantity).toBe(0.01); // 全部部位，不是 50%
+    expect(a.kind).toBe('place_tp1_order');
+    if (a.kind !== 'place_tp1_order') return;
+    expect(a.order.closePosition).toBe(true);
+    expect(a.order.quantity).toBeUndefined();
   });
 
-  it('holds when price has not reached the target yet', () => {
+  it('holds once the TP1 condition order is already placed', () => {
     const a = decideTradeAction(
-      tradeRow({ strategy: 'B', exchangeEntryOrderId: 111 }),
+      tradeRow({ strategy: 'B', exchangeEntryOrderId: 111, exchangeTp1AlgoId: 333 }),
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
-        markPrice: 66000, // < tp1
       }),
       risk(),
     );
@@ -260,10 +250,10 @@ describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)
 describe('decideTradeAction — strategy A trailing stop after TP1', () => {
   it('updates the trailing stop when atr1h is available and the target is more favorable', () => {
     const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111 }),
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
       snapshot({
-        positionQty: 0.005,
-        currentStop: { algoId: 222, triggerPrice: 66000 }, // 已經初始化過，不等於原始 stopLoss(64000)
+        positionQty: 0.005, // < entryQty * 0.99 → TP1 已發生
+        currentStop: { algoId: 222, triggerPrice: 66000 },
         markPrice: 68000,
         atr1h: 500, // candidate = 68000-1000=67000 > 66000 → 更有利
       }),
@@ -277,7 +267,7 @@ describe('decideTradeAction — strategy A trailing stop after TP1', () => {
 
   it('holds without moving the stop when no ATR data is available yet', () => {
     const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111 }),
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
       snapshot({
         positionQty: 0.005,
         currentStop: { algoId: 222, triggerPrice: 66000 },
@@ -291,7 +281,7 @@ describe('decideTradeAction — strategy A trailing stop after TP1', () => {
 
   it('holds when the target is not more favorable than the current stop (no unnecessary order)', () => {
     const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111 }),
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
       snapshot({
         positionQty: 0.005,
         currentStop: { algoId: 222, triggerPrice: 66000 },
@@ -301,5 +291,18 @@ describe('decideTradeAction — strategy A trailing stop after TP1', () => {
       risk(),
     );
     expect(a.kind).toBe('hold');
+  });
+
+  it('does not treat a partially-filled entry (entryQty null) as TP1 having happened', () => {
+    // entryQty 是 null（理論上不該發生在有止損的情況，但保守起見不能誤判）
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: null, exchangeTp1AlgoId: null }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('place_tp1_order'); // 沒把 entryQty=null 誤判成「已經 TP1」
   });
 });

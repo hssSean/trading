@@ -1,7 +1,7 @@
-// I/O 執行層——把 decideTradeAction 的決定真的送到交易所 + 寫回 DB。
-// 跟 runner.ts 同一個依賴注入風格：TradeExecutorClient 是最小介面（複用
-// RunnerClient 的形狀），TradePersistence 是 DB 寫入的注入介面，測試可以
-// 用假的實作驗證每個分支呼叫了什麼，不用真的連網路/連 Supabase。
+// I/O 執行層——把 decideTradeAction 的決定真的送到交易所 + 寫回 DB。依賴
+// 注入風格：TradeExecutorClient 是最小交易所介面，TradePersistence 是 DB
+// 寫入的注入介面，測試可以用假的實作驗證每個分支呼叫了什麼，不用真的連
+// 網路/連 Supabase。
 //
 // 這裡不做任何「該不該做」的判斷——那是 tradeBridge.ts 的職責。這一層只回答
 // 「decideTradeAction 已經決定要做 X，怎麼安全地把 X 做完」。
@@ -20,6 +20,11 @@ export interface TradeExecutorClient {
 export interface TradePersistence {
   setEntryOrderId(tradeId: string, orderId: number): Promise<void>;
   setStopAlgoId(tradeId: string, algoId: number): Promise<void>;
+  setTp1AlgoId(tradeId: string, algoId: number): Promise<void>;
+  // 2026-08-10：TP1 改成預掛條件單後，「TP1 真的發生了」不再是某個 action
+  // 執行完當下就知道的事——是下一輪自我修復偵測到部位變小才發現。呼叫點
+  // 搬到 live-runner 主迴圈（跟 waiting→active 那個自我修復同一種模式），
+  // 不在這個檔案裡了，介面留著給那邊用。
   markTp1Hit(tradeId: string): Promise<void>;
   finalizeClosed(tradeId: string, result: { result: 'WIN_TP1' | 'LOSS'; exitPrice: number; realizedPnl: number }): Promise<void>;
   // 進場單消失但查無任何成交紀錄——從未真的開過倉，沒有損益可對帳，跟
@@ -32,6 +37,11 @@ export interface TradePersistence {
   // 成交」（decideTradeAction 第 4 步只有 positionQty>0 才會走到），是
   // 標記 filled 最自然的地方。
   markFilled(tradeId: string, filledAt: number): Promise<void>;
+  // 2026-08-10：TP1「是否已發生」判斷需要一個進場當時的部位量基準——這個
+  // 基準值不是某個 action 執行完當下就一定拿得到（可能是舊資料、也可能
+  // 首次確認成交那一刻順便記），呼叫點在 live-runner 主迴圈的自我修復，
+  // 不在這個檔案裡。
+  setEntryQty(tradeId: string, entryQty: number): Promise<void>;
 }
 
 export interface ExecutionResult {
@@ -65,10 +75,10 @@ export async function executeTradeAction(
       return { executed: true, note: `初始止損已送出 algoId=${res.orderId}` };
     }
 
-    case 'tp1_partial_close': {
-      await client.placeOrder(action.order);
-      await persist.markTp1Hit(tradeId);
-      return { executed: true, note: `TP1 部分平倉已送出（平 ${action.closeQty}，剩 ${action.remainingQty}）` };
+    case 'place_tp1_order': {
+      const res = await client.placeOrder(action.order);
+      await persist.setTp1AlgoId(tradeId, res.orderId);
+      return { executed: true, note: `TP1 條件單已送出 algoId=${res.orderId}` };
     }
 
     case 'close_full_position': {

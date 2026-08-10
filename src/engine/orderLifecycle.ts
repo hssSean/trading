@@ -88,28 +88,61 @@ export function decideEntryOrder(input: EntryOrderInput): EntryOrderDecision {
   };
 }
 
-// ── TP1 partial close ──────────────────────────────────────────────────────
+// ── TP1 order placement ─────────────────────────────────────────────────────
 //
-// App-side (blendTp1PartialPnl) already treats TP1 as "50% locked in" for R
-// accounting. This function is what makes that true on the exchange: a
-// reduceOnly MARKET order for TP1_PARTIAL_FRACTION of the current position,
-// immediately once TP1 is confirmed touched.
+// 2026-08-10：原本是「輪詢式」——每輪比較 markPrice 跟 tp1，觸價才即時送
+// MARKET 單。使用者實測發現的真實風險：兩輪之間（15秒）如果價格插針式碰到
+// tp1 又馬上彈回去，下一輪 markPrice 已經不在 tp1 之上，永遠不會再觸發，
+// TP1 部分平倉的機會就真的錯過了。止損能預掛條件單靠交易所盤口即時觸發、
+// 不怕這種插針，止盈沒道理不能一樣處理。
+//
+// 改成「預掛式」：一有止損就順便掛一張 TAKE_PROFIT_MARKET 條件單在交易所，
+// 讓交易所自己的撮合引擎觸發，不再依賴 live-runner 剛好在那個瞬間醒著輪詢。
+// 策略A（分兩階段）用 quantity 指定一半數量 + reduceOnly（不能用
+// closePosition=true，那個只能整倉，做不到「平一半」）；策略B（tp1==tp2，
+// 觸價即整單了結）直接用 closePosition=true，跟止損那張條件單同樣的模式。
+//
+// 呼叫端（tradeBridge.ts）判斷「TP1 是否已經發生」不再看這張條件單還在不
+// 在（消失可能是成交、也可能是被拒絕/取消，無法單靠這個區分），而是比較
+// snapshot.positionQty 跟 trade.entryQty——部位真的變小了才算數，這樣不管
+// 這張條件單的下場如何都能收斂到正確狀態。
 
-export interface Tp1PartialCloseInput {
+export interface Tp1OrderInput {
   tradeId: string;
   symbol: string;
   isLong: boolean;
+  strategy: 'A' | 'B';
   positionQty: number;      // absolute filled quantity currently open (from positionRisk, always positive)
+  tp1: number;
   filters: SymbolFilters;
 }
 
-export type Tp1PartialCloseDecision =
+export type Tp1OrderDecision =
   | { skip: true; reason: string }
-  | { skip: false; order: PlaceOrderParams; closeQty: number; remainingQty: number };
+  | { skip: false; order: PlaceOrderParams };
 
-export function decideTp1PartialClose(input: Tp1PartialCloseInput): Tp1PartialCloseDecision {
+export function decideTp1OrderPlacement(input: Tp1OrderInput): Tp1OrderDecision {
   if (input.positionQty <= 0) {
     return { skip: true, reason: 'positionQty <= 0 — 沒有可平的部位（可能已經平倉，避免對空部位下單）' };
+  }
+
+  const stopPrice = roundToTickSize(input.tp1, input.filters.tickSize);
+  const side = input.isLong ? 'SELL' : 'BUY';
+
+  if (input.strategy === 'B') {
+    // 策略B沒有兩階段 TP，觸價即整單了結——跟止損同一種 closePosition 模式。
+    return {
+      skip: false,
+      order: {
+        symbol: input.symbol,
+        side,
+        type: 'TAKE_PROFIT_MARKET',
+        stopPrice,
+        closePosition: true,
+        // 每筆 trade 只掛一次 TP1 條件單，冪等 ID 避免重試造成重複掛單。
+        newClientOrderId: `${input.tradeId}-tp1order`,
+      },
+    };
   }
 
   // Floor, not round — closing slightly less than 50% is safe (the other half's
@@ -120,27 +153,20 @@ export function decideTp1PartialClose(input: Tp1PartialCloseInput): Tp1PartialCl
   if (closeQty <= 0) {
     return {
       skip: true,
-      reason: `部位量 ${input.positionQty} × ${TP1_PARTIAL_FRACTION} 取整後為 0（stepSize ${input.filters.stepSize} 對這個部位太粗）— 跳過部分平倉，留給 TP2/移動止損處理全部`,
+      reason: `部位量 ${input.positionQty} × ${TP1_PARTIAL_FRACTION} 取整後為 0（stepSize ${input.filters.stepSize} 對這個部位太粗）— 跳過 TP1 條件單，留給移動止損處理全部`,
     };
   }
 
-  const remainingQty = roundToStepSize(input.positionQty - closeQty, input.filters.stepSize);
-
   return {
     skip: false,
-    closeQty,
-    remainingQty,
     order: {
       symbol: input.symbol,
-      side: input.isLong ? 'SELL' : 'BUY',
-      type: 'MARKET',
+      side,
+      type: 'TAKE_PROFIT_MARKET',
+      stopPrice,
       quantity: closeQty,
       reduceOnly: true,
-      // Deterministic, not time-based: a TP1 partial close only ever happens
-      // once per trade, so retrying the same decision (e.g. cron re-evaluating
-      // before the first attempt's result is confirmed) must produce the same
-      // ID and get rejected as a duplicate (-4015) rather than double-close.
-      newClientOrderId: `${input.tradeId}-tp1close`,
+      newClientOrderId: `${input.tradeId}-tp1order`,
     },
   };
 }
