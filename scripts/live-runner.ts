@@ -387,6 +387,50 @@ async function notifyIfNeeded(
   });
 }
 
+// 2026-08-11：實測撞到兩個「善後沒收尾」的問題——①時間止損／到期平倉
+// (close_full_position 送出 MARKET 單) 後，原本掛著的止盈/止損條件單
+// 完全沒被撤銷，殘留在交易所端；使用者截圖看到 BTCUSDT/ZECUSDT/BNBUSDT
+// 都還掛著「市價止盈」，即使部位早就不在了——這些殘留的 reduceOnly 條件
+// 單如果同一個 symbol 之後又開新倉，觸價時會拿新倉位的部位去執行，等於
+// 平白無故被意外減倉。②route.ts 的 tlock:{symbol} 是全站共用的 Redis
+// 鎖（不分使用者），insert 新訊號時 setLock，正常應該在關單時
+// unlockSymbol——但這支從沒實作過對應的解鎖邏輯，route.ts 排除了這個
+// 使用者的 trades 之後（見 excludeLiveUsers），沒有任何一方會釋放這把
+// 鎖，導致 symbol 永遠卡在「持倉中」，即使 live-runner 這邊早就平倉了
+// （使用者截圖：幣種監控清單 BTC/SOL/PUMP 顯示「跳過—持倉中(LONG)」，
+// 但這幾個 symbol 根本沒有真實部位）。
+//
+// 兩個清理動作合併成一個函式，在「這筆 trade 確定結束」的兩個時間點
+// （sync_closed_position 真的平倉過、entry_never_filled 從未成交）都要
+// 呼叫——解鎖不看是不是曾經真的開過倉，只要這筆 trade 的生命週期正式
+// 結束就該放手；撤條件單只有真的開過倉的情況需要（entry_never_filled
+// 從未成交，不會有掛著的條件單）。
+//
+// 撤單/解鎖都是清理性質，失敗只記 log 不中斷——訂單可能已經因為觸發而
+// 自然消失（比如止損被打到才走到這個分支），撤一個不存在的訂單本來就
+// 該失敗，那不是需要处理的錯誤。
+async function cleanupAfterTradeClosed(
+  binance: BinanceFuturesClient, redis: Redis, row: DbTradeRow, cancelOrders: boolean,
+): Promise<void> {
+  if (cancelOrders) {
+    for (const algoId of [row.exchange_stop_algo_id, row.exchange_tp1_algo_id]) {
+      if (algoId === null) continue;
+      try {
+        await binance.cancelOrder(row.symbol, algoId, true);
+      } catch (e) {
+        console.error(`[cleanup] ${row.symbol} 撤條件單 algoId=${algoId} 失敗(可能已觸發/已撤銷,可忽略): ${String(e).slice(0, 120)}`);
+      }
+    }
+  }
+  try {
+    const key = `tlock:${row.symbol}`;
+    const entry = await redis.get<{ sentAt: number; candleBucket: number; direction: string; locked: boolean }>(key);
+    if (entry) await redis.set(key, { ...entry, locked: false }, { ex: 24 * 3600 });
+  } catch (e) {
+    console.error(`[cleanup] ${row.symbol} 解鎖 tlock 失敗: ${String(e).slice(0, 120)}`);
+  }
+}
+
 // 不管 kill switch 有沒有啟動、這輪有沒有真的做任何動作，只要 process
 // 還活著就要回報心跳——kill switch 啟動中不代表「process 死了」，這兩件
 // 事不能混在一起判斷，不然 route.ts 會在 kill switch 啟動期間誤判成
@@ -569,6 +613,12 @@ async function runCycle(
       if (result.executed) {
         console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
         await notifyIfNeeded(userId, row, action, snapshot.currentStop?.triggerPrice ?? null);
+        // 這筆 trade 生命週期正式結束——見 cleanupAfterTradeClosed 頂部
+        // 說明：撤殘留條件單 + 解 Redis symbol 鎖，避免使用者實測撞到的
+        // 「幣安端還掛著止盈單」「App 誤判持倉中」這兩個善後缺口重演。
+        if (action.kind === 'sync_closed_position' || action.kind === 'entry_never_filled') {
+          await cleanupAfterTradeClosed(binance, redis, row, action.kind === 'sync_closed_position');
+        }
       }
       // hold/wait_for_fill 這類 no-op 不印，避免每輪洗版；needs_reconcile 值得看見。
       else if (action.kind === 'needs_reconcile' || action.kind === 'skip_entry') {
