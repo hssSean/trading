@@ -210,7 +210,17 @@ export const useStore = create<StoreState>()(
           trades: s.trades.map((t) =>
             t.id !== id || t.closedAt
               ? t
-              : { ...t, result, exitPrice, pnlPercent, closedAt, ...(closeReason ? { closeReason } : {}) },
+              // 2026-08-12：status 沒有跟著清掉——一筆 'waiting' 掛單如果從沒
+              // 成交就被伺服器取消（entry_never_filled/cancel_expired 等），
+              // 中間不會經過 markTp1Watching 那種會順便改 status 的路徑，
+              // 這裡是它唯一一次被伺服器判定終局的機會。之前只寫 result/
+              // closedAt，沒動 status，讓它繼續停在 'waiting'——trades/page.tsx
+              // 的 isWaiting 純看 status 決定要不要顯示「等待進場」卡片，
+              // 已經 finalize 完的單因此永遠卡在畫面上（實測撞到：SOLUSDT
+              // 推薦單失效超過一天，卡片仍顯示「等待伺服器確認成交」）。
+              // isFinallyClosed 本身沒事（它看 closedAt），但畫面渲染的分桶
+              // 邏輯只認 status，兩者不同步就會卡住。
+              : { ...t, result, exitPrice, pnlPercent, closedAt, status: undefined, ...(closeReason ? { closeReason } : {}) },
           ),
         })),
 

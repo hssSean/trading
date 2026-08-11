@@ -68,3 +68,46 @@ describe('closeTrade', () => {
     expect(t.closedAt).toBeTypeOf('number');
   });
 });
+
+describe('finalizeFromServer', () => {
+  // 2026-08-12: a 'waiting' entry that never fills goes straight from waiting to
+  // server-cancelled — it never passes through markTp1Watching (the only other
+  // action that touches `status`), so finalizeFromServer is its one chance to
+  // clear the stale 'waiting' flag. Without this, trades/page.tsx's isWaiting
+  // check (which reads status, not result/closedAt) keeps rendering the card
+  // as still-pending forever, even though isFinallyClosed correctly says it's done.
+  it('clears status so a never-filled waiting order stops rendering as pending', () => {
+    useStore.setState({ trades: [trade({ status: 'waiting' })] });
+
+    useStore.getState().finalizeFromServer('t1', 'CANCELLED', 100, 0, 12345, 'cancel_expired');
+
+    const t = useStore.getState().trades[0];
+    expect(t.status).toBeUndefined();
+    expect(t.result).toBe('CANCELLED');
+    expect(t.closedAt).toBe(12345);
+  });
+
+  it('also clears status for a tp1-watching trade finalized to its real result', () => {
+    useStore.setState({
+      trades: [trade({ status: 'tp1_hit', result: 'WIN_TP1', exitPrice: 110, pnlPercent: 10 })],
+    });
+
+    useStore.getState().finalizeFromServer('t1', 'WIN_TP2', 120, 20, 99999);
+
+    const t = useStore.getState().trades[0];
+    expect(t.status).toBeUndefined();
+    expect(t.result).toBe('WIN_TP2');
+  });
+
+  it('skips a trade that is already truly closed (idempotent, does not touch status)', () => {
+    useStore.setState({
+      trades: [trade({ status: 'waiting', result: 'CANCELLED', closedAt: 555 })],
+    });
+
+    useStore.getState().finalizeFromServer('t1', 'CANCELLED', 100, 0, 999);
+
+    const t = useStore.getState().trades[0];
+    expect(t.closedAt).toBe(555); // untouched
+    expect(t.status).toBe('waiting'); // untouched — already-closed guard short-circuits
+  });
+});
