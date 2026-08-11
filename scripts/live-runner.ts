@@ -59,9 +59,10 @@ import { reconcilePositionsAndOrders } from '../src/engine/watchdog';
 import { findMarginBracket } from '../src/engine/liquidation';
 import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
 import {
-  decideTradeAction, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
+  decideTradeAction, deriveLiveCloseReason, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
 } from '../src/engine/tradeBridge';
 import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
+import { TimeStopCloseReason } from '../src/engine/timeStop';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
 import { calcSimpleAtr, TP1_PARTIAL_FRACTION, updateMfeMae } from '../src/lib/monitorMath';
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
@@ -89,6 +90,10 @@ const HEARTBEAT_TTL_SEC = 90;
 //   -1121 Invalid symbol（symbol 打錯或這個交易對根本不存在）
 const NON_RETRYABLE_BINANCE_CODES = new Set([-4141, -1121]);
 
+// finalizeClosed 用來判斷 row.close_reason 是不是 markForceCloseReason 先寫
+// 進去的合法 pending 值（見該函式說明），不是隨便什麼字串都當真。
+const PENDING_CLOSE_REASONS = new Set<string>(['time_stop_stall', 'time_stop_expiry', 'time_stop_expiry_post_tp1']);
+
 function nowStr(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
@@ -113,6 +118,7 @@ interface DbTradeRow {
   exchange_tp1_algo_id: number | null;
   mfe_price: number | null;
   mae_price: number | null;
+  close_reason: string | null;
 }
 
 const VALID_TIMEFRAMES = new Set(['5m', '15m', '1h', '4h', '1d']);
@@ -170,14 +176,28 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
       const pnlPercent = row.direction === 'LONG'
         ? (result.exitPrice - row.entry) / row.entry * 100
         : (row.entry - result.exitPrice) / row.entry * 100;
+      // 2026-08-12：close_reason 原本無論如何都硬寫 'live_auto_sync'，看不出
+      // 真倉是被止損掃到還是時間止損強制平倉——row.close_reason 如果已經是
+      // markForceCloseReason 先寫進去的 pending 值，代表是我們自己主動關的，
+      // 直接採用；不是的話（包含舊資料殘留的非預期字串，防呆用 Set 檢查）
+      // 才退回 deriveLiveCloseReason 用既有事實（策略/輸贏）推論，見
+      // tradeBridge.ts 該函式的說明——不是用出場價猜。
+      const pending = row.close_reason !== null && PENDING_CLOSE_REASONS.has(row.close_reason)
+        ? row.close_reason as TimeStopCloseReason
+        : null;
+      const closeReason = deriveLiveCloseReason({ pendingCloseReason: pending, strategy: row.strategy === 'B' ? 'B' : 'A', result: result.result });
       const { error } = await supabase.from('trades').update({
         result: result.result,
         exit_price: result.exitPrice,
         pnl_percent: parseFloat(pnlPercent.toFixed(2)),
         closed_at: Date.now(),
-        close_reason: 'live_auto_sync',
+        close_reason: closeReason,
       }).eq('id', tradeId);
       logErr('finalizeClosed', error);
+    },
+    async markForceCloseReason(tradeId, reason) {
+      const { error } = await supabase.from('trades').update({ close_reason: reason }).eq('id', tradeId);
+      logErr('markForceCloseReason', error);
     },
     async markEntryNeverFilled(tradeId) {
       // 進場單消失但查無任何成交紀錄——從未真的開過倉，result 用
@@ -494,7 +514,7 @@ async function runCycle(
 
   const { data: rows, error } = await supabase
     .from('trades')
-    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price')
+    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price,close_reason')
     .eq('user_id', userId)
     .is('closed_at', null);
 

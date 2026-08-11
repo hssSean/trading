@@ -8,6 +8,7 @@
 
 import { PlaceOrderParams } from './binanceClient';
 import { TradeAction } from './tradeBridge';
+import { TimeStopCloseReason } from './timeStop';
 
 export interface TradeExecutorClient {
   placeOrder(params: PlaceOrderParams): Promise<{ orderId: number; clientOrderId: string; status: string }>;
@@ -42,6 +43,11 @@ export interface TradePersistence {
   // 首次確認成交那一刻順便記），呼叫點在 live-runner 主迴圈的自我修復，
   // 不在這個檔案裡。
   setEntryQty(tradeId: string, entryQty: number): Promise<void>;
+  // 2026-08-12：我們自己主動送出 close_full_position（時間止損/盤整停滯）
+  // 時，先把原因寫回 DB——下一輪部位真的歸零、sync_closed_position 對帳
+  // 時直接讀這個當 close_reason，不用事後從出場價猜（deriveLiveCloseReason
+  // 見 tradeBridge.ts 說明）。
+  markForceCloseReason(tradeId: string, reason: TimeStopCloseReason): Promise<void>;
 }
 
 export interface ExecutionResult {
@@ -85,7 +91,9 @@ export async function executeTradeAction(
       await client.placeOrder(action.order);
       // 不在這裡寫最終結果——MARKET 單的 ACK 回應不保證帶精確成交價，下一輪
       // decideTradeAction 會偵測到 positionQty=0，走 sync_closed_position
-      // 那條用真實 getUserTrades 資料的路徑，比這裡猜測更可靠。
+      // 那條用真實 getUserTrades 資料的路徑，比這裡猜測更可靠。但「為什麼
+      // 關」這個事實現在就確定了，先記下來，等對帳那一刻直接採用。
+      await persist.markForceCloseReason(tradeId, action.closeReason);
       return { executed: true, note: '整單平倉已送出（下一輪會對帳確認最終結果）' };
     }
 

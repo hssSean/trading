@@ -13,8 +13,9 @@ import {
   decideTp1OrderPlacement, decideTrailingStopReplace,
 } from './orderLifecycle';
 import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
-import { decideTimeStop, tfBarMinutes, TimeStopTimeframe } from './timeStop';
+import { decideTimeStop, tfBarMinutes, TimeStopCloseReason, TimeStopTimeframe } from './timeStop';
 import { MAX_TOTAL_RISK_PCT } from '@/lib/position';
+import { CloseReason } from '@/lib/monitorMath';
 
 // 2026-08-11：實測撞到——SOLUSDT 掛單等了 15 小時 28 分還沒成交，Redis
 // 的 tlock 因此正確地一直卡著（避免同個 symbol 被重複追蹤），但表面上
@@ -56,6 +57,31 @@ export function summarizeClosingTrades(trades: UserTrade[]): ClosingTradesSummar
     totalRealizedPnl,
     totalCommission,
   };
+}
+
+// 2026-08-12：真倉關單原因細分——之前 sync_closed_position 刻意只做贏/輸
+// 二元判斷（見下方該 action 產生處的長註解），理由是「多筆分批出場的加權
+// 均價無法可靠反推是哪個關卡觸發的，硬猜會汙染統計」（8/6 tier `?? 'A'`
+// 就是這樣出包的）。這裡不是猜——用的是三個已知事實，不是從出場價反推：
+//   1. pendingCloseReason：如果是我們自己主動送出的 close_full_position
+//      （時間止損/盤整停滯），執行時就已經把原因寫回 DB 了，這裡直接讀，
+//      不用猜。
+//   2. strategy：DB 裡本來就有，不是猜的。
+// 只有這兩個事實都用不上（沒有 pendingCloseReason、純粹二元輸贏）時才做
+// 最保守的推論：LOSS 一定是原始止損觸發（真倉沒有「先浮盈又跌回止損」
+// 這種模糊地帶，止損就是止損）；WIN 則依策略區分——策略B的TP條件單本來
+// 就是整單觸發（tp1===tp2），策略A能走到這條「positionQty 歸零」路徑的
+// WIN，只可能是 TP1 已經部分平倉（不然部位不會變成 0）、剩餘部位被移動
+// 止損收掉，不需要另外查 tp1_hit 狀態才知道。
+export function deriveLiveCloseReason(params: {
+  pendingCloseReason: TimeStopCloseReason | null;
+  strategy: 'A' | 'B';
+  result: 'WIN_TP1' | 'LOSS';
+}): CloseReason {
+  const { pendingCloseReason, strategy, result } = params;
+  if (pendingCloseReason) return pendingCloseReason;
+  if (result === 'LOSS') return 'stop_loss';
+  return strategy === 'B' ? 'tp2' : 'trailing_stop';
 }
 
 export interface BridgeTradeRow {
@@ -119,7 +145,12 @@ export type TradeAction =
   | { kind: 'sync_closed_position'; avgExitPrice: number; realizedPnl: number; result: 'WIN_TP1' | 'LOSS' }
   | { kind: 'place_initial_stop'; order: PlaceOrderParams }
   | { kind: 'place_tp1_order'; order: PlaceOrderParams }
-  | { kind: 'close_full_position'; order: PlaceOrderParams }
+  // 2026-08-12：closeReason 帶著「我們為什麼主動關這筆倉」的第一手事實
+  // （時間止損/盤整停滯的哪一種），不是事後用出場價/損益猜的——執行層
+  // 會把它先寫回 trades.close_reason，下一輪 sync_closed_position 對帳到
+  // 真正關倉時直接採用，不用重新推斷。跟下面 sync_closed_position 註解
+  // 說的「不猜」原則一致：這裡不是猜，是記錄我們自己剛做的決定。
+  | { kind: 'close_full_position'; order: PlaceOrderParams; closeReason: TimeStopCloseReason }
   | { kind: 'update_trailing_stop'; place: PlaceOrderParams; cancelOrderId?: number }
   | { kind: 'entry_never_filled'; reason: string }
   | { kind: 'hold'; reason: string };
@@ -146,7 +177,7 @@ function holdOrTimeStop(
         tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong, positionQty: snapshot.positionQty,
       });
       if (!closeDecision.skip) {
-        return { kind: 'close_full_position', order: closeDecision.order };
+        return { kind: 'close_full_position', order: closeDecision.order, closeReason: timeStop.closeReason };
       }
     }
   }

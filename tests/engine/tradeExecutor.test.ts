@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../../src/engine/tradeExecutor';
 import { PlaceOrderParams } from '../../src/engine/binanceClient';
 import { TradeAction } from '../../src/engine/tradeBridge';
+import { TimeStopCloseReason } from '../../src/engine/timeStop';
 
 // 跟 runner.test.ts 同一套風格：in-memory fake，記錄呼叫順序/參數，
 // 沒有真的網路或 DB。
@@ -29,6 +30,7 @@ class FakePersist implements TradePersistence {
   neverFilledCalls: string[] = [];
   filledCalls: Array<{ tradeId: string; filledAt: number }> = [];
   entryQtyCalls: Array<{ tradeId: string; entryQty: number }> = [];
+  forceCloseReasonCalls: Array<{ tradeId: string; reason: TimeStopCloseReason }> = [];
 
   async setEntryOrderId(tradeId: string, orderId: number) { this.entryOrderIds.push({ tradeId, orderId }); }
   async setStopAlgoId(tradeId: string, algoId: number) { this.stopAlgoIds.push({ tradeId, algoId }); }
@@ -38,6 +40,7 @@ class FakePersist implements TradePersistence {
   async finalizeClosed(tradeId: string, result: unknown) { this.finalizeCalls.push({ tradeId, result }); }
   async markEntryNeverFilled(tradeId: string) { this.neverFilledCalls.push(tradeId); }
   async setEntryQty(tradeId: string, entryQty: number) { this.entryQtyCalls.push({ tradeId, entryQty }); }
+  async markForceCloseReason(tradeId: string, reason: TimeStopCloseReason) { this.forceCloseReasonCalls.push({ tradeId, reason }); }
 }
 
 const order: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 0.01, price: 65000 };
@@ -102,12 +105,23 @@ describe('executeTradeAction — close_full_position', () => {
     const client = new FakeClient();
     const persist = new FakePersist();
     const closeOrder: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.01, reduceOnly: true };
-    const action: TradeAction = { kind: 'close_full_position', order: closeOrder };
+    const action: TradeAction = { kind: 'close_full_position', order: closeOrder, closeReason: 'time_stop_stall' };
 
     await executeTradeAction(client, persist, 'trade-1', action);
 
     expect(client.placeOrderCalls).toEqual([closeOrder]);
     expect(persist.finalizeCalls).toEqual([]); // 刻意不寫，交給下一輪 sync_closed_position
+  });
+
+  it('records why we forced the close, so sync_closed_position can use it instead of guessing later', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    const closeOrder: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.01, reduceOnly: true };
+    const action: TradeAction = { kind: 'close_full_position', order: closeOrder, closeReason: 'time_stop_expiry_post_tp1' };
+
+    await executeTradeAction(client, persist, 'trade-1', action);
+
+    expect(persist.forceCloseReasonCalls).toEqual([{ tradeId: 'trade-1', reason: 'time_stop_expiry_post_tp1' }]);
   });
 });
 

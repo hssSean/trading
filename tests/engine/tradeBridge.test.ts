@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  decideTradeAction, summarizeClosingTrades,
+  decideTradeAction, summarizeClosingTrades, deriveLiveCloseReason,
   BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput,
 } from '../../src/engine/tradeBridge';
 import { UserTrade } from '../../src/engine/binanceClient';
@@ -346,5 +346,85 @@ describe('decideTradeAction — strategy A trailing stop after TP1', () => {
       risk(),
     );
     expect(a.kind).toBe('place_tp1_order'); // 沒把 entryQty=null 誤判成「已經 TP1」
+  });
+});
+
+describe('decideTradeAction — time stop forces a close_full_position with the real reason attached', () => {
+  it('fires stall (progress stuck near breakeven for 8+ bars, pre-TP1)', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, filledAt: 0, exchangeTp1AlgoId: 333, entryQty: 0.01 }),
+      snapshot({
+        positionQty: 0.01, // 還沒 TP1
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+        markPrice: 65100, // progress = 0.1R，卡在 -0.3~0.3 之間
+        now: 8.5 * 3600_000, // 8.5 小時 = 8.5 根 1h K 線，超過 8 根門檻
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('close_full_position');
+    if (a.kind !== 'close_full_position') return;
+    expect(a.closeReason).toBe('time_stop_stall');
+  });
+
+  it('fires expiry (24h age limit, pre-TP1, progress not stuck)', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, filledAt: 0, exchangeTp1AlgoId: 333, entryQty: 0.01 }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+        markPrice: 65600, // progress = 0.6R，不在停滯區間，不會被 stall 攔截
+        now: 25 * 3600_000, // 25 小時，超過 intraday 24h 上限
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('close_full_position');
+    if (a.kind !== 'close_full_position') return;
+    expect(a.closeReason).toBe('time_stop_expiry');
+  });
+
+  it('fires expiry_post_tp1 (24h age limit reached after TP1 already happened)', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, filledAt: 0, exchangeTp1AlgoId: 333, entryQty: 0.01 }),
+      snapshot({
+        positionQty: 0.005, // < entryQty * 0.99 → TP1 已發生
+        currentStop: { algoId: 222, triggerPrice: 66000 },
+        markPrice: 66500,
+        now: 25 * 3600_000,
+        // atr1h 未提供 → 不會走移動止損分支，直接落到 holdOrTimeStop
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('close_full_position');
+    if (a.kind !== 'close_full_position') return;
+    expect(a.closeReason).toBe('time_stop_expiry_post_tp1');
+  });
+});
+
+describe('deriveLiveCloseReason', () => {
+  it('trusts our own pending reason when we forced the close ourselves — no guessing', () => {
+    expect(deriveLiveCloseReason({
+      pendingCloseReason: 'time_stop_stall', strategy: 'A', result: 'LOSS',
+    })).toBe('time_stop_stall');
+    expect(deriveLiveCloseReason({
+      pendingCloseReason: 'time_stop_expiry_post_tp1', strategy: 'A', result: 'WIN_TP1',
+    })).toBe('time_stop_expiry_post_tp1');
+  });
+
+  it('falls back to stop_loss for a LOSS with no pending reason — the exchange stopped us out', () => {
+    expect(deriveLiveCloseReason({
+      pendingCloseReason: null, strategy: 'A', result: 'LOSS',
+    })).toBe('stop_loss');
+  });
+
+  it('falls back to tp2 for a strategy B WIN — its take-profit is a single full-close target', () => {
+    expect(deriveLiveCloseReason({
+      pendingCloseReason: null, strategy: 'B', result: 'WIN_TP1',
+    })).toBe('tp2');
+  });
+
+  it('falls back to trailing_stop for a strategy A WIN — position could only hit zero after TP1 partial-filled', () => {
+    expect(deriveLiveCloseReason({
+      pendingCloseReason: null, strategy: 'A', result: 'WIN_TP1',
+    })).toBe('trailing_stop');
   });
 });

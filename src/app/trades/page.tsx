@@ -43,11 +43,11 @@ const CLOSE_REASON_LABEL: Record<string, string> = {
   cancel_tp1_direct:         '直達TP1未成交',
   cancel_thesis_invalidated: '結構失效未成交',
   manual:                    '手動平倉',
-  // 2026-08-08：live-runner 真倉自動同步——tradeExecutor.ts 對帳時只能用
-  // 真實 realizedPnl 正負號分 WIN_TP1/LOSS，反推不出是踩到 TP2 還是移動
-  // 止損收尾，用這個值標記「這筆是真倉自動判定，不是精確分類」，跟 DB
-  // 模擬版的其他 close_reason 區分開來。
-  live_auto_sync:            '真倉自動同步（贏/輸粗分類）',
+  // 2026-08-08：live-runner 真倉自動同步當時只能用 realizedPnl 正負號分
+  // WIN_TP1/LOSS，反推不出詳細原因。2026-08-12 起 finalizeClosed 改用
+  // deriveLiveCloseReason 細分（time_stop_*／stop_loss／trailing_stop／
+  // tp2，見 tradeBridge.ts），這個值只留給該修復之前寫入的舊資料顯示用。
+  live_auto_sync:            '真倉自動同步（贏/輸粗分類，舊資料）',
   // 2026-08-09：live-runner 下單前不知道 symbol 在交易所那端目前是不是
   // 真的能下單——實測 MMTUSDT 在 demo trading 撞到幣安 -4141（該交易對
   // 目前關閉），下單當下才會發現，不是我方邏輯能提前判斷的。
