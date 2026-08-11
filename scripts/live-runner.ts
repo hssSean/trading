@@ -409,8 +409,17 @@ async function notifyIfNeeded(
 // 撤單/解鎖都是清理性質，失敗只記 log 不中斷——訂單可能已經因為觸發而
 // 自然消失（比如止損被打到才走到這個分支），撤一個不存在的訂單本來就
 // 該失敗，那不是需要处理的錯誤。
+//
+// 2026-08-11：同一輪順手補上另一個對照 route.ts 才發現的遺漏——
+// route.ts 的 Phase 2（LOSS 結果或時間止損觸發）都會 setLossCooldown
+// （同 symbol+方向 24 小時內不再進場，避免連續在同一個爛 setup 上重複
+// 虧損），但這支真倉止損出場後從沒做過這件事。route.ts 的新訊號產生
+// 流程本來就會查 loss_cd:{symbol}:{direction} 這個 key（isOnLossCooldown），
+// 只要這裡把 key 寫進去，下一次 route.ts 想對這個 symbol/方向重新出訊號
+// 就會被正確擋下——不需要 live-runner 自己也去檢查這個 key（它從不主動
+// 產生新訊號，只執行 DB 裡已經有的 trade）。
 async function cleanupAfterTradeClosed(
-  binance: BinanceFuturesClient, redis: Redis, row: DbTradeRow, cancelOrders: boolean,
+  binance: BinanceFuturesClient, redis: Redis, row: DbTradeRow, cancelOrders: boolean, lossResult: boolean,
 ): Promise<void> {
   if (cancelOrders) {
     for (const algoId of [row.exchange_stop_algo_id, row.exchange_tp1_algo_id]) {
@@ -428,6 +437,13 @@ async function cleanupAfterTradeClosed(
     if (entry) await redis.set(key, { ...entry, locked: false }, { ex: 24 * 3600 });
   } catch (e) {
     console.error(`[cleanup] ${row.symbol} 解鎖 tlock 失敗: ${String(e).slice(0, 120)}`);
+  }
+  if (lossResult) {
+    try {
+      await redis.set(`loss_cd:${row.symbol}:${row.direction}`, '1', { ex: 24 * 3600 });
+    } catch (e) {
+      console.error(`[cleanup] ${row.symbol} setLossCooldown 失敗: ${String(e).slice(0, 120)}`);
+    }
   }
 }
 
@@ -617,7 +633,11 @@ async function runCycle(
         // 說明：撤殘留條件單 + 解 Redis symbol 鎖，避免使用者實測撞到的
         // 「幣安端還掛著止盈單」「App 誤判持倉中」這兩個善後缺口重演。
         if (action.kind === 'sync_closed_position' || action.kind === 'entry_never_filled') {
-          await cleanupAfterTradeClosed(binance, redis, row, action.kind === 'sync_closed_position');
+          await cleanupAfterTradeClosed(
+            binance, redis, row,
+            action.kind === 'sync_closed_position',
+            action.kind === 'sync_closed_position' && action.result === 'LOSS',
+          );
         }
       }
       // hold/wait_for_fill 這類 no-op 不印，避免每輪洗版；needs_reconcile 值得看見。
