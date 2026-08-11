@@ -36,6 +36,7 @@ interface AttributionResponse {
   extensionAtrBuckets?: BucketStat[];
   tagStats?: Record<string, TagStat>;
   byRegime?: Record<string, TagStat>;
+  confidenceBuckets?: BucketStat[];
   sampleSize?: { total: number; withBreakdown: number };
 }
 
@@ -252,6 +253,34 @@ export default function AttributionPage() {
                     </div>
                     <p className="text-[#565E6B] text-[10px]">
                       「高延伸」桶R值明顯較差 = 訊號常常在行情已經走過頭時才觸發，追高/追低進場
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[#3A424E] text-[9px] uppercase font-bold tracking-widest mb-1.5 px-0.5">
+                Confidence分數(0-100,目前純顯示不擋單) vs 結果
+              </p>
+              <div className="bg-[#0D0D16] border border-[#1B222B] rounded-xl p-3">
+                {(data.confidenceBuckets ?? []).length === 0 ? (
+                  <p className="text-[#565E6B] text-[10px]">樣本不足,無法分桶</p>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-3 gap-2 num mb-1.5">
+                      {(data.confidenceBuckets ?? []).map(b => (
+                        <div key={b.bucket} className="bg-[#141A21] rounded-lg px-2 py-1.5">
+                          <p className="text-[#5A7A8A] text-[9px] mb-0.5">{b.bucket}confidence · {b.count}筆</p>
+                          <p className="text-[#E8ECF1] text-[11px]">{b.winRate}% 勝率</p>
+                          <p className={`text-[11px] ${b.avgR >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+                            {b.avgR >= 0 ? '+' : ''}{b.avgR}R/筆
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[#565E6B] text-[10px]">
+                      「低」桶明顯較差 = confidence 有資格當第二層濾網；沒差 = 目前不擋單是對的，別急著加門檻
                     </p>
                   </>
                 )}

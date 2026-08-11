@@ -182,3 +182,28 @@ describe('analyzeScoreAttribution — extensionAtrBuckets', () => {
     expect(totalCount).toBe(3); // the one without extensionAtr is excluded
   });
 });
+
+describe('analyzeScoreAttribution — confidenceBuckets', () => {
+  it('only includes trades where confidence is defined — confidence is a top-level field, not inside scoreBreakdown', () => {
+    const trades = [
+      trade({ confidence: null }),
+      trade({ confidence: 50 }),
+      trade({ confidence: 65 }),
+      trade({ confidence: 80 }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    const totalCount = r.confidenceBuckets.reduce((s, b) => s + b.count, 0);
+    expect(totalCount).toBe(3); // the null one is excluded
+  });
+
+  it('does not require scoreBreakdown to be present', () => {
+    const trades = [
+      trade({ confidence: 50, scoreBreakdown: null }),
+      trade({ confidence: 60, scoreBreakdown: null }),
+      trade({ confidence: 70, scoreBreakdown: null }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    const totalCount = r.confidenceBuckets.reduce((s, b) => s + b.count, 0);
+    expect(totalCount).toBe(3);
+  });
+});

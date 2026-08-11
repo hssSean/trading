@@ -40,6 +40,15 @@ export interface AttributionTrade {
   // （route.ts insertData 的 regime 欄位），只是從沒被拿來做歸因分析過
   // ——不需要等新資料，用既有歷史資料就能驗證這個假說。
   regime?: string | null;
+  // 2026-08-11：使用者回報「今天推幾單成交幾單就止損幾單」，查證發現
+  // 3 筆真倉成交裡有 2 筆 confidence 剛好卡在 50（computeConfidence 的
+  // 基礎分，代表 ADX 強度/多框架確認/放量都沒有額外加分）。confidence
+  // 從 2026-08-04 就存在、也一直寫進 DB，但從沒真的影響過放不放行
+  // （route.ts 頂部註解自己也承認：「does NOT affect the
+  // STRONG_THRESHOLD gate yet」）。這裡先加進歸因分析，看
+  // confidence 分數高低跟結果有沒有關聯——有的話，之後才有數據支撐可以
+  // 考慮拿來當第二層濾網，現在還不到能下結論的時候。
+  confidence?: number | null;
 }
 
 const FACTOR_GROUPS = ['trend', 'momentum', 'structure', 'volume', 'priceAction'] as const;
@@ -151,6 +160,12 @@ export interface AttributionResult {
   // 這個假說：如果 trending 的表現本身沒有隨時間變差，代表 regime 判斷
   // 機制運作正常，問題在別的地方，不該去調 ADX 門檻。
   byRegime: Record<string, { count: number; winRate: number; avgR: number }>;
+  // 2026-08-11——confidence（computeConfidence 算出的 0-100 分，目前純
+  // 顯示不影響放行）切三桶。使用者實測：今天 3 筆真倉成交裡 2 筆
+  // confidence 卡在基礎分 50（沒有 ADX 強度/多框架確認/放量任何加分）
+  // 就全部止損。看「低」桶表現是不是真的比較差，決定 confidence 未來
+  // 有沒有資格當第二層濾網——現在樣本還太少，先建好分析維度。
+  confidenceBuckets: BucketStat[];
   sampleSize: { total: number; withBreakdown: number };
 }
 
@@ -199,12 +214,16 @@ export function analyzeScoreAttribution(trades: AttributionTrade[]): Attribution
     byRegime[regime] = { count: s.count, winRate: s.winRate, avgR: s.avgR };
   }
 
+  const withConfidence = trades.filter(t => t.confidence !== null && t.confidence !== undefined);
+  const confidenceBuckets = bucketStats(withConfidence, t => t.confidence!);
+
   return {
     byFactorBucket,
     factorGroupByDirection,
     extensionAtrBuckets,
     tagStats,
     byRegime,
+    confidenceBuckets,
     sampleSize: { total: trades.length, withBreakdown: withBreakdown.length },
   };
 }

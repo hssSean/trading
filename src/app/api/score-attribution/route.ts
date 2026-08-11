@@ -35,6 +35,7 @@ interface TradeRow {
   stop_loss: number;
   score_breakdown: AttributionTrade['scoreBreakdown'] | null;
   regime: string | null;
+  confidence: number | null;
 }
 
 export async function GET(req: NextRequest) {
@@ -53,7 +54,7 @@ export async function GET(req: NextRequest) {
     // （closed_at 不為 null）——還開著的部位沒有 R 可算。
     const { data, error } = await admin
       .from('trades')
-      .select('direction, result, pnl_percent, entry, stop_loss, score_breakdown, regime')
+      .select('direction, result, pnl_percent, entry, stop_loss, score_breakdown, regime, confidence')
       .eq('user_id', userId)
       .not('closed_at', 'is', null);
 
@@ -69,6 +70,7 @@ export async function GET(req: NextRequest) {
       stopLoss: r.stop_loss,
       scoreBreakdown: r.score_breakdown,
       regime: r.regime,
+      confidence: r.confidence,
     }));
 
     const result = analyzeScoreAttribution(trades);
