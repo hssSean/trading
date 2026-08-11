@@ -671,7 +671,18 @@ async function runCycle(
           }
         }
         try {
-          await binance.setLeverage(row.symbol, risk.leverage);
+          // 2026-08-12 實測撞到：risk.leverage 是 calcPositionPlan 算出來的
+          // 倉位試算值，刻意留 1 位小數給使用者看（position.ts:31「槓桿, 1
+          // decimal」），從來不是給交易所下單用的整數——幣安 /fapi/v1/leverage
+          // 要求整數，送 7.6 這種小數會被拒絕（-1102 "was not sent, was
+          // empty/null, or malformed"，這個錯誤訊息容易誤導成「沒送出去」，
+          // 其實是型別不符）。無條件進位（不是四捨五入）：幣安這個設定是
+          // 「上限」不是「強制值」，實際使用的槓桿由下單時的保證金/數量決定
+          // 可以 ≤ 這個上限，進位到比試算值大的整數安全，捨去反而可能讓上限
+          // 卡在試算值以下。maxLev 在 calcPositionPlan 裡已經是整數上限，
+          // ceil 後不會超過它。
+          const leverageInt = Math.ceil(risk.leverage);
+          await binance.setLeverage(row.symbol, leverageInt);
         } catch (e) {
           console.error(`[${nowStr()}] ${row.symbol} setLeverage(${risk.leverage}) 失敗，這輪跳過進場: ${describeError(e)}`);
           continue;
