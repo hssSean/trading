@@ -128,6 +128,7 @@ function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
     // （route.ts tfBarMinutes 的 default 分支同一個處理方式，不是另外發明的）。
     timeframe: (VALID_TIMEFRAMES.has(row.timeframe ?? '') ? row.timeframe : '1h') as BridgeTradeRow['timeframe'],
     filledAt: row.filled_at ?? row.opened_at ?? null,
+    openedAt: row.opened_at,
     entryQty: row.entry_qty,
     exchangeEntryOrderId: row.exchange_entry_order_id,
     exchangeStopAlgoId: row.exchange_stop_algo_id,
@@ -632,7 +633,12 @@ async function runCycle(
         // 這筆 trade 生命週期正式結束——見 cleanupAfterTradeClosed 頂部
         // 說明：撤殘留條件單 + 解 Redis symbol 鎖，避免使用者實測撞到的
         // 「幣安端還掛著止盈單」「App 誤判持倉中」這兩個善後缺口重演。
-        if (action.kind === 'sync_closed_position' || action.kind === 'entry_never_filled') {
+        // cancel_stale_entry（掛單過期主動撤單）跟 entry_never_filled
+        // 同一個語意——從未真的開過倉，一併觸發清理。
+        if (
+          action.kind === 'sync_closed_position' || action.kind === 'entry_never_filled'
+          || action.kind === 'cancel_stale_entry'
+        ) {
           await cleanupAfterTradeClosed(
             binance, redis, row,
             action.kind === 'sync_closed_position',

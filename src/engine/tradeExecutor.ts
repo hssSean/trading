@@ -113,6 +113,16 @@ export async function executeTradeAction(
       return { executed: true, note: action.reason };
     }
 
+    case 'cancel_stale_entry': {
+      // LIMIT 進場單掛太久沒成交，主動撤——isAlgoOrder=false，這是一般
+      // /fapi/v1/order 端點的單，不是條件單（跟 place_initial_stop 用的
+      // algoOrder 端點不一樣）。撤成功後跟 entry_never_filled 同一個語意：
+      // 從未真的開過倉，複用同一個 persist 方法，不新增一個。
+      await client.cancelOrder(action.symbol, action.orderId, false);
+      await persist.markEntryNeverFilled(tradeId);
+      return { executed: true, note: action.reason };
+    }
+
     // skip_entry / wait_for_fill / needs_reconcile / hold：沒有動作要執行，
     // reason 已經說明原因，呼叫端可以直接記錄下來，不用另外處理。
     default:

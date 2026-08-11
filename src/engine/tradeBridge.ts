@@ -13,8 +13,19 @@ import {
   decideTp1OrderPlacement, decideTrailingStopReplace,
 } from './orderLifecycle';
 import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
-import { decideTimeStop, TimeStopTimeframe } from './timeStop';
+import { decideTimeStop, tfBarMinutes, TimeStopTimeframe } from './timeStop';
 import { MAX_TOTAL_RISK_PCT } from '@/lib/position';
+
+// 2026-08-11：實測撞到——SOLUSDT 掛單等了 15 小時 28 分還沒成交，Redis
+// 的 tlock 因此正確地一直卡著（避免同個 symbol 被重複追蹤），但表面上
+// 使用者看到的是「跳過—持倉中」，誤以為是鎖沒釋放的 bug，其實根因更早：
+// decideTradeAction 第 2 步（wait_for_fill）從沒判斷過「這張 LIMIT 進場
+// 單本身是不是已經掛太久了」，route.ts 的 DB 模擬監控有這個機制
+// （WAITING_EXPIRY_BARS=4，規格 §3-A：掛單有效期最多 4 根該時框 K 線），
+// 但 live-runner 這條真倉路徑上一直沒有對應規則，導致掛單永遠不會被
+// 主動撤銷，只能等它自己「碰巧」從交易所端消失才會被 entry_never_filled
+// 分支撿到。門檻照抄 route.ts 那個常數，不是另外發明的數字。
+const WAITING_EXPIRY_BARS = 4;
 
 // 對帳用：部位消失後，把 getUserTrades() 查回來的一批成交紀錄彙總成
 // 「加權平均出場價 + 總實現損益」——用 quoteQty/qty 算真正的成交均價，
@@ -60,6 +71,10 @@ export interface BridgeTradeRow {
   strategy: 'A' | 'B';
   timeframe: TimeStopTimeframe;
   filledAt: number | null; // 還沒真的成交過時是 null——這個檢查點理論上不會用到（見 decideTradeAction 內部）
+  // 2026-08-11：掛單本身的建立時間（不是成交時間）——判斷「這張 LIMIT
+  // 進場單掛了多久還沒成交」要用這個當基準，不能用 filledAt（成交前
+  // 恆為 null）。
+  openedAt: number;
   // 2026-08-10：進場確認成交那一刻的部位量，用來判斷「TP1 是否已經發生」——
   // 不再看 TP1 條件單還在不在（消失可能是成交也可能是被拒絕/取消，無法單靠
   // 這個區分），而是比較 snapshot.positionQty 是否比這個值小。null 代表還
@@ -99,6 +114,7 @@ export type TradeAction =
   | { kind: 'skip_entry'; reason: string }
   | { kind: 'place_entry'; order: PlaceOrderParams; quantity: number }
   | { kind: 'wait_for_fill'; reason: string }
+  | { kind: 'cancel_stale_entry'; symbol: string; orderId: number; reason: string }
   | { kind: 'needs_reconcile'; reason: string }
   | { kind: 'sync_closed_position'; avgExitPrice: number; realizedPnl: number; result: 'WIN_TP1' | 'LOSS' }
   | { kind: 'place_initial_stop'; order: PlaceOrderParams }
@@ -172,8 +188,20 @@ export function decideTradeAction(
     return { kind: 'place_entry', order: entryDecision.order, quantity: entryDecision.quantity };
   }
 
-  // 2. 進場單已下，還沒成交（沒部位、單還掛著）。
+  // 2. 進場單已下，還沒成交（沒部位、單還掛著）。掛太久（規格 §3-A：
+  // WAITING_EXPIRY_BARS=4 根該時框 K 線）就主動撤單，不要放著等它「碰巧」
+  // 從交易所端消失——見檔案頂部 2026-08-11 說明，這是實測撞到的真實缺口。
   if (snapshot.positionQty === 0 && snapshot.entryOrderStillOpen) {
+    const ageMinutes = (snapshot.now - trade.openedAt) / 60_000;
+    const expiryMinutes = WAITING_EXPIRY_BARS * tfBarMinutes(trade.timeframe);
+    if (ageMinutes >= expiryMinutes && trade.exchangeEntryOrderId !== null) {
+      return {
+        kind: 'cancel_stale_entry',
+        symbol: trade.symbol,
+        orderId: trade.exchangeEntryOrderId,
+        reason: `掛單超過 ${WAITING_EXPIRY_BARS} 根 ${trade.timeframe} K 線未成交，主動撤單（規格 §3-A）`,
+      };
+    }
     return { kind: 'wait_for_fill', reason: '進場單尚未成交' };
   }
 

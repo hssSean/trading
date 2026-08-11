@@ -19,7 +19,7 @@ import { clampAutoCloseAfterTp1 } from '@/lib/monitorMath';
 
 export type TimeStopTimeframe = '5m' | '15m' | '1h' | '4h' | '1d';
 
-function tfBarMinutes(tf: TimeStopTimeframe): number {
+export function tfBarMinutes(tf: TimeStopTimeframe): number {
   switch (tf) {
     case '5m':  return 5;
     case '15m': return 15;

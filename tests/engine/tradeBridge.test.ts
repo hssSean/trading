@@ -12,6 +12,7 @@ function tradeRow(overrides: Partial<BridgeTradeRow> = {}): BridgeTradeRow {
     id: 'trade-1', symbol: 'BTCUSDT', isLong: true,
     entry: 65000, stopLoss: 64000, tp1: 67000, strategy: 'A',
     timeframe: '1h', filledAt: 0, // filledAt=now=0 → 時間止損兩個門檻都不會觸發，不干擾既有測試
+    openedAt: 0, // 同上，跟 snapshot.now=0 同值，掛單過期判斷不會誤觸發
     entryQty: null,
     exchangeEntryOrderId: null, exchangeStopAlgoId: null, exchangeTp1AlgoId: null,
     ...overrides,
@@ -73,6 +74,47 @@ describe('decideTradeAction — entry order placed, waiting for fill', () => {
       risk(),
     );
     expect(a.kind).toBe('wait_for_fill');
+  });
+
+  // 2026-08-11：實測撞到——SOLUSDT 掛單等了 15 小時 28 分還沒成交，
+  // decideTradeAction 從沒判斷過「這張單本身是不是已經掛太久了」，只會
+  // 無限期回 wait_for_fill。規格 §3-A：掛單有效期最多 4 根該時框 K 線
+  // （1h timeframe = 4 小時）。
+  it('cancels the stale entry order once it has been open longer than 4 bars of its timeframe (1h → 4h)', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, openedAt: 0, timeframe: '1h' }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: true, now: 4 * 60 * 60_000 }), // exactly 4h later
+      risk(),
+    );
+    expect(a.kind).toBe('cancel_stale_entry');
+    if (a.kind !== 'cancel_stale_entry') return;
+    expect(a.symbol).toBe('BTCUSDT');
+    expect(a.orderId).toBe(111);
+  });
+
+  it('still waits when the entry order has not yet reached the expiry window', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, openedAt: 0, timeframe: '1h' }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: true, now: 3 * 60 * 60_000 }), // 3h < 4h expiry
+      risk(),
+    );
+    expect(a.kind).toBe('wait_for_fill');
+  });
+
+  it('scales the expiry window to the timeframe (4h bars → 16h expiry)', () => {
+    const stillWaiting = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, openedAt: 0, timeframe: '4h' }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: true, now: 15 * 60 * 60_000 }),
+      risk(),
+    );
+    expect(stillWaiting.kind).toBe('wait_for_fill');
+
+    const expired = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, openedAt: 0, timeframe: '4h' }),
+      snapshot({ positionQty: 0, entryOrderStillOpen: true, now: 16 * 60 * 60_000 }),
+      risk(),
+    );
+    expect(expired.kind).toBe('cancel_stale_entry');
   });
 });
 

@@ -187,3 +187,17 @@ describe('executeTradeAction — entry_never_filled', () => {
     expect(persist.neverFilledCalls).toEqual(['trade-1']);
   });
 });
+
+describe('executeTradeAction — cancel_stale_entry', () => {
+  it('cancels the LIMIT entry order (not an algo order) then marks never-filled', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    const action: TradeAction = { kind: 'cancel_stale_entry', symbol: 'BTCUSDT', orderId: 111, reason: '掛單超過 4 根 1h K 線未成交，主動撤單' };
+
+    const r = await executeTradeAction(client, persist, 'trade-1', action);
+
+    expect(r.executed).toBe(true);
+    expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 111, isAlgoOrder: false }]);
+    expect(persist.neverFilledCalls).toEqual(['trade-1']);
+  });
+});
