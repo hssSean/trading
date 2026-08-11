@@ -246,6 +246,29 @@ function checkAuth(req: NextRequest): boolean {
   return provided === envSecret;
 }
 
+// 2026-08-11：DELETE（清 tlock/風控狀態）原本只認 checkAuth 的 webhook
+// secret——正式站從沒設定過 WEBHOOK_SECRET，production 下 fail-closed，
+// 這支端點變成完全打不到，連使用者自己想清一個卡住的鎖都沒有路徑可走。
+// 跟 /api/reject-funnel、/api/score-attribution 同一套模式：帶已登入
+// 使用者的 Supabase JWT 也放行，不用另外管理一組 secret。只給 DELETE
+// 用（清鎖是低風險的清理操作，跟 GET/POST 那些會真的下單/insert trade
+// 的路徑不同，不動 checkAuth 本體，避免影響 cron 呼叫）。
+async function checkUserSession(req: NextRequest): Promise<boolean> {
+  const authHeader = req.headers.get('authorization') ?? '';
+  const jwt = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!jwt) return false;
+  const anonUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
+  if (!anonUrl || !anonKey) return false;
+  const { createClient } = await import('@supabase/supabase-js');
+  const userClient = createClient(anonUrl, anonKey, {
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const { data: { user }, error } = await userClient.auth.getUser();
+  return !error && !!user;
+}
+
 // ── Server-side monitor: fill detection + TP/SL via K-line scan ──
 // Uses 1h candlestick high/low so events between cron runs are never missed.
 async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
@@ -2981,7 +3004,9 @@ export async function POST(req: NextRequest) {
 
 // ── DELETE — unlock coin or reset ALL locks ────────────────────
 export async function DELETE(req: NextRequest) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!checkAuth(req) && !(await checkUserSession(req))) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
   const symbol = req.nextUrl.searchParams.get('symbol')?.toUpperCase();
   const r = getRedis();
 
