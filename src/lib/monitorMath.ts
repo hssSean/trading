@@ -228,6 +228,14 @@ export function applyFundingRateCrowdingPenalty(
   return crowded ? Math.max(0, score - 5) : score;
 }
 
+// 2026-08-12：止損類出場（LOSS、TP1後SL）套 applyStopSlippage，跟真倉監控
+// 主迴圈（route.ts 826/853 行）用同一套滑價模型——這裡是三個影子模擬
+// （cancelShadow/timeStopShadow/reject-funnel 的 simulateShadow）共用的
+// 出場價計算，之前刻意零滑價（見上面 STOP_EXIT_SLIPPAGE_PCT 說明「避免
+// 一次動兩個子系統」），現在補上是為了讓影子模擬的淨R估算跟真倉記帳用
+// 同一套假設——CLAUDE.md 調參紀律要求看影子模擬淨R決定要不要放寬/收緊
+// 濾網，兩邊口徑不一致會讓那個判斷基礎失真。TP1/TP2 維持限價單語意，
+// 不套用。
 export function walkTpSl(
   candles: WalkCandle[],
   afterMs: number,
@@ -235,6 +243,7 @@ export function walkTpSl(
   tp1HitAlready: boolean,
 ): WalkTpSlResult {
   const { stopLoss, tp1, tp2, isLong } = params;
+  const slExitPrice = applyStopSlippage(stopLoss, isLong);
   let tp1Hit = tp1HitAlready;
   for (const c of candles) {
     if (c.closeTime <= afterMs) continue;
@@ -242,13 +251,13 @@ export function walkTpSl(
     const hitTP1 = isLong ? c.high >= tp1      : c.low  <= tp1;
     const hitTP2 = isLong ? c.high >= tp2      : c.low  <= tp2;
     if (tp1Hit) {
-      if (hitTP2) return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2,      closedAt: c.closeTime };
-      if (hitSL)  return { tp1Hit, done: true, result: 'WIN_TP1', exitPrice: stopLoss, closedAt: c.closeTime };
+      if (hitTP2) return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2,         closedAt: c.closeTime };
+      if (hitSL)  return { tp1Hit, done: true, result: 'WIN_TP1', exitPrice: slExitPrice, closedAt: c.closeTime };
       continue;
     }
     if (hitTP2)      return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2, closedAt: c.closeTime };
     else if (hitTP1) { tp1Hit = true; continue; } // TP1-before-SL same-candle rule (matches monitor)
-    else if (hitSL)  return { tp1Hit, done: true, result: 'LOSS', exitPrice: stopLoss, closedAt: c.closeTime };
+    else if (hitSL)  return { tp1Hit, done: true, result: 'LOSS', exitPrice: slExitPrice, closedAt: c.closeTime };
   }
   return { tp1Hit, done: false };
 }

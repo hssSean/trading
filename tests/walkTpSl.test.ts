@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { walkTpSl, type WalkCandle } from '../src/lib/monitorMath';
+import { walkTpSl, applyStopSlippage, type WalkCandle } from '../src/lib/monitorMath';
 
 // Shared by reject-funnel shadow sim and time-stop shadow sim (docs/TODO.md P1 #1).
 // Extracted verbatim from route.ts's simulateShadow active-phase loop — these tests
@@ -25,10 +25,13 @@ describe('walkTpSl', () => {
     expect(r).toEqual({ tp1Hit: false, done: false });
   });
 
-  it('LONG: straight to SL without TP1 → LOSS', () => {
+  it('LONG: straight to SL without TP1 → LOSS, exit price includes unfavorable slippage', () => {
     const candles = [candle(102, 94, 95, 1000)];
     const r = walkTpSl(candles, 500, LONG_PARAMS, false);
-    expect(r).toEqual({ tp1Hit: false, done: true, result: 'LOSS', exitPrice: 95, closedAt: 1000 });
+    expect(r).toEqual({
+      tp1Hit: false, done: true, result: 'LOSS',
+      exitPrice: applyStopSlippage(95, true), closedAt: 1000,
+    });
   });
 
   it('LONG: straight to TP2 without TP1 first (gap) → WIN_TP2', () => {
@@ -52,7 +55,10 @@ describe('walkTpSl', () => {
       candle(101, 94,  95,    2000),
     ];
     const r = walkTpSl(candles, 500, LONG_PARAMS, false);
-    expect(r).toEqual({ tp1Hit: true, done: true, result: 'WIN_TP1', exitPrice: 95, closedAt: 2000 });
+    expect(r).toEqual({
+      tp1Hit: true, done: true, result: 'WIN_TP1',
+      exitPrice: applyStopSlippage(95, true), closedAt: 2000,
+    });
   });
 
   it('LONG: same candle touches both TP1 and SL → TP1-before-SL rule wins, not closed this candle', () => {
@@ -70,10 +76,13 @@ describe('walkTpSl', () => {
     expect(r).toEqual({ tp1Hit: true, done: true, result: 'WIN_TP2', exitPrice: 110, closedAt: 1000 });
   });
 
-  it('SHORT: straight to SL without TP1 → LOSS', () => {
+  it('SHORT: straight to SL without TP1 → LOSS, exit price includes unfavorable slippage', () => {
     const candles = [candle(106, 98, 105, 1000)];
     const r = walkTpSl(candles, 500, SHORT_PARAMS, false);
-    expect(r).toEqual({ tp1Hit: false, done: true, result: 'LOSS', exitPrice: 105, closedAt: 1000 });
+    expect(r).toEqual({
+      tp1Hit: false, done: true, result: 'LOSS',
+      exitPrice: applyStopSlippage(105, false), closedAt: 1000,
+    });
   });
 
   it('SHORT: TP1 hit first, then later candle hits TP2 → WIN_TP2', () => {
@@ -91,6 +100,9 @@ describe('walkTpSl', () => {
       candle(106, 99, 105, 2000),
     ];
     const r = walkTpSl(candles, 500, SHORT_PARAMS, false);
-    expect(r).toEqual({ tp1Hit: true, done: true, result: 'WIN_TP1', exitPrice: 105, closedAt: 2000 });
+    expect(r).toEqual({
+      tp1Hit: true, done: true, result: 'WIN_TP1',
+      exitPrice: applyStopSlippage(105, false), closedAt: 2000,
+    });
   });
 });

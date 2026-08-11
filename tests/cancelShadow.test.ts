@@ -6,7 +6,7 @@ import {
   CANCEL_SHADOW_FOLLOW_MS,
   type CancelShadow,
 } from '../src/lib/cancelShadow';
-import type { WalkCandle } from '../src/lib/monitorMath';
+import { applyStopSlippage, type WalkCandle } from '../src/lib/monitorMath';
 
 function candle(high: number, low: number, close: number, closeTime: number): WalkCandle {
   return { high, low, close, closeTime };
@@ -67,7 +67,7 @@ describe('advanceCancelShadow', () => {
     const next = advanceCancelShadow(s, [candle(102, 94, 95, 2000)], 2000);
     expect(next.status).toBe('done');
     expect(next.result).toBe('LOSS');
-    expect(next.exitPrice).toBe(95);
+    expect(next.exitPrice).toBe(applyStopSlippage(95, true));
   });
 
   it('already-done shadow is returned unchanged (no re-simulation)', () => {
