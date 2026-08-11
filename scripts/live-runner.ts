@@ -63,7 +63,7 @@ import {
 } from '../src/engine/tradeBridge';
 import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
-import { calcSimpleAtr, TP1_PARTIAL_FRACTION } from '../src/lib/monitorMath';
+import { calcSimpleAtr, TP1_PARTIAL_FRACTION, updateMfeMae } from '../src/lib/monitorMath';
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
@@ -111,6 +111,8 @@ interface DbTradeRow {
   exchange_entry_order_id: number | null;
   exchange_stop_algo_id: number | null;
   exchange_tp1_algo_id: number | null;
+  mfe_price: number | null;
+  mae_price: number | null;
 }
 
 const VALID_TIMEFRAMES = new Set(['5m', '15m', '1h', '4h', '1d']);
@@ -492,7 +494,7 @@ async function runCycle(
 
   const { data: rows, error } = await supabase
     .from('trades')
-    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,exchange_stop_algo_id,exchange_tp1_algo_id')
+    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price')
     .eq('user_id', userId)
     .is('closed_at', null);
 
@@ -573,6 +575,37 @@ async function runCycle(
         await persist.markTp1Hit(row.id);
         row.status = 'tp1_hit';
         await notifyTp1Hit(userId, row);
+      }
+
+      // MFE/MAE（2026-08-12）：真倉監控從來沒記過——DB 模擬版（route.ts）
+      // 早就在記，理由同一個：只看出場價分不出「衝到 +1.8R 才拉回 +0.2R
+      // 出場」跟「從沒衝過 +0.3R」，這兩種是完全不同的問題（TP1 太遠 vs.
+      // 進場當下的判斷本身就不成立），CSV 診斷 8/11 三筆止損時發現這個
+      // 缺口——沒有 MFE 就看不出這幾筆是曾經浮盈又跌回去，還是直接反向。
+      // 用 updateMfeMae 同一個純函數（src/lib/monitorMath.ts），只是這裡
+      // 沒有 K 線陣列，只有輪詢到的單一 markPrice——包成 high=low=markPrice
+      // 的單根「K線」餵進去，跟 route.ts 用真實高低價比起來會略低估振幅，
+      // 但這支輪詢頻率（15秒）比 route.ts 的 5 分鐘 cron 密集得多，足夠打平。
+      // 純被動量測，不是交易決策，跟下面 decideTradeAction 的判斷完全獨立，
+      // 失敗也不能擋到正常監控——同 route.ts 的 try/catch 防護。
+      if (snapshot.positionQty > 0) {
+        try {
+          const mm = updateMfeMae(
+            [{ high: snapshot.markPrice, low: snapshot.markPrice }],
+            row.direction === 'LONG',
+            row.mfe_price,
+            row.mae_price,
+          );
+          if (mm.changed) {
+            const { error } = await supabase.from('trades')
+              .update({ mfe_price: mm.mfePrice, mae_price: mm.maePrice })
+              .eq('id', row.id);
+            if (error) console.error(`[mfe/mae] ${row.symbol} 更新失敗: [${error.code}] ${error.message}`);
+            else { row.mfe_price = mm.mfePrice; row.mae_price = mm.maePrice; }
+          }
+        } catch (e) {
+          console.error(`[mfe/mae] ${row.symbol} 計算失敗: ${String(e).slice(0, 150)}`);
+        }
       }
 
       // 風險輸入只有「還沒下過進場單」才需要（余額/槓桿分級都是額外的 API
