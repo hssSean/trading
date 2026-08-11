@@ -663,6 +663,14 @@ async function runCycle(
           console.error(`[${nowStr()}] ${row.symbol}（${row.id}）標記取消失敗: [${error.code}] ${error.message}`);
         } else {
           console.log(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 [${code}]，這個 symbol 目前不可交易，標記取消不再重試`);
+          // 2026-08-11：實測撞到——這條路徑是獨立在 executeTradeAction 之外
+          // 的 catch 分支（下單前就撞到 symbol 不可用），不會經過主迴圈那段
+          // 「action.kind 是這三種才清理」的判斷，之前完全沒解鎖，導致這個
+          // symbol 卡在「持倉中」（使用者截圖：PUMP 卡片本身已經顯示「交易
+          // 對目前無法下單」，但幣種監控清單還是跳過持倉中）。
+          // exchange_entry_order_id === null 保證沒下過任何單，不用撤條件單
+          // （跟 entry_never_filled 同一個理由），也不是 LOSS，不用設冷卻。
+          await cleanupAfterTradeClosed(binance, redis, row, false, false);
         }
       } else {
         console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${describeError(e)}`);
