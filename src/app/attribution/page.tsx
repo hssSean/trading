@@ -37,6 +37,7 @@ interface AttributionResponse {
   tagStats?: Record<string, TagStat>;
   byRegime?: Record<string, TagStat>;
   confidenceBuckets?: BucketStat[];
+  scoreBucketsByStrategy?: Record<string, BucketStat[]>;
   sampleSize?: { total: number; withBreakdown: number };
 }
 
@@ -44,6 +45,12 @@ const REGIME_LABEL: Record<string, string> = {
   trending: '趨勢盤(策略A)',
   ranging: '盤整盤(策略B)',
   transitional: '過渡區(不進場)',
+};
+
+const STRATEGY_LABEL: Record<string, string> = {
+  A: '策略A(趨勢)',
+  B: '策略B(均值回歸)',
+  unknown: '未知(8/4前舊資料無strategy欄位)',
 };
 
 const FACTOR_LABEL: Record<string, string> = {
@@ -286,6 +293,40 @@ export default function AttributionPage() {
                 )}
               </div>
             </div>
+
+            {Object.keys(data.scoreBucketsByStrategy ?? {}).length > 0 && (
+              <div>
+                <p className="text-[#3A424E] text-[9px] uppercase font-bold tracking-widest mb-1.5 px-0.5">
+                  總分 vs 結果（依策略分開算，A/B 分數不同尺度不能混）
+                </p>
+                <div className="space-y-2">
+                  {Object.entries(data.scoreBucketsByStrategy ?? {}).map(([strategy, buckets]) => (
+                    <div key={strategy} className="bg-[#0D0D16] border border-[#1B222B] rounded-xl p-3">
+                      <p className="text-[#E8ECF1] text-xs mb-1.5">
+                        {STRATEGY_LABEL[strategy] ?? strategy}
+                      </p>
+                      <div className="grid grid-cols-3 gap-2 num">
+                        {buckets.map(b => (
+                          <div key={b.bucket} className="bg-[#141A21] rounded-lg px-2 py-1.5">
+                            <p className="text-[#5A7A8A] text-[9px] mb-0.5">{b.bucket}分區 · {b.count}筆</p>
+                            <p className="text-[#E8ECF1] text-[11px]">{b.winRate}% 勝率</p>
+                            <p className={`text-[11px] ${b.avgR >= 0 ? 'text-[#0ECB81]' : 'text-[#F6465D]'}`}>
+                              {b.avgR >= 0 ? '+' : ''}{b.avgR}R/筆
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[#565E6B] text-[10px] mt-1.5 px-0.5">
+                  2026-08-12：策略A/B 的總分是兩套不相容尺度（A 60-77、B 10-19），
+                  混在一起分桶會把 B 的極端值錯誤丟進「低分桶」，做出「分數越高越差」
+                  的假結論——這裡每個策略各自獨立分桶，unknown 是 8/4 前沒記 strategy
+                  欄位的舊資料，不會被亂猜成 A 或 B。
+                </p>
+              </div>
+            )}
 
             {Object.keys(data.tagStats ?? {}).length > 0 && (
               <div>

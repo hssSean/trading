@@ -207,3 +207,52 @@ describe('analyzeScoreAttribution — confidenceBuckets', () => {
     expect(totalCount).toBe(3);
   });
 });
+
+describe('analyzeScoreAttribution — scoreBucketsByStrategy', () => {
+  // 2026-08-12：這是 8/12 CSV 體檢查出的量測污染——策略A/B 的 score 是
+  // 兩套不相容尺度（A: 60-77, B: 10-19），混在一起分桶會把 B 的極端值
+  // 錯誤地丟進 A 的「低分桶」。這裡驗證修法：一律先依 strategy 分組。
+  it('buckets score separately per strategy — never mixes scales from different strategies', () => {
+    const trades = [
+      // Strategy A: 3 trades, score 60-77 scale
+      trade({ strategy: 'A', score: 60, pnlPercent: -2, result: 'LOSS' }),
+      trade({ strategy: 'A', score: 68, pnlPercent: 2, result: 'WIN_TP1' }),
+      trade({ strategy: 'A', score: 77, pnlPercent: 2, result: 'WIN_TP1' }),
+      // Strategy B: 3 trades, score 10-19 scale (would land in "低" bucket
+      // of a naive combined sort even though they outperform every A-tier trade)
+      trade({ strategy: 'B', score: 14, pnlPercent: 7, result: 'WIN_TP2' }),
+      trade({ strategy: 'B', score: 17, pnlPercent: 4, result: 'WIN_TP2' }),
+      trade({ strategy: 'B', score: 10, pnlPercent: -2, result: 'LOSS' }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.scoreBucketsByStrategy.A.reduce((s, b) => s + b.count, 0)).toBe(3);
+    expect(r.scoreBucketsByStrategy.B.reduce((s, b) => s + b.count, 0)).toBe(3);
+    // B's high-scoring bucket (17) should reflect its own strong result (+2R),
+    // not get diluted by being compared against A's much larger score range.
+    const bHigh = r.scoreBucketsByStrategy.B.find(b => b.bucket === '高')!;
+    expect(bHigh.avgR).toBeGreaterThan(0);
+  });
+
+  it('groups trades with no strategy field under "unknown" rather than guessing', () => {
+    const trades = [
+      trade({ strategy: undefined, score: 65 }),
+      trade({ strategy: undefined, score: 70 }),
+      trade({ strategy: undefined, score: 55 }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.scoreBucketsByStrategy.unknown).toBeDefined();
+    expect(r.scoreBucketsByStrategy.A).toBeUndefined();
+    expect(r.scoreBucketsByStrategy.unknown.reduce((s, b) => s + b.count, 0)).toBe(3);
+  });
+
+  it('excludes trades with no score value', () => {
+    const trades = [
+      trade({ strategy: 'A', score: null }),
+      trade({ strategy: 'A', score: 65 }),
+      trade({ strategy: 'A', score: 70 }),
+      trade({ strategy: 'A', score: 75 }),
+    ];
+    const r = analyzeScoreAttribution(trades);
+    expect(r.scoreBucketsByStrategy.A.reduce((s, b) => s + b.count, 0)).toBe(3);
+  });
+});

@@ -49,6 +49,15 @@ export interface AttributionTrade {
   // confidence 分數高低跟結果有沒有關聯——有的話，之後才有數據支撐可以
   // 考慮拿來當第二層濾網，現在還不到能下結論的時候。
   confidence?: number | null;
+  // 2026-08-12：得分（score）欄位混了兩套不相容的尺度——策略A（趨勢）算出
+  // 來是 60-77，策略B（均值回歸）是 10-19（MIN_SCORE_B=10），同一個數字在
+  // 兩套策略裡完全不能比。8/12 CSV 複查踩過這個坑：沒分策略直接把全部
+  // 訊號按總分切三桶，策略B的兩筆大贏家（分數14，+3.59R/+1.74R）被丟進
+  // 「低分桶」，做出「分數越高結果越差」的假結論——清掉污染重算後，
+  // 分數其實跟結果完全無關（見下方 scoreBucketsByStrategy 的用法：一律先
+  // 依 strategy 分組，同一組內部才能公平地按分數排序切桶）。
+  score?: number | null;
+  strategy?: string | null;
 }
 
 const FACTOR_GROUPS = ['trend', 'momentum', 'structure', 'volume', 'priceAction'] as const;
@@ -166,6 +175,12 @@ export interface AttributionResult {
   // 就全部止損。看「低」桶表現是不是真的比較差，決定 confidence 未來
   // 有沒有資格當第二層濾網——現在樣本還太少，先建好分析維度。
   confidenceBuckets: BucketStat[];
+  // 2026-08-12——`score` 依 `strategy` 分組後才切三桶，絕不把兩套不同尺度
+  // 的分數混在同一次排序裡（見 AttributionTrade.score 註解）。key 是
+  // strategy 值（'A'/'B'/...），缺 strategy 的舊資料（8/4 前）歸進
+  // 'unknown'，不猜測、不當成 'A'——上一次用 `?? 'A'` 猜測正是 8/6 那次
+  // 分析出包的根因，這裡不重蹈覆轍。
+  scoreBucketsByStrategy: Record<string, BucketStat[]>;
   sampleSize: { total: number; withBreakdown: number };
 }
 
@@ -217,6 +232,15 @@ export function analyzeScoreAttribution(trades: AttributionTrade[]): Attribution
   const withConfidence = trades.filter(t => t.confidence !== null && t.confidence !== undefined);
   const confidenceBuckets = bucketStats(withConfidence, t => t.confidence!);
 
+  const scoreBucketsByStrategy: AttributionResult['scoreBucketsByStrategy'] = {};
+  const withScore = trades.filter(t => t.score !== null && t.score !== undefined);
+  const strategyKeys = Array.from(new Set(withScore.map(t => t.strategy ?? 'unknown')));
+  for (const key of strategyKeys) {
+    const group = withScore.filter(t => (t.strategy ?? 'unknown') === key);
+    const buckets = bucketStats(group, t => t.score!);
+    if (buckets.length > 0) scoreBucketsByStrategy[key] = buckets;
+  }
+
   return {
     byFactorBucket,
     factorGroupByDirection,
@@ -224,6 +248,7 @@ export function analyzeScoreAttribution(trades: AttributionTrade[]): Attribution
     tagStats,
     byRegime,
     confidenceBuckets,
+    scoreBucketsByStrategy,
     sampleSize: { total: trades.length, withBreakdown: withBreakdown.length },
   };
 }

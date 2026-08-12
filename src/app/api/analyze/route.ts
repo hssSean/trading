@@ -2708,7 +2708,16 @@ export async function GET(req: NextRequest) {
                 funding_rate:        entrySignal.fundingRate ?? null,
                 suggested_risk_pct:  entrySignal.suggestedRiskPct ?? null,
                 suggested_leverage:  entrySignal.suggestedLeverage ?? null,
-                tier:                entrySignal.tier ?? 'A',
+                // 2026-08-12：原本 `?? 'A'` 會把策略B（均值回歸，從不設 tier——
+                // generateMeanReversionSignals 沒有 A/B 兩級概念）捏造成 A 級，
+                // 跟 8/6 那次 CSV 匯出層 `?? 'A'` 同一種錯誤（docs/ANALYSIS-
+                // 2026-08-06B §0），只是這次是寫入層。用明確 `?? null`（不是省略
+                // 這個 key）——object 裡值為 undefined 的 key 會被 JSON.stringify
+                // 拿掉，若省略會讓 Supabase 退回欄位的 DB DEFAULT（可能仍是
+                // 'A'），一樣白修。下游讀取端（trades/page.tsx、tierRiskMultiplier）
+                // 本來就把 tier=null 當成全額風險處理，跟舊資料（tier系統加入前）
+                // 的行為一致，不會因為這裡不再捏造值而改變任何風控算式。
+                tier:                entrySignal.tier ?? null,
                 score_breakdown:     entrySignal.scoreBreakdown ?? null,
               };
 
