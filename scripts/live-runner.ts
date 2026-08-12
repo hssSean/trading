@@ -18,6 +18,11 @@
  *     一致）
  *   TRADING_USER_ID：Supabase 的 profiles.id（UUID）——這支只服務單一使用者，
  *     不走完整的登入流程，直接指定要監控誰的 trades
+ *   NEXT_PUBLIC_VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY（Web Push 推播用，跟
+ *     Vercel 專案同一組金鑰——換一組會讓手機上既有的推播訂閱全部失效）。
+ *     2026-08-12 補上這一行：先前這裡漏列，導致使用者照文件設好其餘變數後
+ *     「進場/出場通知全部收不到、只收得到推薦單」（推薦單是 Vercel 發的，
+ *     不受影響）。沒設不會擋住交易，但啟動時會印出明顯警告，見 main()。
  *
  * ── 這版本做的事 ────────────────────────────────────────────────────────
  * 1. Kill switch 檢查（fail closed）——啟動中就整輪跳過，不做任何下單/改單。
@@ -767,6 +772,37 @@ async function main() {
   if (!process.env.TRADING_USER_ID) {
     console.error('❌ TRADING_USER_ID 未設定（Supabase profiles.id）');
     process.exit(1);
+  }
+  // 2026-08-12：實測撞到（使用者第二次回報「只收得到推薦單通知」）——
+  // 2026-08-10 幫這支補上 Web Push（notifyFilled/notifyTp1Hit/notifyIfNeeded）
+  // 時，只加了呼叫端程式碼，**沒有把 VAPID 金鑰列進上面的必要環境變數，也
+  // 沒有做任何啟動檢查**。結果：使用者照著檔頭文件設好那 5 組變數，這支跑
+  // 起來一切正常（下單、監控、關單都對），但 sendWebPushToUser 一進去就撞到
+  // 「VAPID keys not configured」直接 return []，每一則進場/出場/TP1 通知
+  // 全部靜默失敗。而「推薦單」通知是 Vercel 的 route.ts 發的（那邊 VAPID 設
+  // 在 Vercel 環境變數裡），所以照樣會到——這就是「只收得到推薦單」的成因，
+  // 不是推播機制壞掉，是這支的環境變數缺一半。
+  //
+  // 刻意**不** process.exit(1)：推播是輔助功能，不該讓它擋掉真倉監控（那會
+  // 讓已開的倉位失去管理，比收不到通知嚴重得多）。改成啟動時大聲印出狀態，
+  // 有設就明確說「已啟用」，沒設就印出完整補救指令——讓這件事不可能再被
+  // 默默忽略一次。
+  if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+    console.error('');
+    console.error('⚠️  ════════════════════════════════════════════════════════');
+    console.error('⚠️   VAPID 金鑰未設定 —— 這支不會發出任何推播通知');
+    console.error('⚠️   （進場成交／TP1達標／移動止損／出場／推薦單失效 全部收不到）');
+    console.error('⚠️   注意：「新推薦單」通知由 Vercel 發送，不受影響——所以');
+    console.error('⚠️   「只收得到推薦單」正是這個狀況，不是推播壞了。');
+    console.error('⚠️');
+    console.error('⚠️   補救：把 Vercel 專案裡這兩個環境變數設到本機再重啟這支');
+    console.error('⚠️     NEXT_PUBLIC_VAPID_PUBLIC_KEY');
+    console.error('⚠️     VAPID_PRIVATE_KEY');
+    console.error('⚠️   （必須跟 Vercel 上同一組——換一組會讓手機既有訂閱失效）');
+    console.error('⚠️  ════════════════════════════════════════════════════════');
+    console.error('');
+  } else {
+    console.log(`[${nowStr()}] ✅ Web Push 已啟用（VAPID 金鑰已設定）`);
   }
 
   const redis = Redis.fromEnv();

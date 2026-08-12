@@ -41,7 +41,15 @@ export async function sendWebPushToUser(
   payload: WebPushPayload,
 ): Promise<SendResult[]> {
   if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
-    console.error('[webpush] VAPID keys not configured — set NEXT_PUBLIC_VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in Vercel env vars');
+    // 2026-08-12：訊息原本寫死「set … in Vercel env vars」——但這個模組同時
+    // 被 scripts/live-runner.ts（跑在使用者本機，環境變數來自 shell，沒有
+    // 載入任何 .env）用到。實測撞到：使用者只在 Vercel 設了金鑰，本機
+    // live-runner 沒有，於是進場/出場通知全部靜默失敗，而訊息還叫他去看
+    // Vercel（那邊其實是對的），把診斷方向帶偏。改成兩邊都點名。
+    console.error(
+      '[webpush] VAPID keys not configured — set NEXT_PUBLIC_VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY. ' +
+      'Vercel: 專案 Environment Variables；live-runner: 執行這支的 shell 環境變數（兩邊要同一組金鑰）',
+    );
     return [];
   }
   const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
