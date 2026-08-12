@@ -736,8 +736,16 @@ export function generateMeanReversionSignals(
   // v2.1 §1.6: RSI threshold 30→35; band touch by candle LOW (not close)
   const rsiCrossAbove35 = prevInd.rsi < 35 && ind.rsi >= 35;
   const atBBLower       = cur.low <= bb.lower * 1.002;
+  // 2026-08-12: SHORT got a hard volume gate on 7/24 (see below — no-volume
+  // BB-upper shorts were getting run over in trends, SOL/PEPE instant
+  // stop-outs). LONG never got the mirror fix — CSV review (8/11 export)
+  // shows exactly the same failure mode reappeared on the unprotected side:
+  // 17 filled B-tier LONGs, -0.268R avg, 35% win rate, while B-tier SHORT
+  // (which has the gate) sits at +0.297R/69%, in line with A-tier. Same
+  // mechanism, same fix, just applied to the side that was missed.
+  const volConfirmedLong = volRatio >= 1.3;
 
-  if (rsiCrossAbove35 && atBBLower) {
+  if (rsiCrossAbove35 && atBBLower && volConfirmedLong) {
     const entry = price;
     const tp1   = bb.middle;
 
