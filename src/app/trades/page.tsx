@@ -88,7 +88,13 @@ function fmtDuration(ms: number) {
 
 function unlockCoin(symbol: string) {
   const secret = useStore.getState().webhookSecret;
-  fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': secret } }).catch(() => {});
+  // 2026-08-12：原本吞掉所有錯誤（含 401）——webhookSecret 沒設定或設錯時，
+  // 按鈕照樣顯示「已解鎖」，實際上伺服器端什麼都沒做，使用者無從察覺。
+  // 這裡不改變按鈕本身的樂觀 UI（避免大改互動），只是至少把失敗印到
+  // console，讓「明明按了卻沒生效」這種情況查得到根因。
+  fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': secret } })
+    .then(res => { if (!res.ok) console.error(`[unlockCoin] ${symbol} 解鎖失敗: HTTP ${res.status}`); })
+    .catch(e => console.error(`[unlockCoin] ${symbol} 解鎖請求失敗:`, e));
 }
 
 // R multiple: PnL measured in units of initial risk (entry→SL distance).
@@ -539,14 +545,21 @@ const TradeRow = memo(function TradeRow({
           {isWaiting && (
             <button
               onClick={() => handleManualUnlock(trade.symbol)}
-              title="手動取消掛單並解鎖推播"
+              // 2026-08-12：文案原本寫「取消掛單」，但 handleManualUnlock 呼叫的
+              // unlockCoin 只打 DELETE /api/analyze?symbol=X，清的是 Redis 的
+              // symbol 追蹤鎖（讓系統停止把這個 symbol 當成「已鎖定」），不會動
+              // trades 表這筆列——按下去卡片本身不會消失或狀態改變，跟「取消
+              // 掛單」這個詞暗示的效果不一樣。改成跟 isPending 分支同一套講法
+              // （解鎖推播/已解鎖），這兩處本來就是同一個函式，文案本來就該
+              // 一致，只有這裡當初寫錯。
+              title="解除 symbol 追蹤鎖，不會取消這筆掛單本身"
               className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
                 unlocked
                   ? 'text-accent border-accent/30'
                   : 'text-[#E6AF5A] border-[#E6AF5A]/30 active:opacity-70'
               }`}
             >
-              {unlocked ? '已取消' : '取消掛單'}
+              {unlocked ? '已解鎖' : '解鎖追蹤'}
             </button>
           )}
           {(isPending || isWatchingTp2) && (
