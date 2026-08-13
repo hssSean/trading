@@ -43,6 +43,17 @@ const INTRADAY_CLOSE_HOURS = 24;             // auto-close active trades older t
 const WAITING_EXPIRY_HOURS = 8;              // candle-window fallback for waiting orders
 const WAITING_EXPIRY_BARS  = 4;              // spec §3-A: 掛單有效期最多 4 根（該時框）K 線
 
+// 2026-08-13（docs/策略修改.md 修改1）：TP1 前保本保護——8/12 CSV 複查
+// 查出時間止損砍掉的 15 筆單合計回吐 10.09R（浮盈曾到 +1.47R，最後只拿
+// +0.17R 這種），因為 TP1 之前止損從 2026-07-21（移除多階「利潤階梯」）
+// 起就固定停在原始 SL，完全不動。這裡只加「單階」保護：浮盈首次達
+// +0.8R 時止損上移到進場價（保本），不做多段階梯——7/21 移除的正是多階
+// 版本，理由是「複雜度換不到對應的效益證明」，這次刻意只做一階。
+// 0.8R 是照 15 筆回吐樣本挑的中庸值（9 筆 MFE≥0.62R，設 0.8 可攔到其中
+// 6 筆且不會太貼近進場價被雜訊掃出）——不是最佳化結果，樣本不足以決定
+// 精確門檻，之後不要憑感覺微調這個數字，要調就重新拉數據。
+const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.8;
+
 function tfBarMinutes(tf: string | null | undefined): number {
   switch (tf) {
     case '5m':  return 5;
@@ -719,6 +730,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     let trailingStop        = savedTrailingStop > 0 ? savedTrailingStop : 0;
     let trailingStopUpdated = false;
     let hitTrailingStop     = false;  // post-TP1 trailing exit (WIN_TP1)
+    let hitPreTp1Breakeven  = false;  // 2026-08-13: pre-TP1 breakeven stop exit (see PRE_TP1_BREAKEVEN_TRIGGER_R)
     let autoClosedAfterTp1  = false;  // 24h/72h/168h timeout fired after TP1 (floor-clamped)
     const riskDist          = Math.abs((trade.entry as number) - (trade.stop_loss as number));
 
@@ -806,8 +818,13 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       if (isLong) {
         if (!localTp1Hit && c.high >= (trade.tp1 as number)) {
           localTp1Hit = true; justHitTp1 = true;
-          // Initialize trailing stop 2×ATR below TP1 level (Strategy A only)
-          if (tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
+          // Initialize trailing stop 2×ATR below TP1 level (Strategy A only).
+          // 2026-08-13: dropped the old `trailingStop === 0` guard here — now that
+          // pre-TP1 breakeven (below) can leave trailingStop sitting at entry before
+          // TP1 fires, this must unconditionally recompute to the proper post-TP1
+          // floor. Math.max(...) already floors at entry either way, so recomputing
+          // is always safe (never moves the stop backward).
+          if (tradeStrategy === 'A' && atr1h > 0) {
             // Floor at breakeven (entry): after TP1 the exit is never worse than 0R.
             // (2026-07-24: was clamped to the original SL, which let a TP1-tagged trade
             // give back all the way to −1R when 2×ATR exceeded the entry→TP1 distance.)
@@ -816,16 +833,37 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
             justInitializedTrailing = true;
           }
         }
+        // 2026-08-13（策略修改.md 修改1）：pre-TP1 breakeven arm — reuses the same
+        // trailingStop/current_stop slot the post-TP1 mechanism already persists
+        // across scans (see the "v2.4 §2" comment above), just for the phase before
+        // TP1. Single-stage only (not the multi-level ladder removed 2026-07-21):
+        // once armed it never re-arms or moves again until TP1 hands it off to the
+        // ratchet above. Gated on !localTp1Hit so it can never fire on the same
+        // candle TP1 already hit (that branch already set trailingStop itself).
+        if (!localTp1Hit && trailingStop === 0 && tradeStrategy === 'A' && riskDist > 0
+            && c.high >= (trade.entry as number) + PRE_TP1_BREAKEVEN_TRIGGER_R * riskDist) {
+          trailingStop = trade.entry as number;
+          trailingStopUpdated = true;
+        }
         if (c.high >= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
         }
         // Trailing stop fires before original SL — ONLY active after TP1 (2026-07-21:
         // the pre-TP1 profit ladder was removed; the stop stays at the original SL
-        // until TP1 is reached).
+        // until TP1 is reached, unless the pre-TP1 breakeven arm above has fired).
         if (localTp1Hit && trailingStop > 0 && c.low <= trailingStop) {
           closeResult = 'WIN_TP1'; closePrice = applyStopSlippage(trailingStop, true); hitTrailingStop = true; break;
         }
-        if (c.low <= (trade.stop_loss as number)) {
+        if (!localTp1Hit && trailingStop > 0) {
+          // Pre-TP1 breakeven armed — this is now the effective stop, original SL
+          // is superseded (price would have to cross back through breakeven first).
+          if (c.low <= trailingStop) {
+            closeResult = 'MANUAL_CLOSE';
+            closePrice  = applyStopSlippage(trailingStop, true);
+            hitPreTp1Breakeven = true;
+            break;
+          }
+        } else if (c.low <= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
           closePrice  = applyStopSlippage(trade.stop_loss as number, true);
           break;
@@ -838,12 +876,18 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       } else {
         if (!localTp1Hit && c.low <= (trade.tp1 as number)) {
           localTp1Hit = true; justHitTp1 = true;
-          if (tradeStrategy === 'A' && atr1h > 0 && trailingStop === 0) {
+          if (tradeStrategy === 'A' && atr1h > 0) {
             // Floor at breakeven (entry) — SHORT mirror; never worse than 0R after TP1.
             trailingStop = Math.min((trade.tp1 as number) + 2 * atr1h, (trade.entry as number));
             trailingStopUpdated = true;
             justInitializedTrailing = true;
           }
+        }
+        // Pre-TP1 breakeven arm — SHORT mirror (favorable move is price falling).
+        if (!localTp1Hit && trailingStop === 0 && tradeStrategy === 'A' && riskDist > 0
+            && c.low <= (trade.entry as number) - PRE_TP1_BREAKEVEN_TRIGGER_R * riskDist) {
+          trailingStop = trade.entry as number;
+          trailingStopUpdated = true;
         }
         if (c.low <= (trade.tp2 as number)) {
           closeResult = 'WIN_TP2'; closePrice = trade.tp2 as number; break;
@@ -852,7 +896,14 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         if (localTp1Hit && trailingStop > 0 && c.high >= trailingStop) {
           closeResult = 'WIN_TP1'; closePrice = applyStopSlippage(trailingStop, false); hitTrailingStop = true; break;
         }
-        if (c.high >= (trade.stop_loss as number)) {
+        if (!localTp1Hit && trailingStop > 0) {
+          if (c.high >= trailingStop) {
+            closeResult = 'MANUAL_CLOSE';
+            closePrice  = applyStopSlippage(trailingStop, false);
+            hitPreTp1Breakeven = true;
+            break;
+          }
+        } else if (c.high >= (trade.stop_loss as number)) {
           closeResult = localTp1Hit ? 'WIN_TP1' : 'LOSS';
           closePrice  = applyStopSlippage(trade.stop_loss as number, false);
           break;
@@ -1034,7 +1085,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     // Why this trade ended, distinct from the win/loss result itself — written to a
     // new `close_reason` column so exported reports can group by exit mechanism
     // instead of just tallying wins/losses (docs/TODO.md 報表 work).
-    const closeReason = deriveCloseReason({ closeResult: closeResult as string, timeStopFired, autoClosedAfterTp1 });
+    const closeReason = deriveCloseReason({ closeResult: closeResult as string, timeStopFired, autoClosedAfterTp1, hitPreTp1Breakeven });
 
     // Atomic close guard differs by trade state:
     // - Normal (result null): use .is('result', null) — standard first-write guard.
@@ -1124,7 +1175,11 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     // 時間止損影子模擬：只追蹤「還沒到 TP1 就被時間強制關掉」的兩種情況
     // （8根K線停滯、24h/72h/168h到期），不追蹤 TP1 後才到期的單——那些已經
     // 鎖利，不是「可能砍在半路」的問題（docs/TODO.md P1 #1）。
-    if (closeResult === 'MANUAL_CLOSE') {
+    // 2026-08-13：pre-TP1 保本止損也會產生 closeResult='MANUAL_CLOSE'，但
+    // 它是止損家族的事件（保護性停損被觸發），不是時間止損——排除掉，
+    // 否則會把保本出場錯記成時間止損的樣本，汙染這個影子模擬本來要驗證
+    // 「時間止損砍得對不對」的量測。
+    if (closeResult === 'MANUAL_CLOSE' && !hitPreTp1Breakeven) {
       const trigger: TimeStopTrigger = timeStopFired ? 'stall' : 'expiry';
       timeStopShadowStarts.push(startTimeStopShadow({
         id:            trade.id as string,
@@ -1166,7 +1221,13 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       const sym = (trade.symbol as string).replace('USDT', '/USDT');
       const pnlStr = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
       let pushTitle: string;
-      if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
+      // 2026-08-13：hitPreTp1Breakeven 必須在 timeStopFired 之前檢查——
+      // 兩者都用 closeResult==='MANUAL_CLOSE'，順序反了會把保本出場誤標
+      // 成「到期平倉」（跟 live-runner 那邊 8/13 修的通知分派 bug 同一種
+      // 「新事件複用舊 closeResult，忘了同步標題判斷」模式）。
+      if (closeResult === 'MANUAL_CLOSE' && hitPreTp1Breakeven) {
+        pushTitle  = `🛡 保本出場 ${sym}`;
+      } else if (closeResult === 'MANUAL_CLOSE' && timeStopFired) {
         pushTitle  = `⏱ 時間止損 ${sym}`;
       } else if (closeResult === 'MANUAL_CLOSE') {
         pushTitle  = `⏱ 到期平倉 ${sym}`;

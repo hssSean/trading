@@ -95,17 +95,26 @@ export interface WalkTpSlResult {
 // covered by tests instead of only a manual read-through — docs/TODO.md 報表 work.
 export type CloseReason =
   | 'tp2' | 'trailing_stop' | 'stop_loss'
-  | 'time_stop_stall' | 'time_stop_expiry' | 'time_stop_expiry_post_tp1';
+  | 'time_stop_stall' | 'time_stop_expiry' | 'time_stop_expiry_post_tp1'
+  | 'pre_tp1_breakeven';
 
 export function deriveCloseReason(params: {
   closeResult: string;
   timeStopFired: boolean;
   autoClosedAfterTp1: boolean;
+  // 2026-08-13（策略修改.md 修改1）：pre-TP1 breakeven exit also uses
+  // closeResult='MANUAL_CLOSE' (same "closed by mechanism other than TP/original
+  // SL" family as the time-stop paths below), so it MUST be checked before the
+  // timeStopFired branch or it'll be mislabeled as a time stop.
+  hitPreTp1Breakeven?: boolean;
 }): CloseReason {
-  const { closeResult, timeStopFired, autoClosedAfterTp1 } = params;
+  const { closeResult, timeStopFired, autoClosedAfterTp1, hitPreTp1Breakeven } = params;
   if (closeResult === 'WIN_TP2') return 'tp2';
   if (closeResult === 'LOSS') return 'stop_loss';
-  if (closeResult === 'MANUAL_CLOSE') return timeStopFired ? 'time_stop_stall' : 'time_stop_expiry';
+  if (closeResult === 'MANUAL_CLOSE') {
+    if (hitPreTp1Breakeven) return 'pre_tp1_breakeven';
+    return timeStopFired ? 'time_stop_stall' : 'time_stop_expiry';
+  }
   // WIN_TP1 from here on. autoClosedAfterTp1 (age limit reached post-TP1) must be
   // checked before the generic fallback — it's also reached via closeResult==='WIN_TP1'
   // but is NOT a trailing-stop exit.

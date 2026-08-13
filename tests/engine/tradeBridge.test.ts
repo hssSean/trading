@@ -260,6 +260,67 @@ describe('decideTradeAction — TP1 order placement (strategy A, partial)', () =
   });
 });
 
+describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 真倉鏡像)', () => {
+  // tradeRow 預設 entry=65000, stopLoss=64000, tp1=67000 → riskDist=1000,
+  // 0.8R 門檻 = entry + 800 = 65800（LONG）。
+  it('moves the stop to breakeven once markPrice reaches +0.8R, before TP1 happens', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
+      snapshot({
+        positionQty: 0.01, // TP1 還沒發生（entryQty 沒有變小）
+        currentStop: { algoId: 222, triggerPrice: 64000 }, // 原始止損，還沒 arm 過
+        markPrice: 65800, // entry(65000) + 0.8×riskDist(1000) = 65800
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('update_trailing_stop');
+    if (a.kind !== 'update_trailing_stop') return;
+    expect(a.place.stopPrice).toBe(65000); // 進場價（保本）
+    expect(a.cancelOrderId).toBe(222);
+  });
+
+  it('holds without arming when markPrice has not yet reached the 0.8R threshold', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+        markPrice: 65700, // 差 100，還沒到 0.8R
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
+  });
+
+  it('is idempotent — does not re-replace once already armed at breakeven', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 65000 }, // 已經 arm 過（= entry）
+        markPrice: 65800,
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold'); // decideTrailingStopReplace 回 'none'（目標沒有更有利）
+  });
+
+  it('mirrors for SHORT — favorable move is price falling', () => {
+    const a = decideTradeAction(
+      tradeRow({ isLong: false, entry: 65000, stopLoss: 66000, tp1: 63000, exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 66000 },
+        markPrice: 64200, // entry(65000) - 0.8×riskDist(1000) = 64200
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('update_trailing_stop');
+    if (a.kind !== 'update_trailing_stop') return;
+    expect(a.place.stopPrice).toBe(65000);
+  });
+});
+
 describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)', () => {
   it('places a full-close TP1 condition order (closePosition) when none is placed yet', () => {
     const a = decideTradeAction(
@@ -401,30 +462,50 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
 });
 
 describe('deriveLiveCloseReason', () => {
+  // LONG example: entry 100, stopLoss 95 — used across the LOSS-branch tests
+  // below since distinguishing pre_tp1_breakeven vs stop_loss now needs a
+  // real entry/stopLoss/avgExitPrice comparison, not just the binary result.
+  const longParams = { entry: 100, stopLoss: 95 };
+
   it('trusts our own pending reason when we forced the close ourselves — no guessing', () => {
     expect(deriveLiveCloseReason({
       pendingCloseReason: 'time_stop_stall', strategy: 'A', result: 'LOSS',
+      ...longParams, avgExitPrice: 95,
     })).toBe('time_stop_stall');
     expect(deriveLiveCloseReason({
       pendingCloseReason: 'time_stop_expiry_post_tp1', strategy: 'A', result: 'WIN_TP1',
+      ...longParams, avgExitPrice: 110,
     })).toBe('time_stop_expiry_post_tp1');
   });
 
-  it('falls back to stop_loss for a LOSS with no pending reason — the exchange stopped us out', () => {
+  it('falls back to stop_loss for a LOSS with no pending reason — exit price is close to the original stop', () => {
     expect(deriveLiveCloseReason({
       pendingCloseReason: null, strategy: 'A', result: 'LOSS',
+      ...longParams, avgExitPrice: 94.98, // near stopLoss=95, far from entry=100
     })).toBe('stop_loss');
+  });
+
+  // 2026-08-13（策略修改.md 修改1）：pre-TP1 保本止損上線後，LOSS 不再
+  // 保證是原始止損——出場價貼近 entry（跟 stopLoss 有明顯距離）代表是
+  // 保本止損觸發，不是原始止損。
+  it('distinguishes pre_tp1_breakeven from stop_loss by comparing exit price to both known levels', () => {
+    expect(deriveLiveCloseReason({
+      pendingCloseReason: null, strategy: 'A', result: 'LOSS',
+      ...longParams, avgExitPrice: 99.95, // near entry=100 (slippage), far from stopLoss=95
+    })).toBe('pre_tp1_breakeven');
   });
 
   it('falls back to tp2 for a strategy B WIN — its take-profit is a single full-close target', () => {
     expect(deriveLiveCloseReason({
       pendingCloseReason: null, strategy: 'B', result: 'WIN_TP1',
+      ...longParams, avgExitPrice: 110,
     })).toBe('tp2');
   });
 
   it('falls back to trailing_stop for a strategy A WIN — position could only hit zero after TP1 partial-filled', () => {
     expect(deriveLiveCloseReason({
       pendingCloseReason: null, strategy: 'A', result: 'WIN_TP1',
+      ...longParams, avgExitPrice: 108,
     })).toBe('trailing_stop');
   });
 });

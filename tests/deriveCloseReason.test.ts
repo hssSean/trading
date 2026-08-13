@@ -40,4 +40,20 @@ describe('deriveCloseReason', () => {
     const withoutFlag = deriveCloseReason({ closeResult: 'MANUAL_CLOSE', timeStopFired: false, autoClosedAfterTp1: false });
     expect(withFlag).not.toBe(withoutFlag);
   });
+
+  // 2026-08-13（策略修改.md 修改1）：pre-TP1 breakeven exit also produces
+  // closeResult='MANUAL_CLOSE' (same "closed by something other than TP/
+  // original SL" family as the time-stop paths) — hitPreTp1Breakeven must be
+  // checked before timeStopFired or it gets mislabeled as a time stop.
+  it('MANUAL_CLOSE + hitPreTp1Breakeven → pre_tp1_breakeven, even when timeStopFired is also true', () => {
+    expect(deriveCloseReason({
+      closeResult: 'MANUAL_CLOSE', timeStopFired: true, autoClosedAfterTp1: false, hitPreTp1Breakeven: true,
+    })).toBe('pre_tp1_breakeven');
+  });
+
+  it('MANUAL_CLOSE without hitPreTp1Breakeven falls through to the time-stop branches unchanged', () => {
+    expect(deriveCloseReason({
+      closeResult: 'MANUAL_CLOSE', timeStopFired: true, autoClosedAfterTp1: false, hitPreTp1Breakeven: false,
+    })).toBe('time_stop_stall');
+  });
 });

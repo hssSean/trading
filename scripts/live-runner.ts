@@ -199,7 +199,10 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
       const pending = row.close_reason !== null && PENDING_CLOSE_REASONS.has(row.close_reason)
         ? row.close_reason as TimeStopCloseReason
         : null;
-      const closeReason = deriveLiveCloseReason({ pendingCloseReason: pending, strategy: row.strategy === 'B' ? 'B' : 'A', result: result.result });
+      const closeReason = deriveLiveCloseReason({
+        pendingCloseReason: pending, strategy: row.strategy === 'B' ? 'B' : 'A', result: result.result,
+        entry: row.entry, stopLoss: row.stop_loss, avgExitPrice: result.exitPrice,
+      });
       const { error } = await supabase.from('trades').update({
         result: result.result,
         exit_price: result.exitPrice,

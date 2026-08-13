@@ -28,6 +28,11 @@ import { CloseReason } from '@/lib/monitorMath';
 // 分支撿到。門檻照抄 route.ts 那個常數，不是另外發明的數字。
 const WAITING_EXPIRY_BARS = 4;
 
+// 2026-08-13（docs/策略修改.md 修改1）：TP1 前保本保護，真倉路徑鏡像
+// route.ts 的 DB 模擬版本——同一個 0.8R 門檻、同樣單階不做多階梯，數字
+// 照抄不是另外發明（理由見 route.ts PRE_TP1_BREAKEVEN_TRIGGER_R 註解）。
+const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.8;
+
 // 對帳用：部位消失後，把 getUserTrades() 查回來的一批成交紀錄彙總成
 // 「加權平均出場價 + 總實現損益」——用 quoteQty/qty 算真正的成交均價，
 // 比對每筆成交價做簡單平均更準確（大單常常會拆成好幾筆不同價位成交）。
@@ -62,25 +67,34 @@ export function summarizeClosingTrades(trades: UserTrade[]): ClosingTradesSummar
 // 2026-08-12：真倉關單原因細分——之前 sync_closed_position 刻意只做贏/輸
 // 二元判斷（見下方該 action 產生處的長註解），理由是「多筆分批出場的加權
 // 均價無法可靠反推是哪個關卡觸發的，硬猜會汙染統計」（8/6 tier `?? 'A'`
-// 就是這樣出包的）。這裡不是猜——用的是三個已知事實，不是從出場價反推：
+// 就是這樣出包的）。這裡不是猜——用的是已知事實，不是從出場價反推：
 //   1. pendingCloseReason：如果是我們自己主動送出的 close_full_position
 //      （時間止損/盤整停滯），執行時就已經把原因寫回 DB 了，這裡直接讀，
 //      不用猜。
 //   2. strategy：DB 裡本來就有，不是猜的。
-// 只有這兩個事實都用不上（沒有 pendingCloseReason、純粹二元輸贏）時才做
-// 最保守的推論：LOSS 一定是原始止損觸發（真倉沒有「先浮盈又跌回止損」
-// 這種模糊地帶，止損就是止損）；WIN 則依策略區分——策略B的TP條件單本來
-// 就是整單觸發（tp1===tp2），策略A能走到這條「positionQty 歸零」路徑的
-// WIN，只可能是 TP1 已經部分平倉（不然部位不會變成 0）、剩餘部位被移動
-// 止損收掉，不需要另外查 tp1_hit 狀態才知道。
+//   3. entry/stopLoss/avgExitPrice：2026-08-13 補（策略修改.md 修改1
+//      上線後新增）——這三個都是已知事實，不是反推。「LOSS 一定是原始
+//      止損」這個舊假設不再成立：TP1 前保本止損上線後，真倉也會出現
+//      「先浮盈到 0.8R 又跌回保本點」這種結果落在 result=LOSS（手續費/
+//      滑價讓 realizedPnl 略負）的情況。entry 跟 stopLoss 一定是兩個不同
+//      的價位（止損定義上不等於進場價），出場價比較接近哪一個，就是哪個
+//      觸發的——這是拿已知的實際成交價去比對兩個已知候選價位，不是「從
+//      模糊的加權均價反推分類」那種猜法。
 export function deriveLiveCloseReason(params: {
   pendingCloseReason: TimeStopCloseReason | null;
   strategy: 'A' | 'B';
   result: 'WIN_TP1' | 'LOSS';
+  entry: number;
+  stopLoss: number;
+  avgExitPrice: number;
 }): CloseReason {
-  const { pendingCloseReason, strategy, result } = params;
+  const { pendingCloseReason, strategy, result, entry, stopLoss, avgExitPrice } = params;
   if (pendingCloseReason) return pendingCloseReason;
-  if (result === 'LOSS') return 'stop_loss';
+  if (result === 'LOSS') {
+    const distToEntry    = Math.abs(avgExitPrice - entry);
+    const distToStopLoss = Math.abs(avgExitPrice - stopLoss);
+    return distToEntry < distToStopLoss ? 'pre_tp1_breakeven' : 'stop_loss';
+  }
   return strategy === 'B' ? 'tp2' : 'trailing_stop';
 }
 
@@ -325,6 +339,27 @@ export function decideTradeAction(
       if (tp1Decision.skip) return { kind: 'hold', reason: `TP1 條件單掛單跳過：${tp1Decision.reason}` };
       return { kind: 'place_tp1_order', order: tp1Decision.order };
     }
+
+    // 2026-08-13（策略修改.md 修改1）：TP1 前保本保護。浮盈首次達
+    // PRE_TP1_BREAKEVEN_TRIGGER_R 時把止損移到進場價——複用
+    // decideTrailingStopReplace（本來是給 TP1 後棘輪用的單向棘輪決策），
+    // 不用另外記「有沒有 arm 過」的狀態：它本身只往有利方向移動，已經
+    // arm 過（現有止損 ≥ 進場價）時會自然回傳 'none'，冪等安全。
+    const riskDist = Math.abs(trade.entry - trade.stopLoss);
+    const favorableMoveR = riskDist > 0
+      ? (trade.isLong ? snapshot.markPrice - trade.entry : trade.entry - snapshot.markPrice) / riskDist
+      : 0;
+    if (favorableMoveR >= PRE_TP1_BREAKEVEN_TRIGGER_R) {
+      const breakevenDecision = decideTrailingStopReplace({
+        tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
+        currentStopOrder: { orderId: snapshot.currentStop.algoId, stopPrice: snapshot.currentStop.triggerPrice },
+        desiredStopPrice: trade.entry, filters: snapshot.filters,
+      });
+      if (breakevenDecision.kind === 'replace') {
+        return { kind: 'update_trailing_stop', place: breakevenDecision.place, cancelOrderId: breakevenDecision.cancelOrderId };
+      }
+    }
+
     return holdOrTimeStop(trade, snapshot, false, '持有中，等待 TP1 條件單觸發');
   }
 

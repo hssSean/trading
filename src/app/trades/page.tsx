@@ -38,6 +38,10 @@ const CLOSE_REASON_LABEL: Record<string, string> = {
   time_stop_stall:           '時間止損（盤面停滯）',
   time_stop_expiry:          '到期平倉（未達TP1）',
   time_stop_expiry_post_tp1: '到期平倉（TP1已達標）',
+  // 2026-08-13（策略修改.md 修改1）：TP1 前浮盈達 +0.8R 時的保本止損出場。
+  // 跟 trailing_stop（TP1後移動止損）刻意分開記錄，才能各自量測效果，
+  // 不然兩層保護的效果會混在一起分不出哪個在起作用。
+  pre_tp1_breakeven:         'TP1前保本出場',
   cancel_expired:            '掛單逾期未成交',
   cancel_ran_away:           '行情走遠未成交',
   cancel_tp1_direct:         '直達TP1未成交',
