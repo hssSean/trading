@@ -99,6 +99,15 @@ const NON_RETRYABLE_BINANCE_CODES = new Set([-4141, -1121]);
 // 進去的合法 pending 值（見該函式說明），不是隨便什麼字串都當真。
 const PENDING_CLOSE_REASONS = new Set<string>(['time_stop_stall', 'time_stop_expiry', 'time_stop_expiry_post_tp1']);
 
+// 推播標題用的關單原因文案。跟 trades/page.tsx 的 CLOSE_REASON_LABEL 是
+// 兩套刻意分開的東西：那邊是紀錄頁的完整敘述（「時間止損（盤面停滯）」），
+// 這邊要塞進推播標題跟 symbol 併排，得短。共用同一組 key 值以免對不上。
+const CLOSE_REASON_PUSH_LABEL: Record<string, string> = {
+  time_stop_stall:           '⏱ 盤整停滯平倉',
+  time_stop_expiry:          '⏱ 到期平倉',
+  time_stop_expiry_post_tp1: '⏱ 到期平倉(TP1已達標)',
+};
+
 function nowStr(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
@@ -405,8 +414,50 @@ async function notifyIfNeeded(
     return;
   }
 
+  // 2026-08-13：以下三種 action 之前全部落到最後那行 `return`，一則通知都
+  // 不會發——使用者實測回報「時間止損、時間取消掛單都收不到」，根因就是
+  // 這裡。notifyIfNeeded 是對「所有已執行的 action」呼叫的（主迴圈
+  // result.executed 分支），但函式本身只認得 3 種 kind，其餘靜默略過。
+
+  // ① 掛單超過 4 根 K 線未成交，我方主動撤單（2026-08-11 新增的 action，
+  //    當時只補了執行與清理，漏了通知）。跟 entry_never_filled 語意相同
+  //    （從未開倉）但成因不同：那個是掛單在交易所端自己消失，這個是我們
+  //    依規格 §3-A 主動撤掉的，文案要分得出來。
+  if (action.kind === 'cancel_stale_entry') {
+    await sendWebPushToUser(userId, {
+      title: `⏱ 掛單逾期取消 ${sym}`,
+      body: `${dir} 掛單超過 4 根 K 線未成交，已主動撤單（未進場，非持倉）`,
+      tag: `stale-${row.id}`,
+    });
+    return;
+  }
+
+  // ② 時間止損／盤整停滯／到期平倉——我方主動送出 MARKET 平倉單的那一刻。
+  //    這裡發的是「為什麼關」，下一輪 sync_closed_position 才有實際成交價與
+  //    損益（MARKET 單 ACK 不保證帶精確成交價，見 tradeExecutor.ts 說明），
+  //    兩則各自有用，不是重複：使用者需要立刻知道系統主動關了倉。
+  if (action.kind === 'close_full_position') {
+    await sendWebPushToUser(userId, {
+      title: `${CLOSE_REASON_PUSH_LABEL[action.closeReason] ?? '⏱ 系統平倉'} ${sym}`,
+      body: `${dir} 系統主動平倉中，成交結果稍後回報`,
+      tag: `forceclose-${row.id}`,
+    });
+    return;
+  }
+
   if (action.kind !== 'sync_closed_position') return;
-  const label = action.result === 'WIN_TP1' ? '✅ 出場獲利' : '❌ 止損出場';
+
+  // ③ 出場通知原本只用損益正負分「出場獲利 / 止損出場」，時間止損關掉的單
+  //    因此被標成「❌ 止損出場」——使用者看到會以為是價格碰到止損價，分不出
+  //    是系統主動關的。2026-08-12 起 markForceCloseReason 會把真正的關單原因
+  //    先寫進 DB，而 row 是每輪重新查的（select 已含 close_reason），所以這裡
+  //    讀得到那個 pending 值，可以標對。讀不到才退回原本的損益正負判斷。
+  const pending = row.close_reason !== null && PENDING_CLOSE_REASONS.has(row.close_reason)
+    ? row.close_reason as TimeStopCloseReason
+    : null;
+  const label = pending
+    ? (CLOSE_REASON_PUSH_LABEL[pending] ?? '⏱ 系統平倉')
+    : (action.result === 'WIN_TP1' ? '✅ 出場獲利' : '❌ 止損出場');
   const pnlStr = `${action.realizedPnl >= 0 ? '+' : ''}${action.realizedPnl.toFixed(2)} USDT`;
   await sendWebPushToUser(userId, {
     title: `${label} ${sym}`,
@@ -740,6 +791,15 @@ async function runCycle(
           // exchange_entry_order_id === null 保證沒下過任何單，不用撤條件單
           // （跟 entry_never_filled 同一個理由），也不是 LOSS，不用設冷卻。
           await cleanupAfterTradeClosed(binance, redis, row, false, false);
+          // 2026-08-13：這條路徑同樣沒有推播——推薦單就這樣無聲消失，使用者
+          // 只會在 App 裡看到卡片變成「交易對目前無法下單」。跟其他「推薦單
+          // 沒進場就結束」的時機（entry_never_filled / cancel_stale_entry）
+          // 一致補上，讓「這張單為什麼不見了」在手機上就答得出來。
+          await sendWebPushToUser(userId, {
+            title: `⚠️ 交易對無法下單 ${row.symbol.replace('USDT', '/USDT')}`,
+            body: `幣安回應 [${code}]，這個交易對目前不可交易，推薦單已取消（未進場）`,
+            tag: `unavailable-${row.id}`,
+          });
         }
       } else {
         console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${describeError(e)}`);
