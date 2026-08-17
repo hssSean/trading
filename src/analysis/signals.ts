@@ -30,6 +30,25 @@ function calcVolRatio(candles: Candle[]): number {
   return avg > 0 ? candles[candles.length - 1].volume / avg : 1;
 }
 
+// 2026-08-17：幣安 klines 回傳陣列最後一根永遠可能是「還在跑」的未收盤棒
+// （openTime 已過但 closeTime 還沒到）。掃描每 5 分鐘跑一次、signalCache
+// 又是新棒一開盤就算一次訊號——實測 832 個幣種-小時樣本，這時最後一根棒
+// 平均只走了 5-8 分鐘，量能只有完整棒的 10%。凡是「拿最後一根棒的量/影線
+// 幾何去跟其他完整棒比較大小」的計算，混進未收盤棒會嚴重失真：
+//   - calcVolRatio：現在棒量 vs 前20棒均量——量能被系統性低估九成，
+//     成交量分組（滿分10）幾乎從沒拿到過分數
+//   - isBullishCandle / detectCandlePatterns：未收盤棒的開高低收幾何
+//     還沒定型，方向判斷跟真正收盤後的方向一致率只有 57%（擲硬幣 50%）
+//   - calcAtr：未收盤棒的真實波幅天然偏小，真實波動度被稀釋低估
+// price（進場價）、EMA/RSI/MACD、結構分析則刻意保留用原始 candles 最後
+// 一根（含未收盤）——那才是真正的即時報價，這幾類是連續平滑指標或需要
+// 即時價位判斷，不是「完整週期量/幾何跟其他完整週期比大小」這一類問題。
+function lastClosedCandles(candles: Candle[]): Candle[] {
+  if (candles.length < 2) return candles;
+  const last = candles[candles.length - 1];
+  return last.closeTime > Date.now() ? candles.slice(0, -1) : candles;
+}
+
 function calcEmaSlope(candles: Candle[], period: number, lookback = 5): 'up' | 'down' | 'flat' {
   const closes = candles.map((c) => c.close);
   const k = 2 / (period + 1);
@@ -208,7 +227,9 @@ export function generateSignals(
 
   const cur             = candles[candles.length - 1];
   const price           = cur.close;
-  const isBullishCandle = cur.close > cur.open;
+  const closed          = lastClosedCandles(candles);
+  const closedCur       = closed[closed.length - 1];
+  const isBullishCandle = closedCur.close > closedCur.open;
 
   // ── Hard gate 1 (intraday): skip ranging markets entirely ────
   // Ranging = no momentum = no clean TP target reachable in a day.
@@ -232,11 +253,11 @@ export function generateSignals(
   const fvgs      = findFairValueGaps(candles).filter((f) => !f.filled);
   const srLevels  = findSRLevels(candles);
 
-  const atrVal     = calcAtr(candles);
+  const atrVal     = calcAtr(closed);
   const atrPct     = atrVal / price;
-  const volRatio   = calcVolRatio(candles);
+  const volRatio   = calcVolRatio(closed);
   const ema50Slope = calcEmaSlope(candles, intraday ? 20 : 50); // faster slope for intraday
-  const patterns   = detectCandlePatterns(candles);
+  const patterns   = detectCandlePatterns(closed);
   const divergence = detectRsiDivergence(candles);
 
   // Hard gate: extreme volatility → no tradeable SL. 2026-07-17 journal review:
@@ -727,9 +748,10 @@ export function generateMeanReversionSignals(
 
   const cur      = candles[candles.length - 1];
   const price    = cur.close;
-  const atrVal   = calcAtr(candles);
-  const volRatio = calcVolRatio(candles);
-  const patterns = detectCandlePatterns(candles);
+  const closed   = lastClosedCandles(candles);
+  const atrVal   = calcAtr(closed);
+  const volRatio = calcVolRatio(closed);
+  const patterns = detectCandlePatterns(closed);
   const signals: TradingSignal[] = [];
 
   // ── LONG: BB lower touch + RSI crosses above 35 ─────────────
