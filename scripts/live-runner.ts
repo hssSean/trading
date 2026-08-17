@@ -285,6 +285,18 @@ async function buildSnapshot(
     try {
       const startTime = row.filled_at ?? row.opened_at;
       recentTrades = await binance.getUserTrades(row.symbol, { startTime });
+      // 2026-08-17：needs_reconcile 卡死時完全看不出是「查詢本身失敗/沒資料」
+      // 還是「summarizeClosingTrades 濾方向濾掉全部」——兩種原因會走到同一句
+      // reason 文字（見 tradeBridge.ts 該分支），log 上分不出來。印出查回來
+      // 幾筆、各自 side 分布，跟 DB 記的 direction 對照，一眼就能看出是不是
+      // 方向記錄跟真實成交對不上（例如 DB 存 LONG 但實際成交是 SELL 開倉）。
+      if (recentTrades.length > 0) {
+        const sides = recentTrades.reduce<Record<string, number>>((acc, t) => {
+          acc[t.side] = (acc[t.side] ?? 0) + 1;
+          return acc;
+        }, {});
+        console.log(`[snapshot] ${row.symbol}（${row.id}）對帳查到 ${recentTrades.length} 筆成交，方向分布 ${JSON.stringify(sides)}，DB記錄 direction=${row.direction}`);
+      }
     } catch (e) {
       console.error(`[snapshot] ${row.symbol} getUserTrades 失敗，這輪標記需要對帳: ${String(e).slice(0, 150)}`);
     }
