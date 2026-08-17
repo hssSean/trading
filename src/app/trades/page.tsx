@@ -38,9 +38,10 @@ const CLOSE_REASON_LABEL: Record<string, string> = {
   time_stop_stall:           '時間止損（盤面停滯）',
   time_stop_expiry:          '到期平倉（未達TP1）',
   time_stop_expiry_post_tp1: '到期平倉（TP1已達標）',
-  // 2026-08-13（策略修改.md 修改1）：TP1 前浮盈達 +0.8R 時的保本止損出場。
-  // 跟 trailing_stop（TP1後移動止損）刻意分開記錄，才能各自量測效果，
-  // 不然兩層保護的效果會混在一起分不出哪個在起作用。
+  // 2026-08-13（策略修改.md 修改1）：TP1 前浮盈達門檻時的保本止損出場
+  // （門檻值見 PRE_TP1_BREAKEVEN_TRIGGER_R，2026-08-17 從 0.8R 調到
+  // 0.5R）。跟 trailing_stop（TP1後移動止損）刻意分開記錄，才能各自
+  // 量測效果，不然兩層保護的效果會混在一起分不出哪個在起作用。
   pre_tp1_breakeven:         'TP1前保本出場',
   cancel_expired:            '掛單逾期未成交',
   cancel_ran_away:           '行情走遠未成交',
@@ -961,11 +962,19 @@ export default function TradesPage() {
       const { trades: rawRows } = await res.json() as { trades: Record<string, unknown>[] };
 
       // 時間輸出 ISO（含年份）：舊格式「7/17 上午08:00」缺年份，
-      // 匯回「績效體檢」或 Excel 排序都會出問題
+      // 匯回「績效體檢」或 Excel 排序都會出問題。
+      // 2026-08-17：原本用 getFullYear/getHours 等本地時區欄位，跟畫面上
+      // 卡片時間（固定 Asia/Taipei，見上面 fmtTime 註解）不一致——多數
+      // 使用者裝置剛好在台灣所以沒感覺，換裝置匯出就會對不上。改用
+      // toLocaleString 的 en-CA + Asia/Taipei（en-CA 格式是 YYYY-MM-DD，
+      // 唯一內建能直接吐這個順序的 locale，不用自己組字串）。
       const isoDate = (ts: number) => {
-        const d = new Date(ts);
-        const pad = (n: number) => String(n).padStart(2, '0');
-        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        const parts = new Date(ts).toLocaleString('en-CA', {
+          timeZone: 'Asia/Taipei',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        return parts.replace(',', '');
       };
       // R倍數＝損益% ÷ 止損距離%（規格慣例：損益一律用 R 衡量，原始價格 % 會因
       // 止損距離不同而失真——見 CLAUDE.md「調參紀律」）。CANCELLED/尚無 pnl 的列給空值。
