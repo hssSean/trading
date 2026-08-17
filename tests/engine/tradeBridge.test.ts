@@ -183,7 +183,7 @@ describe('decideTradeAction — needs reconcile', () => {
 
 describe('summarizeClosingTrades', () => {
   it('returns null for an empty list', () => {
-    expect(summarizeClosingTrades([])).toBeNull();
+    expect(summarizeClosingTrades([], true)).toBeNull();
   });
 
   it('computes a quantity-weighted average exit price across multiple fills at different prices', () => {
@@ -191,7 +191,7 @@ describe('summarizeClosingTrades', () => {
       { id: 1, orderId: 1, symbol: 'BTCUSDT', side: 'SELL', price: '66000', qty: '0.006', quoteQty: '396', realizedPnl: '6', commission: '0.3', commissionAsset: 'USDT', time: 1, maker: true, buyer: false },
       { id: 2, orderId: 1, symbol: 'BTCUSDT', side: 'SELL', price: '68000', qty: '0.004', quoteQty: '272', realizedPnl: '9', commission: '0.2', commissionAsset: 'USDT', time: 2, maker: false, buyer: false },
     ];
-    const s = summarizeClosingTrades(trades);
+    const s = summarizeClosingTrades(trades, true);
     expect(s).not.toBeNull();
     if (!s) return;
     // (396+272)/(0.006+0.004) = 668/0.01 = 66800 — 加權平均，不是 (66000+68000)/2
@@ -199,6 +199,44 @@ describe('summarizeClosingTrades', () => {
     expect(s.totalQty).toBeCloseTo(0.01, 8);
     expect(s.totalRealizedPnl).toBeCloseTo(15, 8);
     expect(s.totalCommission).toBeCloseTo(0.5, 8);
+  });
+
+  it('ignores entry-side fills mixed into the same query window (LONG entry=BUY, exit=SELL)', () => {
+    const trades: UserTrade[] = [
+      // 進場成交（BUY）——不該被算進平倉均價
+      { id: 1, orderId: 1, symbol: 'HYPEUSDT', side: 'BUY', price: '57.074', qty: '10', quoteQty: '570.74', realizedPnl: '0', commission: '0.3', commissionAsset: 'USDT', time: 1, maker: true, buyer: true },
+      // 平倉成交（SELL）——只有這筆該被計入
+      { id: 2, orderId: 2, symbol: 'HYPEUSDT', side: 'SELL', price: '55.5', qty: '10', quoteQty: '555', realizedPnl: '-15.74', commission: '0.3', commissionAsset: 'USDT', time: 2, maker: false, buyer: false },
+    ];
+    const s = summarizeClosingTrades(trades, true);
+    expect(s).not.toBeNull();
+    if (!s) return;
+    expect(s.avgExitPrice).toBeCloseTo(55.5, 6);
+    expect(s.totalRealizedPnl).toBeCloseTo(-15.74, 6);
+  });
+
+  it('returns null when only entry-side fills are present (closing fill not yet propagated)', () => {
+    // 對帳當下 getUserTrades 只查得到進場成交（幣安平倉成交還沒同步進來）——
+    // 這是 2026-08-16 撞到的真實 bug：舊版會把這批 BUY 均價當成出場價，
+    // realizedPnl 恆為 0，誤判成 WIN。新版必須回 null，讓呼叫端退回 needs_reconcile。
+    const trades: UserTrade[] = [
+      { id: 1, orderId: 1, symbol: 'HYPEUSDT', side: 'BUY', price: '57.074', qty: '10', quoteQty: '570.74', realizedPnl: '0', commission: '0.3', commissionAsset: 'USDT', time: 1, maker: true, buyer: true },
+    ];
+    expect(summarizeClosingTrades(trades, true)).toBeNull();
+  });
+
+  it('for a SHORT trade, closing side is BUY (not SELL)', () => {
+    const trades: UserTrade[] = [
+      // 進場成交（SHORT 的進場是 SELL）——不該被算進平倉均價
+      { id: 1, orderId: 1, symbol: 'BTCUSDT', side: 'SELL', price: '65000', qty: '0.01', quoteQty: '650', realizedPnl: '0', commission: '0.3', commissionAsset: 'USDT', time: 1, maker: true, buyer: false },
+      // 平倉成交（SHORT 的平倉是 BUY）
+      { id: 2, orderId: 2, symbol: 'BTCUSDT', side: 'BUY', price: '64000', qty: '0.01', quoteQty: '640', realizedPnl: '10', commission: '0.3', commissionAsset: 'USDT', time: 2, maker: false, buyer: true },
+    ];
+    const s = summarizeClosingTrades(trades, false);
+    expect(s).not.toBeNull();
+    if (!s) return;
+    expect(s.avgExitPrice).toBeCloseTo(64000, 6);
+    expect(s.totalRealizedPnl).toBeCloseTo(10, 6);
   });
 });
 

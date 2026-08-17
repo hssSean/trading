@@ -36,6 +36,21 @@ const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.8;
 // 對帳用：部位消失後，把 getUserTrades() 查回來的一批成交紀錄彙總成
 // 「加權平均出場價 + 總實現損益」——用 quoteQty/qty 算真正的成交均價，
 // 比對每筆成交價做簡單平均更準確（大單常常會拆成好幾筆不同價位成交）。
+//
+// 2026-08-16 實測撞到嚴重 bug：呼叫端（live-runner）用 `startTime:
+// filled_at` 查成交紀錄，查回來的是「成交之後的所有成交」——包含進場
+// 那幾筆自己的成交，不只是平倉的。舊版本把整批不分方向全部平均，進場
+// 成交的 realizedPnl 恆為 0，一旦平倉成交還沒同步進幣安（真實撞到過：
+// positionRisk 已經歸零，userTrades 還沒跟上），summary 就只剩進場成交，
+// avgExitPrice 算出來等於進場價、realizedPnl=0 恆判定成 WIN——策略B
+// 因此被標成「TP2 全部達標」但帳戶實際虧損 110 USDT。
+//
+// 修法：只算「平倉方向」的成交（LONG 的平倉是 SELL，SHORT 的平倉是
+// BUY），進場方向的成交（即使混在同一批查詢結果裡）直接濾掉。濾完一筆
+// 都不剩就回 null——呼叫端本來就有這個分支（見 decideTradeAction 該
+// action 產生處），summary 是 null 時會退回 needs_reconcile 等下一輪
+// 幣安那邊同步完再重查，不會用不完整的資料硬算出一個看起來合理但是
+// 錯的答案。
 export interface ClosingTradesSummary {
   avgExitPrice: number;
   totalQty: number;
@@ -43,13 +58,15 @@ export interface ClosingTradesSummary {
   totalCommission: number;
 }
 
-export function summarizeClosingTrades(trades: UserTrade[]): ClosingTradesSummary | null {
-  if (trades.length === 0) return null;
+export function summarizeClosingTrades(trades: UserTrade[], isLong: boolean): ClosingTradesSummary | null {
+  const closingSide = isLong ? 'SELL' : 'BUY';
+  const closingTrades = trades.filter(t => t.side === closingSide);
+  if (closingTrades.length === 0) return null;
   let totalQty = 0;
   let totalQuoteQty = 0;
   let totalRealizedPnl = 0;
   let totalCommission = 0;
-  for (const t of trades) {
+  for (const t of closingTrades) {
     totalQty += parseFloat(t.qty);
     totalQuoteQty += parseFloat(t.quoteQty);
     totalRealizedPnl += parseFloat(t.realizedPnl);
@@ -254,7 +271,7 @@ export function decideTradeAction(
   //    已經另外查過 getUserTrades() 並帶進 snapshot.recentTrades，直接算出
   //    結果；沒有的話只標記需要處理，不猜答案。
   if (snapshot.positionQty === 0 && !snapshot.entryOrderStillOpen) {
-    const summary = snapshot.recentTrades ? summarizeClosingTrades(snapshot.recentTrades) : null;
+    const summary = snapshot.recentTrades ? summarizeClosingTrades(snapshot.recentTrades, trade.isLong) : null;
     if (summary) {
       // result 刻意只做「贏/輸」二元判斷（用真實 realizedPnl 正負號，不是
       // 猜的），不嘗試從均價反推 WIN_TP1 vs WIN_TP2 這種細分類——多筆分批
