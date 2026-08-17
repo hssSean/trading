@@ -815,7 +815,15 @@ async function runCycle(
         // order，撿回它的 algoId 寫回 DB，下一輪 currentStop/tp1 就能正確
         // 辨識，不用等人工介入。
         try {
-          const existing = await binance.getOpenAlgoOrders(row.symbol);
+          // 2026-08-17：第一版傳 symbol 參數給 getOpenAlgoOrders(row.symbol) 過濾，
+          // 結果 COTIUSDT 明明在幣安 App 上看得到兩張條件單，這裡卻查到 0 筆——
+          // 懷疑是這個端點的 symbol 篩選參數沒有正常運作（帳戶級的 watchdog
+          // 呼叫 getOpenAlgoOrders() 不帶 symbol 反而抓得到 XRPUSDT 的孤兒單，
+          // 兩者對照就是這個差異）。改成不帶 symbol、抓全帳戶後自己在這裡篩，
+          // 順便印出原始筆數/內容，這樣如果這次還是抓不到，下次至少留得下
+          // 診斷資料，不用再憑空猜。
+          const all = await binance.getOpenAlgoOrders();
+          const existing = all.filter(a => a.symbol === row.symbol);
           const closeSide = row.direction === 'LONG' ? 'SELL' : 'BUY';
           const closeOrders = existing.filter(a => a.closePosition && a.side === closeSide);
           const stopOrder = closeOrders.find(a => a.orderType === 'STOP_MARKET' || a.orderType === 'STOP');
@@ -834,6 +842,10 @@ async function runCycle(
           }
           if (!healed) {
             console.error(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 -4130 但查不到對應的 closePosition 條件單，需要人工檢查: ${describeError(e)}`);
+            console.error(`[${nowStr()}]   診斷：全帳戶 algo order 共 ${all.length} 筆，這個 symbol 共 ${existing.length} 筆，預期方向 ${closeSide}`);
+            for (const a of existing) {
+              console.error(`[${nowStr()}]   → symbol=${a.symbol} side=${a.side} orderType=${a.orderType} closePosition=${a.closePosition} algoId=${a.algoId} triggerPrice=${a.triggerPrice}`);
+            }
           }
         } catch (e2) {
           console.error(`[${nowStr()}] ${row.symbol}（${row.id}）-4130 自我修復查詢失敗: ${String(e2).slice(0, 150)}`);
