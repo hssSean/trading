@@ -2037,6 +2037,11 @@ export async function GET(req: NextRequest) {
   let acctSize    = 1000;
   let acctRiskPct = 1;
   let muteCancelPush = false;
+  // 2026-08-17：這個使用者有沒有開 live-runner——插入新推薦單時要用，見下面
+  // insertData 的 status 欄位註解。跟 monitor 階段排除 live 使用者是同一個
+  // profiles.live_trading_enabled 欄位，這裡不查心跳（跟監控排除不同，這裡
+  // 只是決定初始 status 該不該樂觀當作已成交，不是決定誰該處理這筆單）。
+  let isLiveTradingUser = false;
   {
     const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL  || '';
     const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -2048,11 +2053,12 @@ export async function GET(req: NextRequest) {
           auth: { autoRefreshToken: false, persistSession: false },
         });
         const { data: sp } = await profileAdmin
-          .from('profiles').select('settings').eq('id', profileId).maybeSingle();
+          .from('profiles').select('settings,live_trading_enabled').eq('id', profileId).maybeSingle();
         const st = sp?.settings as { accountSize?: number; riskPctPerTrade?: number; muteCancelPush?: boolean } | null;
         if (st?.accountSize && st.accountSize > 0)         acctSize    = st.accountSize;
         if (st?.muteCancelPush)                            muteCancelPush = true;
         if (st?.riskPctPerTrade && st.riskPctPerTrade > 0) acctRiskPct = st.riskPctPerTrade;
+        isLiveTradingUser = sp?.live_trading_enabled === true;
       } catch (e) {
         console.error('[analyze] profile settings lookup threw:', String(e));
       }
@@ -2767,7 +2773,17 @@ export async function GET(req: NextRequest) {
                 reasons:      entrySignal.reasons,
                 entry_notes:  '',
                 opened_at:    Date.now(),
-                status:       isLimitOrder ? 'waiting' : 'active',
+                // 2026-08-17 實測撞到：市價進場例外（isLimitOrder=false）原本
+                // 不分使用者一律直接寫 'active'——這個假設對 DB 模擬使用者成立
+                // （這支自己的K線模擬在同一次請求裡就會確認成交），對 live-runner
+                // 使用者不成立：真的下單是 live-runner 自己下一輪輪詢才會做，
+                // 而且可能失敗（實測撞到 ETHUSDT 保證金不足，訂單從未送出）。
+                // 提早寫 'active' 讓 App 顯示「持倉中」+完整進場/止損資訊，但
+                // 交易所端根本沒有這個部位——幽靈倉位。live 使用者一律先寫
+                // 'waiting'，只信 live-runner 自己輪詢確認 positionQty>0 後的
+                // 自我修復（scripts/live-runner.ts 「自我修復：真的有部位」那段）
+                // 才轉 'active'，不再樂觀假設。
+                status:       (isLimitOrder || isLiveTradingUser) ? 'waiting' : 'active',
                 signal_price: sp,
                 strategy:            entrySignal.strategy ?? 'A',
                 regime:              entrySignal.regime ?? null,
