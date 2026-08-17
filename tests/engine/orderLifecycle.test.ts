@@ -209,14 +209,33 @@ describe('decideTrailingStopReplace', () => {
     const a = decideTrailingStopReplace(trailInput());
     expect(a.kind).toBe('initialize');
     if (a.kind !== 'initialize') return;
-    expect(a.place).toEqual({
+    expect(a.place).toMatchObject({
       symbol: 'BTCUSDT',
       side: 'SELL',
       type: 'STOP_MARKET',
       stopPrice: 65100,
       closePosition: true,
-      newClientOrderId: 'trade-1-sl-65100',
     });
+    // 2026-08-17：clientOrderId 的價格部分改成固定 6 碼雜湊（見 hashPrice
+    // 註解），不再是原始價格字串——只斷言格式，不鎖死雜湊實作細節。
+    expect(a.place.newClientOrderId).toMatch(/^trade-1-sl-[0-9a-z]{6}$/);
+  });
+
+  it('newClientOrderId 永遠不超過幣安 36 字元上限，即使是需要很多小數位的低價幣', () => {
+    // 2026-08-17 實測撞到的真實 bug：COTIUSDT 這種低價幣，止損價需要多位
+    // 小數才能表示 tick size，加上 JS 浮點數轉字串偶爾冒出的誤差位數
+    // （如 0.011066999999999999），舊版直接把價格字串接在 ID 後面，超過
+    // 36 字元被幣安用 -4015 拒絕——止損單永遠掛不出去，部位裸奔。
+    const a = decideTrailingStopReplace(trailInput({
+      tradeId: 'trade-1786684938436-spsm2', // 真實撞到的 tradeId 格式，25 字元
+      symbol: 'COTIUSDT',
+      desiredStopPrice: 0.011066999999999999,
+      filters: { stepSize: 1, tickSize: 0.0001, minNotional: 5 },
+    }));
+    expect(a.kind).toBe('initialize');
+    if (a.kind !== 'initialize') return;
+    expect(a.place.newClientOrderId).toBeDefined();
+    expect(a.place.newClientOrderId!.length).toBeLessThan(36);
   });
 
   it('mirrors side for SHORT (BUY closes a short)', () => {

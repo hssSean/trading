@@ -14,6 +14,28 @@ import { PlaceOrderParams } from './binanceClient';
 import { SymbolFilters, roundToStepSize, roundToTickSize } from './precision';
 import { TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
 
+// 2026-08-17：幣安 clientOrderId 上限 36 字元。tradeId 固定 25 字元
+// （route.ts `trade-${Date.now()}-${...}`），decideTrailingStopReplace 原本
+// 直接把價格數字接在後面（`-sl-${roundedTarget}`）——高價幣（BTC「65100」
+// 5碼）平常夠用，但低價幣要更多小數位才能表示 tick size（COTIUSDT
+// 「0.010842」8碼），偶爾還會冒出 JS 浮點誤差位數，實測撞到 -4015
+// Client order id length should be less than 36 chars：這筆單的止損單因此
+// 永遠掛不出去，部位卡在裸奔（watchdog 回報 position_without_stop）。
+// 改成把價格編碼成固定 6 碼雜湊，長度不再隨幣價精度變動，同時保留「同一個
+// 目標價 → 同一個 ID」這個冪等性質（雜湊本身也是純函數、確定性的）。
+function hashPrice(price: number): string {
+  // FNV-1a 32-bit，純函數、無外部依賴。36^6 (約21.8億) < 2^32 (約42.9億)，
+  // 32-bit 雜湊值直接轉 base36 有時會冒出 7 碼——先 mod 36^6 再轉，
+  // 才能保證輸出「恰好」6 碼，不是「至少」6 碼（padStart 只補短不截長）。
+  let h = 0x811c9dc5;
+  const s = String(price);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return ((h >>> 0) % Math.pow(36, 6)).toString(36).padStart(6, '0');
+}
+
 // ── Entry order ─────────────────────────────────────────────────────────────
 //
 // The one piece of "訊號 → 真的開倉" that didn't exist anywhere yet. Everything
@@ -306,7 +328,7 @@ export function decideTrailingStopReplace(input: TrailingStopReplaceInput): Trai
     // (e.g. the ratchet math re-runs on a cron cycle where nothing moved) must
     // collapse to the same ID and get rejected as a duplicate, not place a
     // second identical stop order next to the one already live.
-    newClientOrderId: `${input.tradeId}-sl-${roundedTarget}`,
+    newClientOrderId: `${input.tradeId}-sl-${hashPrice(roundedTarget)}`,
   };
 
   if (input.currentStopOrder === null) {
