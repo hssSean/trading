@@ -804,6 +804,40 @@ async function runCycle(
             tag: `unavailable-${row.id}`,
           });
         }
+      } else if (code === -4130) {
+        // 2026-08-17 實測撞到 COTIUSDT：幣安回「An open stop or take profit
+        // order with GTE and closePosition in the direction is existing」，
+        // 但 DB 的 exchange_stop_algo_id/exchange_tp1_algo_id 是 null——多半
+        // 是先前某次 placeOrder 其實在幣安端成功了，但寫回 DB 那一步失敗/
+        // 沒執行到（setStopAlgoId/setTp1AlgoId 只 log 錯誤不會中斷），DB
+        // 從此永久失明，每輪都想再下一張同方向 closePosition 條件單，被
+        // 幣安擋下，卡死重試迴圈。自我修復：去查這個 symbol 現存的 algo
+        // order，撿回它的 algoId 寫回 DB，下一輪 currentStop/tp1 就能正確
+        // 辨識，不用等人工介入。
+        try {
+          const existing = await binance.getOpenAlgoOrders(row.symbol);
+          const closeSide = row.direction === 'LONG' ? 'SELL' : 'BUY';
+          const closeOrders = existing.filter(a => a.closePosition && a.side === closeSide);
+          const stopOrder = closeOrders.find(a => a.orderType === 'STOP_MARKET' || a.orderType === 'STOP');
+          const tpOrder   = closeOrders.find(a => a.orderType === 'TAKE_PROFIT_MARKET' || a.orderType === 'TAKE_PROFIT');
+          const freshPersist = makePersistence(supabase, row);
+          let healed = false;
+          if (stopOrder && row.exchange_stop_algo_id !== stopOrder.algoId) {
+            await freshPersist.setStopAlgoId(row.id, stopOrder.algoId);
+            console.log(`[${nowStr()}] ${row.symbol}（${row.id}）自我修復：撿回既有止損單 algoId=${stopOrder.algoId}`);
+            healed = true;
+          }
+          if (tpOrder && row.exchange_tp1_algo_id !== tpOrder.algoId) {
+            await freshPersist.setTp1AlgoId(row.id, tpOrder.algoId);
+            console.log(`[${nowStr()}] ${row.symbol}（${row.id}）自我修復：撿回既有TP1單 algoId=${tpOrder.algoId}`);
+            healed = true;
+          }
+          if (!healed) {
+            console.error(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 -4130 但查不到對應的 closePosition 條件單，需要人工檢查: ${describeError(e)}`);
+          }
+        } catch (e2) {
+          console.error(`[${nowStr()}] ${row.symbol}（${row.id}）-4130 自我修復查詢失敗: ${String(e2).slice(0, 150)}`);
+        }
       } else {
         console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${describeError(e)}`);
       }
