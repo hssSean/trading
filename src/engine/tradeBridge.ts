@@ -29,9 +29,11 @@ import { CloseReason } from '@/lib/monitorMath';
 const WAITING_EXPIRY_BARS = 4;
 
 // 2026-08-13（docs/策略修改.md 修改1）：TP1 前保本保護，真倉路徑鏡像
-// route.ts 的 DB 模擬版本——同一個 0.8R 門檻、同樣單階不做多階梯，數字
-// 照抄不是另外發明（理由見 route.ts PRE_TP1_BREAKEVEN_TRIGGER_R 註解）。
-const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.8;
+// route.ts 的 DB 模擬版本——同一個門檻、同樣單階不做多階梯，數字照抄
+// 不是另外發明（理由見 route.ts PRE_TP1_BREAKEVEN_TRIGGER_R 註解）。
+// 2026-08-17：0.8→0.5，原本的 0.8 實測 0/20 虧損單觸發過，等於死碼——
+// 同上，理由見 route.ts 同名常數註解。
+const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.5;
 
 // 對帳用：部位消失後，把 getUserTrades() 查回來的一批成交紀錄彙總成
 // 「加權平均出場價 + 總實現損益」——用 quoteQty/qty 算真正的成交均價，

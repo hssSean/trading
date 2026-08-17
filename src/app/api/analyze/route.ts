@@ -52,7 +52,13 @@ const WAITING_EXPIRY_BARS  = 4;              // spec §3-A: 掛單有效期最�
 // 0.8R 是照 15 筆回吐樣本挑的中庸值（9 筆 MFE≥0.62R，設 0.8 可攔到其中
 // 6 筆且不會太貼近進場價被雜訊掃出）——不是最佳化結果，樣本不足以決定
 // 精確門檻，之後不要憑感覺微調這個數字，要調就重新拉數據。
-const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.8;
+//
+// 2026-08-17（docs/策略體檢-2026-08-16.md §0）：8/16 CSV 複查發現 0.8R
+// 這個值實測 0/20 虧損單觸發過（最高 MFE 只有 0.65R）——門檻設太高，這
+// 個機制上線以來等於沒生效。同一份資料顯示 5/20 虧損單 MFE≥0.5R，改成
+// 0.5 才會真的開始攔到東西。這不是新一輪最佳化，是修正「原始估計值挑
+// 太保守，導致機制實質死碼」的問題。
+const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.5;
 
 function tfBarMinutes(tf: string | null | undefined): number {
   switch (tf) {

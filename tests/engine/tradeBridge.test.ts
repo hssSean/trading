@@ -300,14 +300,15 @@ describe('decideTradeAction — TP1 order placement (strategy A, partial)', () =
 
 describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 真倉鏡像)', () => {
   // tradeRow 預設 entry=65000, stopLoss=64000, tp1=67000 → riskDist=1000,
-  // 0.8R 門檻 = entry + 800 = 65800（LONG）。
-  it('moves the stop to breakeven once markPrice reaches +0.8R, before TP1 happens', () => {
+  // 0.5R 門檻 = entry + 500 = 65500（LONG）。2026-08-17：門檻從 0.8→0.5
+  // （見 PRE_TP1_BREAKEVEN_TRIGGER_R 定義處註解），測試數字跟著調整。
+  it('moves the stop to breakeven once markPrice reaches +0.5R, before TP1 happens', () => {
     const a = decideTradeAction(
       tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
       snapshot({
         positionQty: 0.01, // TP1 還沒發生（entryQty 沒有變小）
         currentStop: { algoId: 222, triggerPrice: 64000 }, // 原始止損，還沒 arm 過
-        markPrice: 65800, // entry(65000) + 0.8×riskDist(1000) = 65800
+        markPrice: 65500, // entry(65000) + 0.5×riskDist(1000) = 65500
       }),
       risk(),
     );
@@ -317,13 +318,13 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
     expect(a.cancelOrderId).toBe(222);
   });
 
-  it('holds without arming when markPrice has not yet reached the 0.8R threshold', () => {
+  it('holds without arming when markPrice has not yet reached the 0.5R threshold', () => {
     const a = decideTradeAction(
       tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
-        markPrice: 65700, // 差 100，還沒到 0.8R
+        markPrice: 65400, // 差 100，還沒到 0.5R
       }),
       risk(),
     );
@@ -336,7 +337,7 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 65000 }, // 已經 arm 過（= entry）
-        markPrice: 65800,
+        markPrice: 65500,
       }),
       risk(),
     );
@@ -349,7 +350,7 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 66000 },
-        markPrice: 64200, // entry(65000) - 0.8×riskDist(1000) = 64200
+        markPrice: 64500, // entry(65000) - 0.5×riskDist(1000) = 64500
       }),
       risk(),
     );
@@ -471,7 +472,10 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
-        markPrice: 65600, // progress = 0.6R，不在停滯區間，不會被 stall 攔截
+        // progress = 0.4R：不在停滯區間(±0.3R)，也還沒到 2026-08-17 調降後
+        // 的保本門檻(0.5R)，才會真的落到這條時間止損分支而不是先被保本
+        // arm 攔截走（見上面 pre-TP1 breakeven arm 那組測試）。
+        markPrice: 65400,
         now: 25 * 3600_000, // 25 小時，超過 intraday 24h 上限
       }),
       risk(),
