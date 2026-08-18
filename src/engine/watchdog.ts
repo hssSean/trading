@@ -19,6 +19,10 @@ export interface ReconcileAnomaly {
   kind: AnomalyKind;
   symbol: string;
   detail: string;
+  // 2026-08-18：orphan_stop_order 專用——原本訂單編號只寫在 detail 字串裡，
+  // 呼叫端想真的把這張孤兒單撤掉還得去解析字串。獨立欄位讓「偵測」跟「善後」
+  // 可以接起來（見 live-runner 全帳戶對帳那段的自動撤單）。
+  orderId?: number;
 }
 
 const STOP_ORDER_TYPES = new Set(['STOP_MARKET', 'TAKE_PROFIT_MARKET']);
@@ -78,6 +82,7 @@ export function reconcilePositionsAndOrders(
           kind: 'orphan_stop_order',
           symbol,
           detail: `訂單 ${o.orderId}（${o.type}）沒有對應的持倉`,
+          orderId: o.orderId,
         });
       }
     }

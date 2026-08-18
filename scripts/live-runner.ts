@@ -304,7 +304,16 @@ async function buildSnapshot(
           acc[t.side] = (acc[t.side] ?? 0) + 1;
           return acc;
         }, {});
+        // 2026-08-18：XRPUSDT 實測——幣安網頁的歷史成交明明有一筆 8/17 15:33
+        // 的平倉 BUY，這裡帶 startTime（≈8/16 07:35）查卻只回 52 筆 SELL，
+        // 平倉那筆完全沒出現。查詢窗口涵蓋得到卻查不到，跟 getOpenAlgoOrders
+        // 帶 symbol 查不到是同一類的端點行為問題。印出「查詢起點」跟「實際
+        // 回傳的時間範圍」，下一輪就能判定是不是窗口被截斷（回傳最後一筆
+        // 遠早於現在＝確實被截）還是根本沒這筆資料。
+        const times = recentTrades.map(t => t.time).sort((a, b) => a - b);
+        const fmt = (ms: number) => new Date(ms).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
         console.log(`[snapshot] ${row.symbol}（${row.id}）對帳查到 ${recentTrades.length} 筆成交，方向分布 ${JSON.stringify(sides)}，DB記錄 direction=${row.direction}`);
+        console.log(`[snapshot]   查詢起點 startTime=${fmt(startTime)}／回傳範圍 ${fmt(times[0])} ~ ${fmt(times[times.length - 1])}`);
       }
     } catch (e) {
       console.error(`[snapshot] ${row.symbol} getUserTrades 失敗，這輪標記需要對帳: ${String(e).slice(0, 150)}`);
@@ -587,6 +596,25 @@ async function runCycle(
     if (anomalies.length > 0) {
       console.log(`[${nowStr()}] ⚠ 全帳戶對帳異常 ${anomalies.length} 筆:`);
       for (const a of anomalies) console.log(`   ${JSON.stringify(a)}`);
+
+      // 2026-08-18：孤兒條件單原本只印出來、沒人善後——XRPUSDT 那張
+      // TAKE_PROFIT_MARKET（1000000168510717）就這樣每 15 秒被重複回報超過
+      // 一整天。「沒有對應持倉的條件單」不只是雜訊：等這個 symbol 下次再
+      // 進場，這張殘留的止盈單會立刻用舊價位把新部位平掉。cleanupAfterTradeClosed
+      // 只能處理 DB 還追蹤得到的單，這裡補的是「DB 已經失去追蹤」那一類。
+      //
+      // 只撤 orphan_stop_order（定義上就是沒有持倉可保護的條件單，撤掉不會
+      // 讓任何部位失去保護）；position_without_stop 是相反的問題，交給
+      // decideTradeAction 第 4 步補掛，不在這裡處理。
+      for (const a of anomalies) {
+        if (a.kind !== 'orphan_stop_order' || a.orderId === undefined) continue;
+        try {
+          await binance.cancelOrder(a.symbol, a.orderId, true);
+          console.log(`[${nowStr()}] 🧹 已撤銷孤兒條件單 ${a.symbol} orderId=${a.orderId}（沒有對應持倉）`);
+        } catch (e) {
+          console.error(`[${nowStr()}] 撤銷孤兒條件單 ${a.symbol} orderId=${a.orderId} 失敗（下輪會再試）: ${describeError(e)}`);
+        }
+      }
     }
   } catch (e) {
     console.error(`[${nowStr()}] 全帳戶對帳讀取失敗: ${String(e).slice(0, 150)}`);
