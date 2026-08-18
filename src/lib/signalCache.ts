@@ -23,6 +23,7 @@
 // fallback" path) — so the explicit comparison is required for correctness,
 // not just defense-in-depth.
 import type { Candle, Regime, TradingSignal } from '../types';
+import type { RejectedCandidate } from '../analysis/signals';
 
 export interface SignalCacheEntry {
   lastBarOpenTime: number;
@@ -31,6 +32,11 @@ export interface SignalCacheEntry {
   signals: TradingSignal[];
   dbgLong: number;
   dbgShort: number;
+  // 2026-08-18（docs/TODO.md P2 #7）：被分數門檻擋掉的候選＋它的價位，給
+  // score_gate 影子模擬用。跟 dbgLong/dbgShort 一起快取的理由相同——1h 訊號
+  // 12 次掃描有 11 次是快取命中，不一起存的話影子候選只會在換 K 棒那一輪
+  // 出現，命中/未命中行為不一致。沒有被分數擋（或根本沒候選）時是 undefined。
+  rejected?: RejectedCandidate;
 }
 
 export function isSignalCacheHit(

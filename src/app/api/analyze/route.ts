@@ -3,6 +3,7 @@ import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange } from '@/api/binance';
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
+import type { RejectedCandidate } from '@/analysis/signals';
 import { Candle, Timeframe, TradingSignal, Regime } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { calcPositionPlan, formatPlanLine, tierRiskMultiplier, MAX_TOTAL_RISK_PCT } from '@/lib/position';
@@ -1809,11 +1810,19 @@ interface ShadowTrade {
   lastCheckedAt: number;
 }
 
-// Gates where a full signal existed — worth simulating. score_gate has no levels;
+// Gates where a full signal existed — worth simulating.
 // locked/same_candle/cooldown duplicate live trades and would double-count.
+//
+// 2026-08-18（docs/TODO.md P2 #7）：score_gate 加進來了。原本被排除的理由是
+// 「score_gate has no levels」——sub-threshold 候選沒有價位可模擬。查證後發現
+// 這個前提不成立：價位算式的每個輸入都在 tier 關卡之前就算好了，只是恰好
+// 寫在關卡裡面。抽成 buildSignalLevels 後被擋的候選也能算出同一組價位
+// （見 signals.ts 該函數與 RejectedCandidate 註解）。這是漏斗裡最大的一道
+// 關卡（擋掉約 55%）也是唯一的量測盲區，補上它才知道擋得對不對。
 const SHADOW_GATES = new Set([
   'confluence', 'no_entry_tf', 'btc_direction', 'btc_chaos', 'btc_pause', 'loss_cooldown',
   'same_dir_cap', 'total_risk_cap', 'circuit_breaker', 'event_filter', 'insert_failed',
+  'score_gate',
 ]);
 const SHADOW_MAX = 300; // hash size guard
 
@@ -2169,6 +2178,9 @@ export async function GET(req: NextRequest) {
     let topScore  = 0;
     let rawTopScore = 0; // best pre-gate score — shows near-misses in scan status
     let entryTfBias: 'LONG' | 'SHORT' | null = null; // entry TF's 4H EMA200 direction
+    // 2026-08-18（docs/TODO.md P2 #7）：進場時框那個「只差分數」的候選＋價位，
+    // 給 score_gate 影子模擬用。沒有被分數擋就維持 undefined。
+    let scoreGateRejected: RejectedCandidate | undefined;
 
     try {
       // (Removed: a fetchTicker24h(symbol) whose result was discarded. Present
@@ -2317,24 +2329,32 @@ export async function GET(req: NextRequest) {
             const cachedSig = getSignalCache(symbol, tf);
             let sigs: TradingSignal[];
             let dbgLong = 0, dbgShort = 0;
+            let dbgRejected: RejectedCandidate | undefined;
             if (isSignalCacheHit(cachedSig, candles, htfBias, symbolRegime)) {
               sigs = freshenCachedSignals(cachedSig!.signals);
               dbgLong = cachedSig!.dbgLong;
               dbgShort = cachedSig!.dbgShort;
+              dbgRejected = cachedSig!.rejected;
             } else {
-              const dbg: { long?: number; short?: number } = {};
+              const dbg: { long?: number; short?: number; rejected?: RejectedCandidate } = {};
               sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime, dbg);
               dbgLong = dbg.long ?? 0;
               dbgShort = dbg.short ?? 0;
+              dbgRejected = dbg.rejected;
               if (candles.length > 0) {
                 setSignalCache(symbol, tf, {
                   lastBarOpenTime: candles[candles.length - 1].openTime,
                   htfBias, regime: symbolRegime,
-                  signals: cloneSignals(sigs), dbgLong, dbgShort,
+                  signals: cloneSignals(sigs), dbgLong, dbgShort, rejected: dbgRejected,
                 });
               }
             }
             rawTopScore = Math.max(rawTopScore, dbgLong, dbgShort);
+            // 2026-08-18（docs/TODO.md P2 #7）：只留進場時框那一個被擋候選。
+            // 其他時框的價位不是真的會拿來下單的那組（進場價/止損都是照
+            // entryTf 算的，見 §3-A「4H 判方向、1H 進場」），拿它們去模擬會
+            // 量到一個系統從來不會執行的策略。
+            if (tf === entryTf && dbgRejected) scoreGateRejected = dbgRejected;
             allSignals.push(...sigs);
             sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
           } catch { /* skip failed timeframe */ }
@@ -2625,23 +2645,60 @@ export async function GET(req: NextRequest) {
         });
 
         // Shadow candidate: gate-rejected with concrete levels → simulate outcome
+        //
+        // 兩種來源，先正規化成同一組欄位再往下走：
+        //  1. 有產生完整訊號、但被後面某道關卡擋掉（entrySignal / topStrong）
+        //  2. 2026-08-18 新增：連訊號都沒產生，因為分數沒過關（score_gate）——
+        //     這種情況 entrySignal/topStrong 都是 null，價位改由 signals.ts 的
+        //     debugOut.rejected 帶出來（見 SHADOW_GATES 註解）。tier 一定是
+        //     null（定義上就是沒達到任何一級），strategy 固定 'A'（策略B 走
+        //     generateMeanReversionSignals，沒有這條路徑），timeframe 用
+        //     entryTf（價位就是照它算的）。
         const shadowSrc = entrySignal ?? topStrong;
-        if (rejectedAt && SHADOW_GATES.has(rejectedAt) && shadowSrc) {
-          const ssp = shadowSrc.signalPrice ?? 0;
-          const isLimit = ssp > 0 && Math.abs(shadowSrc.entry - ssp) / ssp > 0.003;
+        const shadowInput = shadowSrc
+          ? {
+              direction: shadowSrc.direction,
+              timeframe: shadowSrc.timeframe as string,
+              entry: shadowSrc.entry,
+              stopLoss: shadowSrc.stopLoss,
+              tp1: shadowSrc.takeProfits[0],
+              tp2: shadowSrc.takeProfits[1] ?? shadowSrc.takeProfits[0],
+              score: shadowSrc.score,
+              tier: shadowSrc.tier ?? null,
+              strategy: shadowSrc.strategy ?? 'A',
+              signalPrice: shadowSrc.signalPrice ?? 0,
+            }
+          : rejectedAt === 'score_gate' && scoreGateRejected
+            ? {
+                direction: scoreGateRejected.direction,
+                timeframe: entryTf as string,
+                entry: scoreGateRejected.entry,
+                stopLoss: scoreGateRejected.stopLoss,
+                tp1: scoreGateRejected.tp1,
+                tp2: scoreGateRejected.tp2,
+                score: scoreGateRejected.score,
+                tier: null,
+                strategy: 'A',
+                signalPrice: scoreGateRejected.signalPrice,
+              }
+            : null;
+
+        if (rejectedAt && SHADOW_GATES.has(rejectedAt) && shadowInput) {
+          const ssp = shadowInput.signalPrice;
+          const isLimit = ssp > 0 && Math.abs(shadowInput.entry - ssp) / ssp > 0.003;
           shadowCandidates.push({
             id: `shdw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             at: Date.now(),
             symbol,
-            direction: shadowSrc.direction,
-            timeframe: shadowSrc.timeframe,
-            entry: shadowSrc.entry,
-            stopLoss: shadowSrc.stopLoss,
-            tp1: shadowSrc.takeProfits[0],
-            tp2: shadowSrc.takeProfits[1] ?? shadowSrc.takeProfits[0],
-            score: shadowSrc.score,
-            tier: shadowSrc.tier ?? null,
-            strategy: shadowSrc.strategy ?? 'A',
+            direction: shadowInput.direction,
+            timeframe: shadowInput.timeframe,
+            entry: shadowInput.entry,
+            stopLoss: shadowInput.stopLoss,
+            tp1: shadowInput.tp1,
+            tp2: shadowInput.tp2,
+            score: shadowInput.score,
+            tier: shadowInput.tier,
+            strategy: shadowInput.strategy,
             rejectedAt,
             signalPrice: ssp,
             status: isLimit ? 'waiting' : 'active',

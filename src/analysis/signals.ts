@@ -199,6 +199,87 @@ function isIntradayTF(tf: Timeframe): boolean {
   return tf === '5m' || tf === '15m';
 }
 
+// 2026-08-18（docs/TODO.md P2 #7）：止損/TP 價位計算抽成純函數。
+//
+// 原本這段算式在 generateSignals 的 LONG/SHORT 兩個「分數過關」分支裡各寫
+// 一份。抽出來的動機是 score_gate 影子模擬：TODO #7 從 2026-07-28 起被跳過
+// 三次，理由是「sub-threshold 訊號沒有進場/止損價位可模擬，要改訊號產生
+// 函式加不受分數門檻限制的計算路徑，牽動策略核心計分邏輯」。實際查證後
+// 這個評估高估了難度——這段算式的每一個輸入（entry / OB / SR / slBuffer /
+// srLevels / intraday）都在 tier 關卡之前就算好了，跟計分邏輯完全無關，
+// 只是恰好寫在關卡裡面而已。抽出來之後，被分數擋掉的候選也能算出同一組
+// 價位，影子模擬就有東西可以跑。
+//
+// 這是行為不變的重構：LONG/SHORT 兩份算式原樣搬進來，用 isLong 分岔，
+// 不改任何數字或判斷順序。兩邊的不對稱是原本就有的（OB 邊界 low vs high、
+// 緩衝 0.995 vs 1.005、TP2 找的是 resistance vs support），照抄不合併。
+export interface SignalLevelInputs {
+  isLong: boolean;
+  entry: number;
+  obEdge: number | null;      // LONG 用 OB.low，SHORT 用 OB.high
+  srPrice: number | null;     // 對應方向的 S/R 價位
+  slBuffer: number;
+  tpClampPrice: number | null; // TP1 的天花板/地板：LONG 用最近阻力、SHORT 用最近支撐
+  srLevels: SRLevel[];
+  intraday: boolean;
+  minRr: number;
+}
+
+export interface SignalLevels {
+  sl: number;
+  tp1: number;
+  tp2: number;
+  rr: number;
+  risk: number;
+}
+
+// 分數沒過關、因此沒有進 signals 陣列的候選，附上「如果當初有發出來會長
+// 怎樣」的完整價位。route.ts 拿它建 score_gate 影子模擬候選，回答那個一直
+// 沒有答案的問題：被分數門檻擋掉的訊號後來到底會賺還是會賠。
+// signalCache 也存這個欄位——1h 訊號 12 次掃描有 11 次是快取命中，不一起
+// 快取的話命中/未命中行為會不一致。
+export interface RejectedCandidate {
+  direction: 'LONG' | 'SHORT';
+  score: number;
+  entry: number;
+  stopLoss: number;
+  tp1: number;
+  tp2: number;
+  signalPrice: number;
+}
+
+export function buildSignalLevels(i: SignalLevelInputs): SignalLevels {
+  const { isLong, entry, obEdge, srPrice, slBuffer, tpClampPrice, srLevels, intraday, minRr } = i;
+
+  if (isLong) {
+    const sl = obEdge !== null ? Math.min(obEdge * 0.995, entry - slBuffer)
+             : srPrice !== null ? Math.min(srPrice * 0.995, entry - slBuffer)
+             : entry - slBuffer;
+    const risk = Math.max(entry - sl, 1e-6);
+    const tp1Max = intraday ? entry + risk * 1.5 : entry + risk * 2.0;
+    const tp1Raw = tpClampPrice !== null ? Math.min(tpClampPrice, tp1Max) : tp1Max;
+    const tp1    = Math.max(tp1Raw, entry + risk * minRr);
+    const tp2Cap = intraday ? entry + risk * 2.0 : entry + risk * 3.5;
+    const nextR  = srLevels.find(l => l.type === 'resistance' && l.price > tp1 * 1.003 && l.price <= tp2Cap);
+    const tp2    = nextR ? Math.min(nextR.price, tp2Cap) : tp2Cap;
+    const rr     = parseFloat(((tp1 - entry) / risk).toFixed(2));
+    return { sl, tp1, tp2, rr, risk };
+  }
+
+  const sl = obEdge !== null ? Math.max(obEdge * 1.005, entry + slBuffer)
+           : srPrice !== null ? Math.max(srPrice * 1.005, entry + slBuffer)
+           : entry + slBuffer;
+  const risk = Math.max(sl - entry, 1e-6);
+  const tp1Max = intraday ? entry - risk * 1.5 : entry - risk * 2.0;
+  const tp1Raw = tpClampPrice !== null ? Math.max(tpClampPrice, tp1Max) : tp1Max;
+  const tp1    = Math.min(tp1Raw, entry - risk * minRr);
+  const tp2Cap = intraday ? entry - risk * 2.0 : entry - risk * 3.5;
+  const nextS  = srLevels.find(l => l.type === 'support' && l.price < tp1 * 0.997 && l.price >= tp2Cap);
+  const tp2    = nextS ? Math.max(nextS.price, tp2Cap) : tp2Cap;
+  const rr     = parseFloat(((entry - tp1) / risk).toFixed(2));
+  return { sl, tp1, tp2, rr, risk };
+}
+
 // htfBias: if provided, bonus +3 for aligned direction, penalty -2 for opposite
 // regime: determined from 4H ADX — 'trending' enables Strategy A extras,
 //         'ranging' skips new entry candidates (Strategy B handled separately),
@@ -210,7 +291,16 @@ export function generateSignals(
   htfBias?: 'LONG' | 'SHORT' | null,
   regime?: Regime,
   // Filled with the raw (pre-gate) scores so callers can report near-misses.
-  debugOut?: { long?: number; short?: number },
+  //
+  // 2026-08-18（docs/TODO.md P2 #7）：多帶一個 rejected——分數沒過關、因此
+  // 沒有進 signals 陣列的那個候選，附上它「如果當初有發出來會長怎樣」的
+  // 完整價位。route.ts 拿它建 score_gate 的影子模擬候選，回答那個一直沒有
+  // 答案的問題：被分數門檻擋掉的 55% 訊號，後來到底會賺還是會賠。
+  //
+  // 只在「分數是唯一擋下它的原因」時才填——方向沒贏過對手、日內型態沒確認、
+  // 進場距離太遠這幾種，本來就不該因為分數放寬而放行，填了會讓影子模擬
+  // 高估放寬分數門檻的效益。
+  debugOut?: { long?: number; short?: number; rejected?: RejectedCandidate },
 ): TradingSignal[] {
   if (candles.length < 55) return [];
 
@@ -624,20 +714,16 @@ export function generateSignals(
     : longScore >= MIN_SCORE_TIER_B && longGroups >= 2 && atrPct <= B_TIER_MAX_ATR ? 'B'
     : null;
   if (longTier && longScore > shortScore && longIntradayOk && !longEntryTooFar) {
-    const sl   = longOB  ? Math.min(longOB.low  * 0.995, longEntry - slBuffer)
-               : longSR  ? Math.min(longSR.price * 0.995, longEntry - slBuffer)
-               : longEntry - slBuffer;
-    const risk = Math.max(longEntry - sl, 1e-6);
-
     // Intraday: conservative TP1 (1.2× risk), TP2 (2.0× risk) — achievable in hours
     // Swing: wider TP1 (2.0× risk), TP2 (3.5× risk)
-    const tp1Max = intraday ? longEntry + risk * 1.5 : longEntry + risk * 2.0;
-    const tp1Raw = resistance ? Math.min(resistance.price, tp1Max) : tp1Max;
-    const tp1    = Math.max(tp1Raw, longEntry + risk * MIN_RR);
-    const tp2Cap = intraday ? longEntry + risk * 2.0 : longEntry + risk * 3.5;
-    const nextR  = srLevels.find(l => l.type === 'resistance' && l.price > tp1 * 1.003 && l.price <= tp2Cap);
-    const tp2    = nextR ? Math.min(nextR.price, tp2Cap) : tp2Cap;
-    const rr     = parseFloat(((tp1 - longEntry) / risk).toFixed(2));
+    // 算式本體見 buildSignalLevels（2026-08-18 抽出，行為不變）。
+    const { sl, tp1, tp2, rr } = buildSignalLevels({
+      isLong: true, entry: longEntry,
+      obEdge: longOB ? longOB.low : null,
+      srPrice: longSR ? longSR.price : null,
+      slBuffer, tpClampPrice: resistance ? resistance.price : null,
+      srLevels, intraday, minRr: MIN_RR,
+    });
 
     if (intraday) {
       longReasons.push(`⏱ 日內單 · TP1 ${((tp1 - longEntry) / longEntry * 100).toFixed(2)}% · SL ${((longEntry - sl) / longEntry * 100).toFixed(2)}%`);
@@ -675,18 +761,14 @@ export function generateSignals(
     : shortScore >= MIN_SCORE_TIER_B && shortGroups >= 2 && atrPct <= B_TIER_MAX_ATR ? 'B'
     : null;
   if (shortTier && shortScore > longScore && shortIntradayOk && !shortEntryTooFar) {
-    const sl   = shortOB ? Math.max(shortOB.high * 1.005, shortEntry + slBuffer)
-               : shortSR ? Math.max(shortSR.price * 1.005, shortEntry + slBuffer)
-               : shortEntry + slBuffer;
-    const risk = Math.max(sl - shortEntry, 1e-6);
-
-    const tp1Max = intraday ? shortEntry - risk * 1.5 : shortEntry - risk * 2.0;
-    const tp1Raw = support ? Math.max(support.price, tp1Max) : tp1Max;
-    const tp1    = Math.min(tp1Raw, shortEntry - risk * MIN_RR);
-    const tp2Cap = intraday ? shortEntry - risk * 2.0 : shortEntry - risk * 3.5;
-    const nextS  = srLevels.find(l => l.type === 'support' && l.price < tp1 * 0.997 && l.price >= tp2Cap);
-    const tp2    = nextS ? Math.max(nextS.price, tp2Cap) : tp2Cap;
-    const rr     = parseFloat(((shortEntry - tp1) / risk).toFixed(2));
+    // 算式本體見 buildSignalLevels（2026-08-18 抽出，行為不變）。
+    const { sl, tp1, tp2, rr } = buildSignalLevels({
+      isLong: false, entry: shortEntry,
+      obEdge: shortOB ? shortOB.high : null,
+      srPrice: shortSR ? shortSR.price : null,
+      slBuffer, tpClampPrice: support ? support.price : null,
+      srLevels, intraday, minRr: MIN_RR,
+    });
 
     if (intraday) {
       shortReasons.push(`⏱ 日內單 · TP1 ${((shortEntry - tp1) / shortEntry * 100).toFixed(2)}% · SL ${((sl - shortEntry) / shortEntry * 100).toFixed(2)}%`);
@@ -715,6 +797,46 @@ export function generateSignals(
       },
     });
     if (shortTier === 'B') shortReasons.push('🅱 B級輕倉訊號（60-64分）— 建議風險 0.5%');
+  }
+
+  // 2026-08-18（docs/TODO.md P2 #7）：score_gate 影子模擬的資料來源。
+  //
+  // 走到這裡 signals 還是空的，代表沒有任何一邊過關。其中「只差分數」那些
+  // 就是 score_gate 擋下來的——把它們的價位算出來交給呼叫端，才有辦法回答
+  // 「這道擋掉 55% 的關卡到底擋得對不對」。
+  //
+  // 條件刻意跟上面兩個 if 對齊，只把 tier 那一項拿掉：方向要贏過對手、日內
+  // 型態要確認、進場距離不能太遠——這三個就算分數門檻放寬也一樣會擋，算進
+  // 去會讓影子模擬高估放寬門檻的好處。tier 為 null 才算「分數擋的」。
+  if (debugOut && signals.length === 0) {
+    const longOnlyScoreBlocked  = !longTier  && longScore > shortScore && longIntradayOk  && !longEntryTooFar;
+    const shortOnlyScoreBlocked = !shortTier && shortScore > longScore && shortIntradayOk && !shortEntryTooFar;
+
+    if (longOnlyScoreBlocked) {
+      const lv = buildSignalLevels({
+        isLong: true, entry: longEntry,
+        obEdge: longOB ? longOB.low : null,
+        srPrice: longSR ? longSR.price : null,
+        slBuffer, tpClampPrice: resistance ? resistance.price : null,
+        srLevels, intraday, minRr: MIN_RR,
+      });
+      debugOut.rejected = {
+        direction: 'LONG', score: longScore, entry: longEntry,
+        stopLoss: lv.sl, tp1: lv.tp1, tp2: lv.tp2, signalPrice: price,
+      };
+    } else if (shortOnlyScoreBlocked) {
+      const lv = buildSignalLevels({
+        isLong: false, entry: shortEntry,
+        obEdge: shortOB ? shortOB.high : null,
+        srPrice: shortSR ? shortSR.price : null,
+        slBuffer, tpClampPrice: support ? support.price : null,
+        srLevels, intraday, minRr: MIN_RR,
+      });
+      debugOut.rejected = {
+        direction: 'SHORT', score: shortScore, entry: shortEntry,
+        stopLoss: lv.sl, tp1: lv.tp1, tp2: lv.tp2, signalPrice: price,
+      };
+    }
   }
 
   return signals;
