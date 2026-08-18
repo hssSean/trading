@@ -246,12 +246,21 @@ async function buildSnapshot(
   row: DbTradeRow,
   filters: SymbolFilters,
 ): Promise<BridgeExchangeSnapshot> {
-  const [positions, openOrders, openAlgoOrders, markPrice] = await Promise.all([
+  // 2026-08-18 實測撞到：getOpenAlgoOrders(symbol) 帶 symbol 參數查詢，COTIUSDT
+  // 明明在幣安端有兩張條件單，這裡卻一直查到空——但帳戶級 watchdog 用
+  // getOpenAlgoOrders() 不帶 symbol 反而查得到（見 -4130 自我修復那段的診斷
+  // log）。這個端點的 symbol 篩選參數不可信，這裡是真正卡死迴圈的根源：
+  // DB 的 exchange_stop_algo_id 就算已經被自我修復寫對，這裡還是查不到對應
+  // 的訂單，currentStop 永遠是 null，decideTradeAction 每輪都還是會想再下
+  // 一張止損單，撞回 -4130。改成不帶 symbol 查全帳戶後自己篩，跟自我修復
+  // 那段用同一個做法。
+  const [positions, openOrders, allAlgoOrders, markPrice] = await Promise.all([
     binance.getPositionRisk(row.symbol),
     binance.getOpenOrders(row.symbol),
-    binance.getOpenAlgoOrders(row.symbol),
+    binance.getOpenAlgoOrders(),
     fetchCurrentPrice(row.symbol),
   ]);
+  const openAlgoOrders = allAlgoOrders.filter(a => a.symbol === row.symbol);
 
   const positionQty = positions[0] ? Math.abs(parseFloat(positions[0].positionAmt)) : 0;
   const entryOrderStillOpen = row.exchange_entry_order_id !== null
