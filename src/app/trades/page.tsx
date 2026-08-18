@@ -1040,6 +1040,14 @@ export default function TradesPage() {
             sb?.entryDistAtr ?? '',
             `${tier ? tier + '級' : '未知'}·${r.timeframe}`,
             r.strategy ?? '',
+            // 2026-08-18：這份匯出一直沒有辦法回答「這筆單到底有沒有真的在
+            // 交易所成交過」——同一張表混了兩條執行路徑的資料：Vercel
+            // /api/analyze 的 DB 模擬監控（純 K 線推演，從沒碰過幣安），跟
+            // live-runner 的真倉下單。少了這一欄，任何「App 統計 vs 幣安帳戶」
+            // 的比對都不可能對得起來（模擬單的損益根本不存在於帳戶裡），
+            // 使用者只會覺得「資料對不上」卻找不到原因。
+            // exchange_entry_order_id 有值＝真的送過進場單到交易所。
+            r.exchange_entry_order_id != null ? '真倉' : '模擬',
             r.regime ? (REGIME_LABEL[r.regime as string] ?? r.regime) : '',
             r.confidence ?? '',
             r.funding_rate != null ? ((r.funding_rate as number) * 100).toFixed(4) : '',
@@ -1055,7 +1063,7 @@ export default function TradesPage() {
         '進場價', '止損', 'TP1', 'TP2', '開倉時間', '平倉時間',
         '結果', '出場原因', '出場價', '損益%', 'R倍數', '帳戶R', 'MFE(R)', 'MAE(R)',
         '延伸度(ATR)', '進場距離(ATR)',
-        '級別', '進場策略', '盤勢regime', '信心分數confidence', '資金費率%funding',
+        '級別', '進場策略', '執行路徑', '盤勢regime', '信心分數confidence', '資金費率%funding',
         '建議風險%', '建議槓桿',
         '分析依據', '個人備註',
       ].join(',');

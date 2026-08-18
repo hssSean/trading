@@ -51,7 +51,12 @@ export function StatsHero({ totalR, avgR, weekR, winRate, expectedValue, equity,
       <div className="flex items-center">
         <span className="tlabel">累積績效</span>
         <span className="flex-1" />
-        <span className="text-text-m text-[10px] num">{closedCount} 結束 · {pendingCount} 持倉</span>
+        {/* 2026-08-18：這個數字是 closedResults（已排除 CANCELLED 從未成交的
+            推薦單），跟頁面標題那個「N 已結束」（closed，含 CANCELLED）本來就
+            是兩個不同母體，但兩邊都只寫「結束」，看起來像同一個數字對不起來
+            （實測 199 vs 84，差的 115 筆全是從未成交的推薦單）。標題改成
+            「有損益」點明母體差異。 */}
+        <span className="text-text-m text-[10px] num">{closedCount} 筆有損益 · {pendingCount} 持倉</span>
       </div>
 
       <div className="flex items-end gap-3 mt-2">
