@@ -333,7 +333,8 @@ export function decideTradeAction(
   const tp1Happened = trade.entryQty !== null && snapshot.positionQty < trade.entryQty * 0.99;
 
   if (trade.strategy === 'B') {
-    // 策略B沒有兩階段 TP，交給預掛的 TAKE_PROFIT_MARKET（closePosition=true）
+    // 策略B沒有兩階段 TP，交給預掛的 TAKE_PROFIT_MARKET（quantity=全部部位+
+    // reduceOnly，不是 closePosition——見 orderLifecycle.ts 的 -4130 說明）
     // 條件單觸發整單平倉——這裡只負責「還沒掛就補掛」，不用輪詢比價。
     if (trade.exchangeTp1AlgoId === null) {
       const tp1Decision = decideTp1OrderPlacement({

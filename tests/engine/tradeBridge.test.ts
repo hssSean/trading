@@ -361,7 +361,7 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
 });
 
 describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)', () => {
-  it('places a full-close TP1 condition order (closePosition) when none is placed yet', () => {
+  it('places a full-close TP1 condition order (quantity + reduceOnly, NOT closePosition — would conflict with the stop, -4130) when none is placed yet', () => {
     const a = decideTradeAction(
       tradeRow({ strategy: 'B', exchangeEntryOrderId: 111, exchangeTp1AlgoId: null }),
       snapshot({
@@ -372,8 +372,9 @@ describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)
     );
     expect(a.kind).toBe('place_tp1_order');
     if (a.kind !== 'place_tp1_order') return;
-    expect(a.order.closePosition).toBe(true);
-    expect(a.order.quantity).toBeUndefined();
+    expect(a.order.closePosition).toBeUndefined();
+    expect(a.order.reduceOnly).toBe(true);
+    expect(a.order.quantity).toBe(0.01);
   });
 
   it('holds once the TP1 condition order is already placed', () => {

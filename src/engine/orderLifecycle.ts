@@ -121,8 +121,25 @@ export function decideEntryOrder(input: EntryOrderInput): EntryOrderDecision {
 // 改成「預掛式」：一有止損就順便掛一張 TAKE_PROFIT_MARKET 條件單在交易所，
 // 讓交易所自己的撮合引擎觸發，不再依賴 live-runner 剛好在那個瞬間醒著輪詢。
 // 策略A（分兩階段）用 quantity 指定一半數量 + reduceOnly（不能用
-// closePosition=true，那個只能整倉，做不到「平一半」）；策略B（tp1==tp2，
-// 觸價即整單了結）直接用 closePosition=true，跟止損那張條件單同樣的模式。
+// closePosition=true，那個只能整倉，做不到「平一半」）。
+//
+// 策略B（tp1==tp2，觸價即整單了結）原本也用 closePosition=true，跟止損
+// 那張條件單同樣模式——2026-08-18 發現這是錯的：幣安不允許同一個
+// symbol+方向同時存在兩張 closePosition=true 的條件單（-4130「An open
+// stop or take profit order with GTE and closePosition in the direction is
+// existing」），而 decideTrailingStopReplace() 的止損單一定先掛（見
+// tradeBridge.ts 第4步「有部位但沒止損」優先於第5步 TP1）。所以策略B的
+// TP1 這張永遠是「第二張」，永遠被拒絕，且 newClientOrderId 冪等，重試
+// 也只會撞回同一個 -4130，live-runner 的 -4130 自我修復只能撿回「幣安端
+// 真的存在」的 algoId，這張從未成功建立，撿不回來——策略B部位事實上
+// 從來沒有掛出過 TP1 條件單，只靠止損跟 time-stop 出場。改成跟策略A同一種
+// quantity + reduceOnly 模式（quantity 是全部部位，不是一半），不再跟止損
+// 用 closePosition 互斥。
+//
+// reduceOnly 用量的取捨：closePosition=true 部位平掉時交易所會自動連帶
+// 取消該單；reduceOnly 的固定數量單不會，部位已經靠止損出場的話這張 TP1
+// 會變成孤兒單留在交易所——但這已經被 live-runner 的帳戶級對帳
+// （getOpenAlgoOrders 全帳戶掃描）自動偵測並取消，不是新風險。
 //
 // 呼叫端（tradeBridge.ts）判斷「TP1 是否已經發生」不再看這張條件單還在不
 // 在（消失可能是成交、也可能是被拒絕/取消，無法單靠這個區分），而是比較
@@ -152,7 +169,17 @@ export function decideTp1OrderPlacement(input: Tp1OrderInput): Tp1OrderDecision 
   const side = input.isLong ? 'SELL' : 'BUY';
 
   if (input.strategy === 'B') {
-    // 策略B沒有兩階段 TP，觸價即整單了結——跟止損同一種 closePosition 模式。
+    // 策略B沒有兩階段 TP，觸價即整單了結——但不能用 closePosition=true：
+    // 止損單已經佔用了這個 symbol+方向唯一允許的 closePosition 條件單額度，
+    // 第二張會被幣安以 -4130 拒絕（見上方模組註解）。改用 quantity（全部
+    // 部位）+ reduceOnly，跟策略A的部分平倉走同一種下單模式，只是數量是全部。
+    const fullQty = roundToStepSize(input.positionQty, input.filters.stepSize);
+    if (fullQty <= 0) {
+      return {
+        skip: true,
+        reason: `部位量 ${input.positionQty} 在 stepSize ${input.filters.stepSize} 下取整為 0，太小無法下 TP1 單`,
+      };
+    }
     return {
       skip: false,
       order: {
@@ -160,7 +187,8 @@ export function decideTp1OrderPlacement(input: Tp1OrderInput): Tp1OrderDecision 
         side,
         type: 'TAKE_PROFIT_MARKET',
         stopPrice,
-        closePosition: true,
+        quantity: fullQty,
+        reduceOnly: true,
         // 每筆 trade 只掛一次 TP1 條件單，冪等 ID 避免重試造成重複掛單。
         newClientOrderId: `${input.tradeId}-tp1order`,
       },

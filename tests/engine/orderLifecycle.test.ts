@@ -164,8 +164,12 @@ describe('decideTp1OrderPlacement — strategy A (partial, quantity-based)', () 
   });
 });
 
-describe('decideTp1OrderPlacement — strategy B (full close, closePosition-based)', () => {
-  it('places a TAKE_PROFIT_MARKET order with closePosition=true, no quantity (LONG → SELL)', () => {
+describe('decideTp1OrderPlacement — strategy B (full close, quantity-based, NOT closePosition)', () => {
+  // 2026-08-18：策略B原本用 closePosition=true，跟止損那張條件單（一定先掛，
+  // 見 tradeBridge.ts）撞上幣安 -4130（同一個 symbol+方向只能有一張
+  // closePosition=true 的條件單）。改用 quantity（全部部位）+ reduceOnly，
+  // 不再跟止損互斥。
+  it('places a TAKE_PROFIT_MARKET order for the FULL position, reduceOnly, no closePosition (LONG → SELL)', () => {
     const d = decideTp1OrderPlacement(tp1Input({ strategy: 'B' }));
     expect(d.skip).toBe(false);
     if (d.skip) return;
@@ -174,7 +178,8 @@ describe('decideTp1OrderPlacement — strategy B (full close, closePosition-base
       side: 'SELL',
       type: 'TAKE_PROFIT_MARKET',
       stopPrice: 67000,
-      closePosition: true,
+      quantity: 0.1,
+      reduceOnly: true,
       newClientOrderId: 'trade-1-tp1order',
     });
   });
@@ -184,6 +189,18 @@ describe('decideTp1OrderPlacement — strategy B (full close, closePosition-base
     expect(d.skip).toBe(false);
     if (d.skip) return;
     expect(d.order.side).toBe('BUY');
+  });
+
+  it('floors quantity to stepSize rather than rounding up (never close more than the position holds)', () => {
+    const d = decideTp1OrderPlacement(tp1Input({ strategy: 'B', positionQty: 0.1237, filters: { ...filters, stepSize: 0.01 } }));
+    expect(d.skip).toBe(false);
+    if (d.skip) return;
+    expect(d.order.quantity).toBe(0.12);
+  });
+
+  it('skips when the position quantity floors to zero (stepSize too coarse)', () => {
+    const d = decideTp1OrderPlacement(tp1Input({ strategy: 'B', positionQty: 0.005, filters: { ...filters, stepSize: 0.01 } }));
+    expect(d.skip).toBe(true);
   });
 
   it('skips when there is no position left to protect', () => {
