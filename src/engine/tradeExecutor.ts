@@ -98,14 +98,25 @@ export async function executeTradeAction(
     }
 
     case 'update_trailing_stop': {
-      // Place-before-cancel：跟 orderLifecycle.ts 的設計說明一致，新止損單
-      // 送出成功後才撤舊單，避免中間出現無保護窗口。新單失敗就整個中止，
-      // 不去動舊單——舊止損繼續保護部位。
-      const res = await client.placeOrder(action.place);
-      await persist.setStopAlgoId(tradeId, res.orderId);
+      // 2026-08-18 實測撞到（COTIUSDT 連續數小時卡在 -4130）：原本是
+      // place-before-cancel（先掛新單成功才撤舊單，避免無保護窗口），但這個
+      // 設計跟幣安的規則直接衝突——**同一個 symbol+方向只允許存在一張
+      // closePosition 條件單**，舊止損還在的時候送新止損，幣安一律回
+      // -4130「An open stop or take profit order with GTE and closePosition
+      // in the direction is existing」。結果是移動止損/保本永遠執行不了，
+      // 每輪重試、每輪被拒，止損從頭到尾停在原地。
+      //
+      // 只能改成 cancel-then-place。中間確實有一個極短的無保護窗口（兩個
+      // API 呼叫之間），但這是幣安規則下唯一可行的順序；而且真的在中間失敗
+      // 也有兜底：下一輪 decideTradeAction 第 4 步會看到 currentStop===null
+      // 立刻補一張原始止損（place_initial_stop），15 秒內自動恢復保護，
+      // 不需要人工介入。用「短暫窗口 + 自動補回」換「移動止損真的能動」，
+      // 比現在這種「永遠動不了」安全得多。
       if (action.cancelOrderId !== undefined) {
         await client.cancelOrder(action.place.symbol, action.cancelOrderId, true);
       }
+      const res = await client.placeOrder(action.place);
+      await persist.setStopAlgoId(tradeId, res.orderId);
       return { executed: true, note: `移動止損已更新 → ${action.place.stopPrice}` };
     }
 

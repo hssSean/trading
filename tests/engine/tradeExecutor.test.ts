@@ -9,14 +9,20 @@ import { TimeStopCloseReason } from '../../src/engine/timeStop';
 class FakeClient implements TradeExecutorClient {
   placeOrderCalls: PlaceOrderParams[] = [];
   cancelOrderCalls: Array<{ symbol: string; orderId: number; isAlgoOrder?: boolean }> = [];
+  // 2026-08-18：兩個陣列各自記錄，斷言不出「誰先誰後」——移動止損的撤單/下單
+  // 順序是有意義的（幣安同方向只允許一張 closePosition 條件單，順序錯就撞
+  // -4130），加一條合併時序讓順序本身可以被測到。
+  callSequence: string[] = [];
   nextOrderId = 1000;
 
   async placeOrder(params: PlaceOrderParams) {
     this.placeOrderCalls.push(params);
+    this.callSequence.push('place');
     return { orderId: this.nextOrderId++, clientOrderId: params.newClientOrderId ?? '', status: 'NEW' };
   }
   async cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean) {
     this.cancelOrderCalls.push({ symbol, orderId, isAlgoOrder });
+    this.callSequence.push('cancel');
     return { orderId, status: 'CANCELED' };
   }
 }
@@ -126,7 +132,11 @@ describe('executeTradeAction — close_full_position', () => {
 });
 
 describe('executeTradeAction — update_trailing_stop', () => {
-  it('places the new stop BEFORE cancelling the old one (place-before-cancel)', async () => {
+  // 2026-08-18：原本這裡斷言的是 place-before-cancel（先掛新單再撤舊單）。
+  // 實測撞到 COTIUSDT 連續數小時 -4130：幣安同一個 symbol+方向只允許存在
+  // 一張 closePosition 條件單，舊止損還在時送新止損一律被拒，移動止損/保本
+  // 永遠執行不了。順序必須反過來，這個測試跟著改成鎖 cancel-then-place。
+  it('cancels the old stop BEFORE placing the new one (幣安只允許一張 closePosition 單)', async () => {
     const client = new FakeClient();
     const persist = new FakePersist();
     const place: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 67000, closePosition: true };
@@ -134,6 +144,7 @@ describe('executeTradeAction — update_trailing_stop', () => {
 
     await executeTradeAction(client, persist, 'trade-1', action);
 
+    expect(client.callSequence).toEqual(['cancel', 'place']);
     expect(client.placeOrderCalls).toEqual([place]);
     expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 222, isAlgoOrder: true }]);
     expect(persist.stopAlgoIds).toEqual([{ tradeId: 'trade-1', algoId: 1000 }]);
