@@ -846,13 +846,18 @@ async function runCycle(
           const all = await binance.getOpenAlgoOrders();
           const existing = all.filter(a => a.symbol === row.symbol);
           const closeSide = row.direction === 'LONG' ? 'SELL' : 'BUY';
-          const closeOrders = existing.filter(a => a.closePosition && a.side === closeSide);
-          // 2026-08-18 實測撞到 COTIUSDT：幣安回傳的兩張條件單 orderType 都是
-          // TAKE_PROFIT_MARKET，但用觸發價比對，其中一張（0.011783）明明是
-          // App 上顯示的止損價，orderType 字串不可信、不能拿來分辨這張到底是
-          // 止損還是TP1。改成比對觸發價跟這筆 trade 自己記錄的 stop_loss/tp1
-          // 哪個比較近——不管幣安回傳的字串欄位怎麼標，經濟意義上「觸發價
-          // 貼近我們自己算的止損價」的那張就是止損單，貼近 tp1 的就是TP1單。
+          // 2026-08-18 第二次實測（COTIUSDT 還是卡在 -4130）才看清楚真正的
+          // 根因：這裡原本要求 `a.closePosition` 為 true 才納入比對，但只有
+          // 「止損單」跟「策略B的整單止盈」是 closePosition=true——**策略A 的
+          // TP1 是部分減倉**（decideTp1OrderPlacement 用 quantity + reduceOnly，
+          // closePosition 根本沒設，回傳是 false）。結果那張真實存在的 TP1
+          // 條件單永遠被這個過濾條件排除，exchange_tp1_algo_id 永遠補不回來，
+          // 每輪都以為「TP1 還沒掛」而重掛一次，撞回 -4130，迴圈無解。
+          //
+          // 判斷「這張單是不是我們的」只需要兩件事：平倉方向對、觸發價貼近
+          // 我們自己算的 stop_loss/tp1。closePosition 是下單方式的細節（整單
+          // vs 部分減倉），不是身分識別，不該拿來當過濾條件。
+          const closeOrders = existing.filter(a => a.side === closeSide);
           const stopOrder = closeOrders.find(a => {
             const p = parseFloat(a.triggerPrice);
             return Math.abs(p - row.stop_loss) <= Math.abs(p - row.tp1);
@@ -874,8 +879,14 @@ async function runCycle(
             healed = true;
           }
           if (!healed) {
-            console.error(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 -4130 但查不到對應的 closePosition 條件單，需要人工檢查: ${describeError(e)}`);
-            console.error(`[${nowStr()}]   診斷：全帳戶 algo order 共 ${all.length} 筆，這個 symbol 共 ${existing.length} 筆，預期方向 ${closeSide}`);
+            // 2026-08-18：原本這句一律講「查不到條件單」，但 healed=false 有
+            // 兩種完全不同的成因——真的沒查到，或者查到了但 DB 早就記著同一
+            // 個 algoId（不需要更新）。前一輪就是因為這句誤導，讓人以為是查
+            // 詢失敗，實際上止損單早就對上了、卡住的是 TP1。分開講清楚。
+            const stopState = stopOrder ? `止損單已對上（algoId=${stopOrder.algoId}，DB 記錄相同）` : '找不到止損單';
+            const tpState   = tpOrder   ? `TP1單已對上（algoId=${tpOrder.algoId}，DB 記錄相同）` : '找不到TP1單';
+            console.error(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 -4130，但自我修復沒有可更新的欄位——${stopState}；${tpState}: ${describeError(e)}`);
+            console.error(`[${nowStr()}]   診斷：全帳戶 algo order 共 ${all.length} 筆，這個 symbol 共 ${existing.length} 筆，預期方向 ${closeSide}，DB: stop=${row.exchange_stop_algo_id} tp1=${row.exchange_tp1_algo_id}`);
             for (const a of existing) {
               console.error(`[${nowStr()}]   → symbol=${a.symbol} side=${a.side} orderType=${a.orderType} closePosition=${a.closePosition} algoId=${a.algoId} triggerPrice=${a.triggerPrice}`);
             }
