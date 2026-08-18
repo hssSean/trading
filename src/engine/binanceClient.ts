@@ -242,6 +242,13 @@ export class BinanceFuturesClient {
 
   // 條件單專用查詢——見 AlgoOrder 註解，2025-12 遷移後止損/止盈單只會出現
   // 在這裡，getOpenOrders() 查不到。
+  //
+  // 2026-08-18 實測撞到：signature 保留 symbol 參數（呼叫端有些地方明確不想
+  // 篩選、有些地方想篩），但這個端點帶 symbol 查會查到空——即使幣安端明明
+  // 有該 symbol 的條件單，account 級不帶 symbol 查得到、帶了就查不到，兩者
+  // 對照確認過（見 scripts/live-runner.ts buildSnapshot 註解）。所有呼叫端
+  // 目前都已改成不帶 symbol、自己 filter(a => a.symbol === X)——新增呼叫點
+  // 前先看那邊的教訓，不要重蹈覆轍傳 symbol 進來。
   async getOpenAlgoOrders(symbol?: string): Promise<AlgoOrder[]> {
     return this.signedRequest('GET', '/v1/openAlgoOrders', { symbol });
   }
