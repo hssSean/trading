@@ -838,8 +838,20 @@ async function runCycle(
           const existing = all.filter(a => a.symbol === row.symbol);
           const closeSide = row.direction === 'LONG' ? 'SELL' : 'BUY';
           const closeOrders = existing.filter(a => a.closePosition && a.side === closeSide);
-          const stopOrder = closeOrders.find(a => a.orderType === 'STOP_MARKET' || a.orderType === 'STOP');
-          const tpOrder   = closeOrders.find(a => a.orderType === 'TAKE_PROFIT_MARKET' || a.orderType === 'TAKE_PROFIT');
+          // 2026-08-18 實測撞到 COTIUSDT：幣安回傳的兩張條件單 orderType 都是
+          // TAKE_PROFIT_MARKET，但用觸發價比對，其中一張（0.011783）明明是
+          // App 上顯示的止損價，orderType 字串不可信、不能拿來分辨這張到底是
+          // 止損還是TP1。改成比對觸發價跟這筆 trade 自己記錄的 stop_loss/tp1
+          // 哪個比較近——不管幣安回傳的字串欄位怎麼標，經濟意義上「觸發價
+          // 貼近我們自己算的止損價」的那張就是止損單，貼近 tp1 的就是TP1單。
+          const stopOrder = closeOrders.find(a => {
+            const p = parseFloat(a.triggerPrice);
+            return Math.abs(p - row.stop_loss) <= Math.abs(p - row.tp1);
+          });
+          const tpOrder = closeOrders.find(a => {
+            const p = parseFloat(a.triggerPrice);
+            return Math.abs(p - row.tp1) < Math.abs(p - row.stop_loss);
+          });
           const freshPersist = makePersistence(supabase, row);
           let healed = false;
           if (stopOrder && row.exchange_stop_algo_id !== stopOrder.algoId) {
