@@ -64,7 +64,8 @@ import { reconcilePositionsAndOrders } from '../src/engine/watchdog';
 import { findMarginBracket } from '../src/engine/liquidation';
 import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
 import {
-  decideTradeAction, deriveLiveCloseReason, BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
+  decideTradeAction, deriveLiveCloseReason, calcTotalOpenRisk,
+  BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
 } from '../src/engine/tradeBridge';
 import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
 import { TimeStopCloseReason } from '../src/engine/timeStop';
@@ -636,7 +637,12 @@ async function runCycle(
     return;
   }
 
-  const totalOpenRiskPct = openTrades.reduce((s, t) => s + (t.suggested_risk_pct ?? 1), 0);
+  // 2026-08-20：只加總「真的送到交易所」的單——從沒送出的 waiting 推薦單
+  // 不佔曝險，卻會把額度吃光造成四張單互相擋住的死結（詳見 calcTotalOpenRisk）。
+  const totalOpenRiskPct = calcTotalOpenRisk(openTrades.map(t => ({
+    exchangeEntryOrderId: t.exchange_entry_order_id,
+    suggestedRiskPct: t.suggested_risk_pct,
+  })));
 
   const client: TradeExecutorClient = {
     placeOrder: (params) => binance.placeOrder(params),
@@ -740,7 +746,10 @@ async function runCycle(
       // 呼叫，其他狀態下這筆單不會走到 decideTradeAction 的風險檢查分支）。
       let risk: RiskCheckInput & { leverage: number };
       if (row.exchange_entry_order_id === null) {
-        const built = await buildRiskInput(binance, row, totalOpenRiskPct - (row.suggested_risk_pct ?? 1));
+        // 這個分支只在「還沒送過進場單」時走，而 calcTotalOpenRisk 已經把這種
+        // 單排除掉了——這筆自己本來就不在 totalOpenRiskPct 裡，不能再減一次
+        // （減了會少算，把上限放寬）。直接傳總和＝「其他已掛單/持倉的風險」。
+        const built = await buildRiskInput(binance, row, totalOpenRiskPct);
         if (!built) continue; // 抓不到分級資料，這輪跳過，見 buildRiskInput 說明
         risk = built;
       } else {

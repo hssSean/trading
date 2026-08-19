@@ -169,6 +169,32 @@ export interface RiskCheckInput {
   liquidation: Pick<LiquidationPriceInput, 'isolatedMarginUSDT' | 'maintMarginRatio' | 'maintAmount'>;
 }
 
+// 2026-08-20：全局風險額度加總——**只算真的送到交易所的單**。
+//
+// 實測撞到死結：live-runner 原本把所有 closed_at IS NULL 的列全部加總，包含
+// 「從沒送出過訂單」的 waiting 推薦單。實際發生：HYPE 1.5 + BNB 1.5 + ZEC 1.5
+// + ETH 1.0 = 5.5 > 上限 5，於是每一筆算自己的時候都是「其他三筆＋自己＝5.5」
+// → 四筆全部 skip_entry → 沒有任何一筆送得出去 → 沒送出就永遠不會成交、不會
+// 平倉 → 這個 5.5 永遠不會降下來。四張單互相擋住對方，系統零下單卡死。
+//
+// 錯在把「推薦單」當成「持倉」。沒送出去的單在交易所端沒有訂單、沒有佔用
+// 保證金、沒有任何曝險，不該吃風險額度。有掛單的（exchange_entry_order_id
+// 不是 null）就算還沒成交也**要**算——限價單在幣安端已經佔住保證金，成交後
+// 就是真部位。
+//
+// 純函數 + 測試：CLAUDE.md 的教訓「純數值/記帳邏輯務必抽成獨立檔配測試」，
+// tsc/build 對這種數值錯誤是啞的（這個 bug 本身就是活生生的例子）。
+export interface OpenRiskRow {
+  exchangeEntryOrderId: number | null;
+  suggestedRiskPct: number | null;
+}
+
+export function calcTotalOpenRisk(rows: OpenRiskRow[]): number {
+  return rows
+    .filter(r => r.exchangeEntryOrderId !== null)
+    .reduce((sum, r) => sum + (r.suggestedRiskPct ?? 1), 0);
+}
+
 export type TradeAction =
   | { kind: 'skip_entry'; reason: string }
   | { kind: 'place_entry'; order: PlaceOrderParams; quantity: number }
