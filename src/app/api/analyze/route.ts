@@ -1732,12 +1732,32 @@ async function cacheBreaker(r: import('@upstash/redis').Redis | null, profileId:
 // checkCircuitBreaker 只看當日、每天 UTC 0 點重置，擋不住「每天小輸、累積大輸」。
 // 這裡看整條已平倉權益曲線的高點回撤（詳細動機見 monitorMath.ts 的 calcDrawdown）。
 //
-// 門檻預設 8R：實測歷史 55 筆已平倉單最大回撤 2.01R，8R 約是 4 倍，正常運作
-// 碰不到。可用 MAX_DRAWDOWN_R 環境變數調整；設為 0 或負數等於停用這道關卡。
+// 門檻原為 8R：當時實測歷史 55 筆已平倉單最大回撤 2.01R，8R 約是 4 倍，判斷
+// 正常運作碰不到。可用 MAX_DRAWDOWN_R 環境變數調整；設為 0 或負數等於停用。
 //
 // 用「帳戶R」而非原始R：B 級輕倉只承擔一半風險，回撤要按實際帳戶衝擊算，
 // 跟熔斷、CSV 匯出的「帳戶R」欄位同一套口徑。
-const DEFAULT_MAX_DRAWDOWN_R = 8;
+//
+// **2026-08-19：8R → 12R，暫時性放寬，之後要收回去。**
+// 實際觸發時是 8.01R（高點 26.44R → 18.43R），只超標 0.01R，但近三天 1500 個
+// 候選 100% 被擋、系統完全停擺。關鍵在於**這 8R 回撤是用有 bug 的系統跑出來的**
+// （同日查出並修掉：未收盤K棒讓五組計分裡兩組共20分變成垃圾；真倉的 TP1 前保本
+// 與 TP1 後移動止損因為 place-before-cancel 撞幣安 closePosition 限制，從上線
+// 到當天為止一次都沒生效過）。也就是說，這條權益曲線反映的是「保護機制沒運作
+// 的策略」，拿它算出來的回撤去判定「策略失效」並不公平。
+//
+// 12R 的取法：目前觀察到的 8.01R × 1.5，留出累積修復後乾淨資料的空間，同時
+// 仍然是一道真的會擋的上限（不是形同虛設）。**這是暫時值，不是重新校準的
+// 結果**——等 2026-09 上旬累積 2-3 週修復後的資料，重跑一次歷史最大回撤，
+// 再決定該回到 8R 還是有依據地訂一個新值。
+const DEFAULT_MAX_DRAWDOWN_R = 12;
+
+// 2026-08-19：確認（acknowledge）之後，權益曲線只從確認那一刻之後的已平倉
+// 交易重新算起。這是解開下面那個死結的鑰匙——見 checkDrawdownHalt 註解。
+// 刻意不 export：Next.js App Router 的 route 檔只允許 export GET/POST/DELETE
+// 這類特定名稱，多匯出一個常數會讓 build 期的 .next/types 檢查失敗
+// （`tsc --noEmit` 抓不到這個，只有 next build 會）。同檔案內使用不需要 export。
+const DRAWDOWN_ACK_KEY = (profileId: string) => `drawdown_ack:${profileId}`;
 
 async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; reason?: string; state?: DrawdownState }> {
   const limit = parseFloat(process.env.MAX_DRAWDOWN_R ?? String(DEFAULT_MAX_DRAWDOWN_R));
@@ -1746,13 +1766,36 @@ async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; 
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key || !profileId) return { halted: false };
 
+  // 2026-08-19 實測撞到**死結**：回撤是從「已平倉交易」算的，而這道關卡擋掉
+  // 所有新開倉——沒有新單就沒有新的平倉，權益曲線永遠不動，回撤就永遠卡在
+  // 觸發值。原本沒有任何重置/TTL/恢復路徑，唯一出口是改 MAX_DRAWDOWN_R 環境
+  // 變數。實際發生：8.01R vs 上限 8R（只超過 0.01R），近三天 1500 個候選
+  // 100% 被擋，其中不乏 SOL 91分、ZEC 83分這種高分訊號，系統等同永久停擺。
+  //
+  // 修法：加一個「確認」機制。這道關卡的用意是「策略可能失效，停下來讓人工
+  // 檢查」——所以正確的解除方式是人看過之後明確確認，不是自動放行（自動放行
+  // 等於這道關卡不存在）。確認後把量測基準推到確認當下：只看之後平倉的單，
+  // 等於「我看過了，從現在開始重新算」。這樣風險上限完全沒有放寬，但系統
+  // 不會再永久卡死。確認方式見 DELETE handler 的 ?scope=drawdown。
+  let ackAt = 0;
+  {
+    const r = getRedis();
+    if (r) {
+      try {
+        const v = await r.get(DRAWDOWN_ACK_KEY(profileId));
+        if (v !== null && v !== undefined) ackAt = Number(v) || 0;
+      } catch { /* 讀不到就當沒確認過，維持原本行為 */ }
+    }
+  }
+
   try {
     const { createClient: mk } = await import('@supabase/supabase-js');
     const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
-    const { data } = await adm.from('trades')
+    let q = adm.from('trades')
       .select('closed_at, pnl_percent, entry, stop_loss, tier')
-      .eq('user_id', profileId).not('closed_at', 'is', null).not('result', 'is', null)
-      .order('closed_at', { ascending: true });
+      .eq('user_id', profileId).not('closed_at', 'is', null).not('result', 'is', null);
+    if (ackAt > 0) q = q.gt('closed_at', ackAt);
+    const { data } = await q.order('closed_at', { ascending: true });
     if (!data || data.length === 0) return { halted: false };
 
     const rows = data as { closed_at: number; pnl_percent?: number | null; entry?: number | null; stop_loss?: number | null; tier?: string | null }[];
@@ -1770,7 +1813,7 @@ async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; 
     if (state.drawdown >= limit) {
       return {
         halted: true,
-        reason: `權益回撤 ${state.drawdown.toFixed(2)}R（高點 ${state.peak.toFixed(2)}R → 目前 ${state.current.toFixed(2)}R），已達上限 ${limit}R — 暫停開新倉，請人工檢查策略是否失效`,
+        reason: `權益回撤 ${state.drawdown.toFixed(2)}R（高點 ${state.peak.toFixed(2)}R → 目前 ${state.current.toFixed(2)}R），已達上限 ${limit}R — 暫停開新倉，請人工檢查策略是否失效；檢查完可用 DELETE /api/analyze?scope=drawdown 確認並從當下重新計算`,
         state,
       };
     }
@@ -3163,6 +3206,34 @@ export async function DELETE(req: NextRequest) {
     // Reset ALL locks + risk-control state (breaker, BTC pause, loss cooldown).
     // ?scope=locks limits it to tlocks only; default clears everything.
     const scope = req.nextUrl.searchParams.get('scope');
+
+    // 2026-08-19：?scope=drawdown — 回撤停機的「人工確認」。這道關卡的用意是
+    // 「策略可能失效，停下來讓人工檢查」，所以解除方式刻意是**明確確認**而不是
+    // 自動放行或加 TTL（自動放行等於這道關卡不存在）。確認後 checkDrawdownHalt
+    // 只計算此刻之後平倉的單，等於「我看過了，從現在重新算」——風險上限一點
+    // 都沒有放寬，但系統不會再永久卡死（見該函式的死結說明）。
+    // 刻意不併進預設的 all-reset：那個是清鎖/冷卻這類例行操作，回撤確認代表
+    // 「人已經檢查過策略」，語意完全不同，混在一起會讓人不小心就解除掉。
+    if (scope === 'drawdown') {
+      const pid = process.env.SUPABASE_PROFILE_ID ?? '';
+      if (!pid) {
+        return NextResponse.json({ ok: false, error: 'SUPABASE_PROFILE_ID 未設定，無法確認回撤停機' }, { status: 400 });
+      }
+      if (!r) {
+        return NextResponse.json({ ok: false, error: 'Redis 未設定，回撤確認需要持久化' }, { status: 400 });
+      }
+      const at = Date.now();
+      try {
+        await r.set(DRAWDOWN_ACK_KEY(pid), at);
+        return NextResponse.json({
+          ok: true, scope: 'drawdown', acknowledgedAt: at,
+          note: '回撤停機已確認解除——權益回撤改從此刻之後平倉的交易重新計算（風險上限未變動）',
+        });
+      } catch (e) {
+        return NextResponse.json({ ok: false, error: `寫入確認失敗: ${String(e).slice(0, 120)}` }, { status: 500 });
+      }
+    }
+
     if (r) {
       try {
         const patterns = scope === 'locks'
