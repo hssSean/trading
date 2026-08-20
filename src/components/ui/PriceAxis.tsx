@@ -15,7 +15,12 @@ interface PriceAxisProps {
   entry: number;
   tp1: number;
   tp2: number;
-  current: number;
+  // null = 還沒拿到即時價。**絕對不要拿進場價之類的東西頂替**——標記上面
+  // 印著價格數字，頂替等於在畫面上宣稱「現價＝進場價」。改版第一版就是這樣
+  // （displayPrice 在沒有即時價時退回 trade.entry），正式站實測看到掛單卡片
+  // 的現價標記直接壓在進場刻度上，看起來像已經觸價。沒有價就不畫這個標記，
+  // 寧可少一個資訊也不要給錯的。
+  current: number | null;
   formatPrice: (n: number) => string;
   // TP1 後的移動止損。有值時左半段轉灰、並標出這條線——移動止損上移之後
   // 「止損到移動止損」那段在經濟意義上已經不存在，再用紅色畫會誇大風險。
@@ -32,15 +37,18 @@ export function PriceAxis({
   direction, stopLoss, entry, tp1, tp2, current, formatPrice,
   trailingStop, exitPrice, distToTp1Label, distToStopLabel,
 }: PriceAxisProps) {
-  const pos = calcAxisPositions({ direction, stopLoss, entry, tp1, tp2, current });
+  // 沒有即時價時，區段仍要照 entry/tp1 畫（那些是靜態價位，不需要現價），
+  // 只有「現價標記」那一個元素不畫。用 entry 當佔位算 pos 不會影響區段，
+  // 因為區段只讀 pos.entry / pos.tp1。
+  const pos = calcAxisPositions({ direction, stopLoss, entry, tp1, tp2, current: current ?? entry });
   const isClosed = exitPrice != null;
-  const markerPct = isClosed
-    ? calcAxisPositions({ direction, stopLoss, entry, tp1, tp2, current: exitPrice }).current
-    : pos.current;
-  const markerZone: PriceZone = isClosed
-    ? calcAxisPositions({ direction, stopLoss, entry, tp1, tp2, current: exitPrice }).zone
-    : pos.zone;
-  const markerColor = ZONE_COLOR[markerZone];
+  const markerPrice = isClosed ? exitPrice : current;
+  const markerAxis = markerPrice != null
+    ? calcAxisPositions({ direction, stopLoss, entry, tp1, tp2, current: markerPrice })
+    : null;
+  const markerPct = markerAxis?.current ?? 0;
+  const markerZone: PriceZone | null = markerAxis?.zone ?? null;
+  const markerColor = markerZone ? ZONE_COLOR[markerZone] : 'transparent';
 
   const trailPct = trailingStop != null
     ? calcAxisPositions({ direction, stopLoss, entry, tp1, tp2, current: trailingStop }).current
@@ -51,7 +59,7 @@ export function PriceAxis({
 
   return (
     <div className={isClosed ? 'opacity-90' : undefined}>
-      {!isClosed && (
+      {!isClosed && current != null && (
         <div className="relative h-[34px]">
           <div
             className="absolute -translate-x-1/2 whitespace-nowrap text-[11px] num px-1.5 py-0.5 rounded"
@@ -138,7 +146,7 @@ export function PriceAxis({
         </div>
       </div>
 
-      {isClosed && (
+      {isClosed && exitPrice != null && (
         <div className="mt-0.5 text-[10px] num" style={{ color: markerColor }}>
           出場 {formatPrice(exitPrice)}
         </div>

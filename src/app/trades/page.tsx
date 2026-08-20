@@ -318,8 +318,25 @@ const TradeRow = memo(function TradeRow({
         </div>
       </div>
 
-      {/* Waiting: distance to entry */}
-      {isWaiting && (
+      {/* 等待進場：主導數字＝「還要多遠才進場」。2026-08-21 從一行小字放大
+          成卡片主角——這是掛單狀態下唯一真正要回答的問題，塞在小字裡等於
+          要使用者自己去比對四個價位。箭頭直接指出價格要往哪走。 */}
+      {isWaiting && livePx > 0 && distToEntry > 0 && (
+        <div className="mb-3">
+          <div className="flex items-baseline gap-2.5">
+            <span className="text-[#E6AF5A] text-[30px] leading-none num">
+              {trade.direction === 'LONG' ? '↓' : '↑'}{distToEntry.toFixed(2)}%
+            </span>
+            <span className="text-text-m text-[13px]">才進場</span>
+          </div>
+          <div className="text-text-s text-[12px] num mt-1">
+            現價 {fmtPrice(livePx)} → 需{trade.direction === 'LONG' ? '跌' : '漲'}到 {fmtPrice(trade.entry)}
+          </div>
+        </div>
+      )}
+
+      {/* Waiting: 已觸價等待確認／尚無即時價 */}
+      {isWaiting && !(livePx > 0 && distToEntry > 0) && (
         <div className="text-[12px] mb-3">
           {livePx > 0 ? (
             <>
@@ -340,20 +357,33 @@ const TradeRow = memo(function TradeRow({
         </div>
       )}
 
-      {/* Pending: PnL + live price */}
-      {isPending && livePx > 0 && (
-        <div className="flex items-baseline justify-between mb-3">
-          <div className="flex items-baseline gap-1.5">
-            <span className={`text-[22px] font-medium num ${livePnl >= 0 ? 'text-accent' : 'text-down'}`}>
-              {livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)}%
-            </span>
+      {/* 持倉中：主導數字改成 R 倍數。2026-08-21——原本以價格%當主角，但這個
+          專案全站的損益口徑是 R（CLAUDE.md「損益一律用 R 倍數衡量，ATR 止損
+          的原始 % 會嚴重誤導」），戰績卡、CSV、熔斷、回撤全都用 R，只有這裡
+          用 %，同一筆單在不同畫面看起來是兩個不同的數字。% 降為次要。 */}
+      {isPending && livePx > 0 && (() => {
+        const stopDistPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
+        const liveR = stopDistPct > 0 ? livePnl / stopDistPct : null;
+        const good = livePnl >= 0;
+        return (
+          <div className="flex items-baseline justify-between mb-3">
+            <div className="flex items-baseline gap-2.5">
+              {liveR !== null && (
+                <span className={`text-[30px] leading-none num ${good ? 'text-up' : 'text-down'}`}>
+                  {good ? '+' : ''}{liveR.toFixed(2)}R
+                </span>
+              )}
+              <span className={`text-[15px] num ${good ? 'text-up' : 'text-down'}`}>
+                {good ? '+' : ''}{livePnl.toFixed(2)}%
+              </span>
+            </div>
+            <div className="text-right">
+              <div className="text-[11px] text-text-s">現價</div>
+              <div className="text-[13px] text-text-p num">{fmtPrice(livePx)}</div>
+            </div>
           </div>
-          <div className="text-right">
-            <div className="text-[11px] text-text-s">現價</div>
-            <div className="text-[13px] text-text-p num">{fmtPrice(livePx)}</div>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Distance-to-TP1 / distance-to-SL, shown for active pending trades */}
       {isPending && livePx > 0 && (
@@ -392,7 +422,7 @@ const TradeRow = memo(function TradeRow({
           entry={trade.entry}
           tp1={trade.tp1}
           tp2={trade.tp2}
-          current={displayPrice}
+          current={livePx > 0 ? livePx : null}
           formatPrice={fmtPrice}
           trailingStop={isWatchingTp2 ? trade.currentStop ?? null : null}
           exitPrice={isFinallyClosed(trade) ? trade.exitPrice ?? null : null}
