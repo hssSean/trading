@@ -11,7 +11,8 @@ import { TradeResult, TradeRecord } from '@/types';
 import { TradeCard } from '@/components/ui/TradeCard';
 import { PillBadge } from '@/components/ui/PillBadge';
 import { StatChip } from '@/components/ui/StatChip';
-import { PriceProgressBar } from '@/components/ui/PriceProgressBar';
+import { PriceAxis } from '@/components/ui/PriceAxis';
+import { ScoreComposition } from '@/components/ui/ScoreComposition';
 import { Wallet, ShieldAlert, LineChart, FileText, Layers, Percent, Check } from 'lucide-react';
 
 const RESULT_LABEL: Record<string, string> = {
@@ -381,9 +382,11 @@ const TradeRow = memo(function TradeRow({
         </div>
       )}
 
-      {/* Progress bar: shown for every trade so entry/TP1/TP2/SL are always visible */}
+      {/* 價格軸：每張單都顯示，止損/進場/TP1/TP2 隨時看得到。
+          2026-08-21 從 PriceProgressBar 換成 PriceAxis——舊版標籤平均分佈、
+          跟軸上真實位置脫鉤（實測差 11 個百分點），見 lib/priceAxis.ts。 */}
       <div className="mb-3">
-        <PriceProgressBar
+        <PriceAxis
           direction={trade.direction}
           stopLoss={trade.stopLoss}
           entry={trade.entry}
@@ -391,6 +394,10 @@ const TradeRow = memo(function TradeRow({
           tp2={trade.tp2}
           current={displayPrice}
           formatPrice={fmtPrice}
+          trailingStop={isWatchingTp2 ? trade.currentStop ?? null : null}
+          exitPrice={isFinallyClosed(trade) ? trade.exitPrice ?? null : null}
+          distToTp1Label={isPending && livePx > 0 && distTP1 > 0 ? `TP1 ${distTP1.toFixed(2)}%` : undefined}
+          distToStopLabel={isPending && livePx > 0 && distSL >= 0 ? `止損 ${distSL.toFixed(2)}%` : undefined}
         />
       </div>
 
@@ -465,19 +472,27 @@ const TradeRow = memo(function TradeRow({
         </div>
       )}
 
-      {/* Auto-generated entry reasons */}
-      {trade.reasons && trade.reasons.length > 0 && (
-        <div className="mb-2 border-t border-white/[0.06] pt-2">
-          <p className="tlabel mb-1">分析依據</p>
+      {/* 分析依據。2026-08-21 改版：原本把五組評分擠成一行純文字、再接 11 條
+          同權重的理由，每條看起來都一樣重要，得逐條讀才知道這張單的性格。
+          改成迷你長條（依得分佔上限的比例排序，掛零的標紅）＋理由預設收合。 */}
+      {(trade.scoreBreakdown || (trade.reasons && trade.reasons.length > 0)) && (
+        <div className="mb-2 border-t border-white/[0.06] pt-2.5">
           {trade.scoreBreakdown && (
-            <p className="text-[#5A7A8A] text-[10px] leading-[1.5] mb-1 num">
-              評分：趨勢{trade.scoreBreakdown.trend} · 動能{trade.scoreBreakdown.momentum} · 結構{trade.scoreBreakdown.structure} · 量能{trade.scoreBreakdown.volume} · K線{trade.scoreBreakdown.priceAction}
-              {trade.scoreBreakdown.penalties < 0 ? ` · 扣分${trade.scoreBreakdown.penalties}` : ''}
-            </p>
+            <ScoreComposition score={trade.score} breakdown={trade.scoreBreakdown} />
           )}
-          {trade.reasons.map((r, i) => (
-            <p key={i} className="text-[#5A7A8A] text-[10px] leading-[1.5]">› {r}</p>
-          ))}
+          {trade.reasons && trade.reasons.length > 0 && (
+            <details className="group mt-2.5 border-t border-white/[0.06] pt-2">
+              <summary className="flex items-center justify-between cursor-pointer list-none text-[11px]">
+                <span className="text-text-s">{trade.reasons.length} 項訊號依據</span>
+                <span className="text-accent">展開 ▾</span>
+              </summary>
+              <div className="mt-1.5">
+                {trade.reasons.map((r, i) => (
+                  <p key={i} className="text-[#5A7A8A] text-[10px] leading-[1.5]">› {r}</p>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
 
