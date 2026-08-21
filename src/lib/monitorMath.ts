@@ -245,14 +245,35 @@ export function applyFundingRateCrowdingPenalty(
 // 同一套假設——CLAUDE.md 調參紀律要求看影子模擬淨R決定要不要放寬/收緊
 // 濾網，兩邊口徑不一致會讓那個判斷基礎失真。TP1/TP2 維持限價單語意，
 // 不套用。
+// 2026-08-22：同一根K線同時觸及 TP 和 SL 時，要判哪一邊？
+//
+// K線只有 OHLC，**看不出誰先到**。這支函數原本一律判 TP 贏（下面的
+// 'optimistic'），註解寫「conservative」是寫反了——把所有不確定性都算成
+// 自己有利，是最樂觀的假設。
+//
+// 為什麼這件事重要到要為它加一個參數：真倉是靠即時報價監控的，看得到真實
+// 順序，所以**實際成交結果是準的**；只有影子模擬（「當初如果做了會怎樣」）
+// 要靠K線猜。於是偏誤是單向的——每一次「被擋掉的訊號其實會賺」的比較都
+// 系統性偏向「應該放寬」。而 CLAUDE.md 的調參紀律正是要看影子淨R來決定
+// 放寬或收緊，等於拿一把偏心的尺在做決定。
+//
+// 修法不是改判 SL 贏（那只是換一個方向的偏誤），而是兩個都算，讓上層把
+// 淨R顯示成區間：兩端同號才是穩健結論，跨零就代表這批資料回答不了問題、
+// 不該動門檻。
+export type TieBreak = 'optimistic' | 'pessimistic';
+
 export function walkTpSl(
   candles: WalkCandle[],
   afterMs: number,
   params: WalkTpSlParams,
   tp1HitAlready: boolean,
+  // 預設保持 optimistic：既有的 shadow_trades 都是用這個假設累積出來的，
+  // 改預設值會讓新舊資料混在同一個統計裡而看不出來。
+  tieBreak: TieBreak = 'optimistic',
 ): WalkTpSlResult {
   const { stopLoss, tp1, tp2, isLong } = params;
   const slExitPrice = applyStopSlippage(stopLoss, isLong);
+  const pess = tieBreak === 'pessimistic';
   let tp1Hit = tp1HitAlready;
   for (const c of candles) {
     if (c.closeTime <= afterMs) continue;
@@ -260,13 +281,28 @@ export function walkTpSl(
     const hitTP1 = isLong ? c.high >= tp1      : c.low  <= tp1;
     const hitTP2 = isLong ? c.high >= tp2      : c.low  <= tp2;
     if (tp1Hit) {
-      if (hitTP2) return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2,         closedAt: c.closeTime };
-      if (hitSL)  return { tp1Hit, done: true, result: 'WIN_TP1', exitPrice: slExitPrice, closedAt: c.closeTime };
+      // TP1 已達標，止損已移到保本/移動位——這一段的 SL 命中不是虧損，
+      // 是 WIN_TP1 收尾，所以兩種假設只差在「同根同時觸及 TP2 和 SL 時
+      // 收在哪一邊」。
+      if (pess) {
+        if (hitSL)  return { tp1Hit, done: true, result: 'WIN_TP1', exitPrice: slExitPrice, closedAt: c.closeTime };
+        if (hitTP2) return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2,         closedAt: c.closeTime };
+      } else {
+        if (hitTP2) return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2,         closedAt: c.closeTime };
+        if (hitSL)  return { tp1Hit, done: true, result: 'WIN_TP1', exitPrice: slExitPrice, closedAt: c.closeTime };
+      }
       continue;
     }
-    if (hitTP2)      return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2, closedAt: c.closeTime };
-    else if (hitTP1) { tp1Hit = true; continue; } // TP1-before-SL same-candle rule (matches monitor)
-    else if (hitSL)  return { tp1Hit, done: true, result: 'LOSS', exitPrice: slExitPrice, closedAt: c.closeTime };
+    if (pess) {
+      // 悲觀：只要這根碰到 SL 就認賠，不管同一根有沒有碰到 TP。
+      if (hitSL)       return { tp1Hit, done: true, result: 'LOSS', exitPrice: slExitPrice, closedAt: c.closeTime };
+      else if (hitTP2) return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2, closedAt: c.closeTime };
+      else if (hitTP1) { tp1Hit = true; continue; }
+    } else {
+      if (hitTP2)      return { tp1Hit, done: true, result: 'WIN_TP2', exitPrice: tp2, closedAt: c.closeTime };
+      else if (hitTP1) { tp1Hit = true; continue; }
+      else if (hitSL)  return { tp1Hit, done: true, result: 'LOSS', exitPrice: slExitPrice, closedAt: c.closeTime };
+    }
   }
   return { tp1Hit, done: false };
 }

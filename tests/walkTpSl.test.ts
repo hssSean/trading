@@ -106,3 +106,71 @@ describe('walkTpSl', () => {
     });
   });
 });
+
+// ── tieBreak：同一根K線同時觸及 TP 和 SL 時判哪一邊 ─────────────────
+//
+// K線只有 OHLC，看不出誰先到。原本一律判 TP 贏（最樂觀）。影子模擬全部
+// 走這支函數，而真倉是靠即時報價監控、看得到真實順序——所以偏誤是單向的：
+// 每一次「被擋掉的訊號其實會賺」的比較都偏向「應該放寬」。加 pessimistic
+// 是為了讓上層把淨R顯示成區間，兩端同號才算穩健結論。
+describe('walkTpSl tieBreak', () => {
+  // 這根同時碰到 SL(95) 和 TP1(105)：high 106 / low 94
+  const ambiguousTp1 = [candle(106, 94, 100, 1000)];
+  // 這根同時碰到 SL(95) 和 TP2(110)
+  const ambiguousTp2 = [candle(111, 94, 100, 1000)];
+
+  it('預設維持 optimistic（既有 shadow_trades 都是這個假設累積的）', () => {
+    const def = walkTpSl(ambiguousTp1, 500, LONG_PARAMS, false);
+    const opt = walkTpSl(ambiguousTp1, 500, LONG_PARAMS, false, 'optimistic');
+    expect(def).toEqual(opt);
+    expect(def.tp1Hit).toBe(true);
+    expect(def.done).toBe(false); // TP1 達標後繼續等 TP2
+  });
+
+  it('pessimistic：同根同時觸及 TP1 和 SL 判賠', () => {
+    const r = walkTpSl(ambiguousTp1, 500, LONG_PARAMS, false, 'pessimistic');
+    expect(r.done).toBe(true);
+    expect(r.result).toBe('LOSS');
+    expect(r.exitPrice).toBe(applyStopSlippage(95, true));
+  });
+
+  it('pessimistic：同根同時觸及 TP2 和 SL 也判賠（不是 WIN_TP2）', () => {
+    const opt = walkTpSl(ambiguousTp2, 500, LONG_PARAMS, false, 'optimistic');
+    expect(opt.result).toBe('WIN_TP2');
+    const pess = walkTpSl(ambiguousTp2, 500, LONG_PARAMS, false, 'pessimistic');
+    expect(pess.result).toBe('LOSS');
+  });
+
+  it('pessimistic：TP1 已達標後，同根同時觸及 TP2 和 SL 收在 WIN_TP1', () => {
+    const opt = walkTpSl(ambiguousTp2, 500, LONG_PARAMS, true, 'optimistic');
+    expect(opt.result).toBe('WIN_TP2');
+    const pess = walkTpSl(ambiguousTp2, 500, LONG_PARAMS, true, 'pessimistic');
+    // TP1 之後止損已在保本以上，碰到它不是虧損，是 WIN_TP1 收尾
+    expect(pess.result).toBe('WIN_TP1');
+    expect(pess.exitPrice).toBe(applyStopSlippage(95, true));
+  });
+
+  it('沒有歧義時兩種假設結果完全相同（LONG）', () => {
+    const clean = [candle(106, 99, 105, 1000), candle(111, 104, 110, 2000)];
+    const opt = walkTpSl(clean, 500, LONG_PARAMS, false, 'optimistic');
+    const pess = walkTpSl(clean, 500, LONG_PARAMS, false, 'pessimistic');
+    expect(pess).toEqual(opt);
+    expect(opt.result).toBe('WIN_TP2');
+  });
+
+  it('SHORT 同樣適用：同根同時觸及 TP1(95) 和 SL(105) 判賠', () => {
+    const amb = [candle(106, 94, 100, 1000)];
+    expect(walkTpSl(amb, 500, SHORT_PARAMS, false, 'optimistic').tp1Hit).toBe(true);
+    const pess = walkTpSl(amb, 500, SHORT_PARAMS, false, 'pessimistic');
+    expect(pess.result).toBe('LOSS');
+    expect(pess.exitPrice).toBe(applyStopSlippage(105, false));
+  });
+
+  it('只碰到 SL 沒碰到 TP：兩種假設都判賠', () => {
+    const slOnly = [candle(101, 94, 96, 1000)];
+    const opt = walkTpSl(slOnly, 500, LONG_PARAMS, false, 'optimistic');
+    const pess = walkTpSl(slOnly, 500, LONG_PARAMS, false, 'pessimistic');
+    expect(opt.result).toBe('LOSS');
+    expect(pess).toEqual(opt);
+  });
+});

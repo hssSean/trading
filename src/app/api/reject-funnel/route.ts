@@ -66,38 +66,66 @@ interface ShadowEntry {
   status: string;
   result?: string;
   exitPrice?: number;
+  // 悲觀軌跡（同根K線同時觸及 TP/SL 判賠）。2026-08-22 之前累積的資料沒有
+  // 這些欄位，所以是 optional，統計時要分辨「沒有」與「是 0」。
+  pessDone?: boolean;
+  pessResult?: string;
+  pessExitPrice?: number;
 }
 
 // Per-gate simulated outcome of rejected signals. netR < 0 = the gate saved
 // money (killed mostly losers); netR > 0 = it blocked winners → loosen candidate.
+//
+// 2026-08-22 加上 netRPess：影子模擬碰到「同一根K線同時觸及 TP 和 SL」時，
+// K線的 OHLC 看不出誰先到，原本一律判贏（netR，樂觀）。真倉是靠即時報價
+// 監控的、看得到真實順序所以準；只有影子要猜，於是偏誤單向偏「這道關卡
+// 擋錯了、應該放寬」——而放寬與否正是靠這個數字決定的（CLAUDE.md 調參
+// 紀律）。現在兩個都算：
+//   兩端同號  → 結論穩健，可以據此調整
+//   區間跨零  → 這批資料回答不了，不要動門檻
+// pessCovered 是有悲觀資料的樣本數；小於 done 代表混著加這個功能之前的
+// 舊資料，區間會失真，要等樣本補齊。
 interface ShadowStat {
   win: number;
   loss: number;
   other: number;   // EXPIRED / TIMEOUT
   pending: number;
-  netR: number;
+  netR: number;      // 樂觀（TP 優先）
+  netRPess: number;  // 悲觀（同根碰到 SL 就認賠）
+  pessCovered: number;
 }
 
 function aggregateShadows(shadows: ShadowEntry[]): Record<string, ShadowStat> {
   const stats: Record<string, ShadowStat> = {};
   for (const st of shadows) {
-    const g = (stats[st.rejectedAt] ??= { win: 0, loss: 0, other: 0, pending: 0, netR: 0 });
+    const g = (stats[st.rejectedAt] ??= {
+      win: 0, loss: 0, other: 0, pending: 0, netR: 0, netRPess: 0, pessCovered: 0,
+    });
     if (st.status !== 'done') { g.pending++; continue; }
     const risk = Math.abs(st.entry - st.stopLoss);
     const rOf = (exit: number) =>
       risk > 0 ? (st.direction === 'LONG' ? exit - st.entry : st.entry - exit) / risk : 0;
-    if (st.result === 'WIN_TP1' || st.result === 'WIN_TP2') {
-      g.win++;
-      g.netR += rOf(st.exitPrice ?? st.tp1);
-    } else if (st.result === 'LOSS') {
-      g.loss++;
-      g.netR -= 1;
-    } else {
-      g.other++;
-      if (st.result === 'TIMEOUT' && st.exitPrice) g.netR += rOf(st.exitPrice);
+    const rFor = (result?: string, exitPrice?: number) => {
+      if (result === 'WIN_TP1' || result === 'WIN_TP2') return rOf(exitPrice ?? st.tp1);
+      if (result === 'LOSS') return -1;
+      if (result === 'TIMEOUT' && exitPrice) return rOf(exitPrice);
+      return 0;
+    };
+    if (st.result === 'WIN_TP1' || st.result === 'WIN_TP2') g.win++;
+    else if (st.result === 'LOSS') g.loss++;
+    else g.other++;
+    g.netR += rFor(st.result, st.exitPrice);
+    // 只有真的有悲觀資料才計入。舊資料缺這些欄位時若拿 0 頂替，會把區間
+    // 下緣往 0 拉，讓一個其實跨零的結論看起來穩健——正是要避免的那種錯。
+    if (st.pessDone) {
+      g.pessCovered++;
+      g.netRPess += rFor(st.pessResult, st.pessExitPrice);
     }
   }
-  for (const g of Object.values(stats)) g.netR = parseFloat(g.netR.toFixed(2));
+  for (const g of Object.values(stats)) {
+    g.netR = parseFloat(g.netR.toFixed(2));
+    g.netRPess = parseFloat(g.netRPess.toFixed(2));
+  }
   return stats;
 }
 

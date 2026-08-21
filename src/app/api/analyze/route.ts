@@ -1857,6 +1857,13 @@ interface ShadowTrade {
   exitPrice?: number;
   closedAt?: number;
   lastCheckedAt: number;
+  // 2026-08-22 悲觀軌跡（同根K線同時觸及 TP/SL 時判賠）。全部 optional——
+  // 這個欄位加上去之前累積的 shadow_trades 沒有這些值，漏斗端必須能分辨
+  // 「這筆沒有悲觀資料」與「悲觀結果是 0」，不然舊資料會被當成 0R 拉低平均。
+  pessTp1Hit?: boolean;
+  pessDone?: boolean;
+  pessResult?: string;
+  pessExitPrice?: number;
 }
 
 // Gates where a full signal existed — worth simulating.
@@ -1893,17 +1900,41 @@ function simulateShadow(st: ShadowTrade, candles: Candle[], now: number): void {
   }
   if (st.status !== 'active' || !st.filledAt) return;
 
-  const outcome = walkTpSl(
-    candles, st.filledAt,
-    { entry: st.entry, stopLoss: st.stopLoss, tp1: st.tp1, tp2: st.tp2, isLong },
-    !!st.tp1Hit,
-  );
+  const levels = { entry: st.entry, stopLoss: st.stopLoss, tp1: st.tp1, tp2: st.tp2, isLong };
+
+  // 2026-08-22：同一根K線同時觸及 TP 和 SL 時，K線看不出誰先到。這裡平行
+  // 跑一條悲觀假設（碰到 SL 就認賠）的軌跡，讓 /api/reject-funnel 把淨R
+  // 顯示成「悲觀 ~ 樂觀」區間。理由見 monitorMath.ts 的 TieBreak 說明：
+  // 真倉靠即時報價、看得到真實順序所以是準的，只有影子要猜，於是偏誤單向
+  // 偏向「這道關卡擋錯了、應該放寬」——而放寬與否正是靠這個數字決定的。
+  //
+  // 主軌跡仍用 optimistic：既有 shadow_trades 都是那個假設累積的，換掉會讓
+  // 新舊資料混在同一個統計裡而看不出來。悲觀軌跡另存欄位、可選，舊資料
+  // 沒有這些欄位時漏斗端會標示「樣本不足」而不是拿 0 當數字。
+  if (!st.pessDone) {
+    const pess = walkTpSl(candles, st.filledAt, levels, !!st.pessTp1Hit, 'pessimistic');
+    st.pessTp1Hit = pess.tp1Hit;
+    if (pess.done) {
+      st.pessDone = true;
+      st.pessResult = pess.result;
+      st.pessExitPrice = pess.exitPrice;
+    }
+  }
+
+  const outcome = walkTpSl(candles, st.filledAt, levels, !!st.tp1Hit);
   st.tp1Hit = outcome.tp1Hit;
   if (outcome.done) {
     st.status = 'done';
     st.result = outcome.result;
     st.exitPrice = outcome.exitPrice;
     st.closedAt = outcome.closedAt;
+    // 樂觀軌跡先結束、悲觀還開著（例如一路沒碰過 SL 就直接 TP2）——那代表
+    // 兩邊其實同結果，收斂過去，不要留一個永遠不結案的空欄位。
+    if (!st.pessDone) {
+      st.pessDone = true;
+      st.pessResult = outcome.result;
+      st.pessExitPrice = outcome.exitPrice;
+    }
     return;
   }
   if (now - st.filledAt > activeMs) {
@@ -1912,6 +1943,11 @@ function simulateShadow(st: ShadowTrade, candles: Candle[], now: number): void {
     st.result    = st.tp1Hit ? 'WIN_TP1' : 'TIMEOUT';
     st.exitPrice = st.tp1Hit ? st.tp1 : lastC?.close;
     st.closedAt  = now;
+    if (!st.pessDone) {
+      st.pessDone = true;
+      st.pessResult = st.pessTp1Hit ? 'WIN_TP1' : 'TIMEOUT';
+      st.pessExitPrice = st.pessTp1Hit ? st.tp1 : lastC?.close;
+    }
   }
 }
 
