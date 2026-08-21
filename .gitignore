@@ -6,7 +6,11 @@ node_modules/
 # next.js
 .next/
 out/
-build/
+# 錨定在根目錄：沒有斜線前綴的 `build/` 會 match 任何深度叫 build 的目錄。
+# 2026-08-22 實際踩到——src/app/api/build/route.ts 被靜默忽略，commit 過了但
+# 檔案沒進版控，部署後那個端點 404，而呼叫端是「取不到就當沒有新版」，
+# 於是整個功能靜默失效。
+/build/
 
 # env files
 .env
