@@ -1608,7 +1608,34 @@ export default function TradesPage() {
       </div>
 
       {/* Trade list */}
-      <div className="flex-1 overflow-y-auto px-3 pt-3 scroll-container">
+      {/*
+        2026-08-22：`key` 綁篩選條件，是為了修「分類按鈕按了畫面沒變」。
+        這個問題查過三次，前兩次（7/29 改 TradeRow、8/07 改 priceOf）都是照
+        「判斷是高頻重繪造成的」這句推測動手，沒量過，所以都沒中。這次在
+        正式站實際量到的東西是：
+
+          React fiber 樹底下只有 1 張卡（HYPEUSDT，正確）
+          真實 DOM 有 26 個子節點，其中 24 個 detached
+          ——有 fiber，但 fiber.return 一路往上已經接不回這個容器
+
+        也就是說 React 算對了、也 render 對了，但 commit 階段沒有把舊卡片從
+        DOM 移除。那 24 張殭屍卡疊在最上面，唯一正確的那張被壓到第 24 位，
+        使用者看到的就是「按鈕亮了但沒有分類」。按鈕列正常是因為它是原地
+        更新屬性，不需要刪節點。
+
+        乾淨分頁連點 7 個分類完全正常（detached 全程 0），所以不是邏輯錯，
+        是長時間開著／長期在背景的分頁才會累積——正好是把 PWA 丟在背景、
+        隔天再打開的用法。React 內部為什麼漏刪我沒有查到定論，不假裝有。
+
+        修法是繞開那個不可靠的路徑而不是修它：篩選條件一變就換 key，React
+        會整個換掉這個容器，殭屍卡是它的子節點，跟著一起消失。刪一個
+        「React 確定持有」的容器，比逐一刪 200 個子節點可靠得多。
+        附帶好處：切換分類時捲軸自動回到頂端（本來就該這樣）。
+      */}
+      <div
+        key={`${filter}|${resultFilter}|${dirFilter}|${dateFilter}`}
+        className="flex-1 overflow-y-auto px-3 pt-3 scroll-container"
+      >
         {filtered.length === 0 ? (
           trades.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-48 gap-2 text-center">
