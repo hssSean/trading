@@ -212,10 +212,16 @@ async function unlockSymbol(symbol: string): Promise<void> {
 const pendingSignals: TradingSignal[] = [];
 
 // ── Dynamic coin list (1h cache) ──────────────────────────────
+// 只在幣安 API 掛掉時才用到。因為是寫死的清單，會隨著幣種下架/改名而爛掉，
+// 而且爛掉時**完全沒有徵兆**——fallback 平常不會執行，等到真的執行那天才
+// 每輪對著不存在的 symbol 404。2026-08-22 對 exchangeInfo 逐一驗證時抓到
+// MATICUSDT 已經不存在（Polygon 改名 POL，幣安下架該合約），換成 BCHUSDT
+// （老幣、當時 24h 量 387M、被改名下架的機率遠低於中小幣）。
+// 直接的後繼者 POLUSDT 雖然還在，但量只有 52M，不適合放進「大幣保底」清單。
 const FALLBACK_COINS = [
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT',
   'DOGEUSDT','ADAUSDT','AVAXUSDT','DOTUSDT','LINKUSDT',
-  'LTCUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','MATICUSDT',
+  'LTCUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','BCHUSDT',
 ];
 let cachedCoins: string[] = [];
 let cachedAt              = 0;

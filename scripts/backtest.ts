@@ -18,6 +18,7 @@
  */
 
 import axios from 'axios';
+import { pathToFileURL } from 'node:url';
 import type { Candle, TradingSignal } from '../src/types';
 import { generateSignals, generateMeanReversionSignals } from '../src/analysis/signals';
 import { adx } from '../src/analysis/indicators';
@@ -56,7 +57,7 @@ async function fetchPage(
   }));
 }
 
-async function fetchHistorical(symbol: string, months: number): Promise<Candle[]> {
+export async function fetchHistorical(symbol: string, months: number): Promise<Candle[]> {
   const totalMs = months * 30 * 24 * 3_600_000;
   // Fetch extra warmup bars so the first tradeable candle already has full indicator history
   const startMs = Date.now() - totalMs - WARMUP * 3_600_000;
@@ -118,7 +119,7 @@ function getRegime(candles1h: Candle[], upToIdx: number): Regime {
 }
 
 // ── Simulation types ──────────────────────────────────────────
-interface SimTrade {
+export interface SimTrade {
   openIdx:   number;
   closeIdx:  number;
   direction: 'LONG' | 'SHORT';
@@ -134,7 +135,7 @@ interface SimTrade {
 }
 
 // ── Core simulation ───────────────────────────────────────────
-function runBacktest(symbol: string, candles: Candle[]): SimTrade[] {
+export function runBacktest(symbol: string, candles: Candle[]): SimTrade[] {
   const trades: SimTrade[] = [];
   let openTrade: { signal: TradingSignal; openIdx: number } | null = null;
   // Track consecutive strategy-B losses per symbol for pause logic
@@ -335,7 +336,15 @@ async function main(): Promise<void> {
   printStats(trades,  'Combined');
 }
 
-main().catch(err => {
-  console.error('Backtest error:', err);
-  process.exit(1);
-});
+// 只有直接執行這支腳本時才跑 main。加這個判斷是為了讓 universe-compare.ts
+// 能 import runBacktest/fetchHistorical 重用同一套模擬邏輯——複製一份出去
+// 遲早會跟這裡分岔，而兩個群組如果跑在不同管線上，比較結果就沒有意義了。
+const invokedDirectly =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main().catch(err => {
+    console.error('Backtest error:', err);
+    process.exit(1);
+  });
+}
