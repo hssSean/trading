@@ -3,6 +3,7 @@ import './globals.css';
 import { BottomNav } from '@/components/BottomNav';
 import { StoreHydration } from '@/components/StoreHydration';
 import { PriceFeed } from '@/components/PriceFeed';
+import { VersionGate } from '@/components/VersionGate';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,6 +36,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="bg-[#0A0D11] min-h-dvh" suppressHydrationWarning>
         <div className="max-w-xl mx-auto flex flex-col min-h-dvh">
+          {/* 掛在 StoreHydration 外面：舊版偵測跟登入/資料載入無關，就算
+              store 還在同步或同步失敗也該能提示更新。 */}
+          <VersionGate />
           <StoreHydration>
             {/* Lives here, not in a page: price polling must survive navigation. */}
             <PriceFeed />
