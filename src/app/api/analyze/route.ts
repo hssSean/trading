@@ -13,6 +13,7 @@ import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry
 import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib/cancelShadow';
+import { shadowChanged, snapshot } from '@/lib/shadowWrite';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -1314,7 +1315,10 @@ async function processTimeStopShadows(newStarts: TimeStopShadow[]): Promise<void
         for (const s of group) {
           const advanced = advanceTimeStopShadow(s, candles, now);
           shadows.set(s.id, advanced);
-          writes[s.id] = JSON.stringify(advanced);
+          // 只在實質狀態變動時才寫回。推進的是 1h K 線、節流 10 分鐘一次，
+          // 絕大多數輪次 K 線根本沒收新的一根，唯一變的是 lastCheckedAt——
+          // 那個欄位全專案只寫不讀。見 shadowWrite.ts。
+          if (shadowChanged(s, advanced)) writes[s.id] = JSON.stringify(advanced);
         }
       }
     }
@@ -1377,7 +1381,7 @@ async function processCancelShadows(newStarts: CancelShadow[]): Promise<void> {
         for (const s of group) {
           const advanced = advanceCancelShadow(s, candles, now);
           shadows.set(s.id, advanced);
-          writes[s.id] = JSON.stringify(advanced);
+          if (shadowChanged(s, advanced)) writes[s.id] = JSON.stringify(advanced);
         }
       }
     }
@@ -2000,9 +2004,11 @@ async function processShadowTrades(newCandidates: ShadowTrade[]): Promise<void> 
         let candles: Candle[] = [];
         try { candles = await fetchCandles(symbol, '1h', 96); } catch { continue; }
         for (const st of group) {
+          // simulateShadow 是就地修改，所以要先快照才比得出前後差異。
+          const before = snapshot(st);
           simulateShadow(st, candles, now);
           st.lastCheckedAt = now;
-          writes[st.id] = JSON.stringify(st);
+          if (shadowChanged(before, st)) writes[st.id] = JSON.stringify(st);
         }
       }
     }
