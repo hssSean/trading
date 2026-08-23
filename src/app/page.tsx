@@ -213,7 +213,18 @@ export default function HomePage() {
     };
     pickupPending();
     document.addEventListener('visibilitychange', pickupPending);
-    const pollId = setInterval(pickupPending, 15 * 1000);
+    // 2026-08-23：15 秒 → 60 秒。Upstash 免費額度被燒完（50 萬次/月）後盤點
+    // 出來的第二大戶：這支每次呼叫做一次 lrange，15 秒一輪 = 17.3 萬次/月，
+    // 而且是**每一個開著的分頁**各算一份。
+    //
+    // 關鍵在於這裡輪詢的東西是 cron 每 5 分鐘才產生一次的——用 15 秒去問一個
+    // 5 分鐘才變一次的來源，20 倍都是白打的。改 60 秒仍然是 5 倍過取樣，
+    // 保留一點反應速度，但省掉 3/4。
+    //
+    // 即時性沒有變差的原因：上面那行 visibilitychange 監聽器讓「切回 App」
+    // 立刻拉一次，而使用者真正在意的就是那一刻。純背景的輪詢間隔對體感沒有
+    // 影響（新推薦單本來就是靠 Web Push 通知的）。
+    const pollId = setInterval(pickupPending, 60 * 1000);
     return () => {
       document.removeEventListener('visibilitychange', pickupPending);
       clearInterval(pollId);
