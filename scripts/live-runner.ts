@@ -59,7 +59,7 @@ import { Redis } from '@upstash/redis';
 import {
   BinanceFuturesClient, loadBinanceConfigFromEnv, MarginBracket,
 } from '../src/engine/binanceClient';
-import { getKillSwitchState } from '../src/engine/killSwitch';
+import { getKillSwitchState, type KillSwitchState } from '../src/engine/killSwitch';
 import { reconcilePositionsAndOrders } from '../src/engine/watchdog';
 import { findMarginBracket } from '../src/engine/liquidation';
 import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
@@ -83,10 +83,23 @@ if (isLive) {
 
 const CYCLE_MS = 15_000; // 15 秒一輪，比 Vercel 5 分鐘 cron 細很多
 const DEFAULT_MAX_LEVERAGE = 10;
-// route.ts 用同一個 key 前綴判斷這支還活著沒有。90 秒 ≈ 6 輪緩衝，避免
-// 單輪因為 API 延遲稍微拖長就被誤判成「process 已經停了」。
+// route.ts 用同一個 key 前綴判斷這支還活著沒有。
+//
+// 2026-08-23：TTL 90→240 秒、寫入頻率 15→60 秒。原本每輪（15秒）寫一次而
+// TTL 只有 90 秒，是 6 倍過取樣；加上同樣每輪一次的 kill switch 讀取，這支
+// 常駐腳本一天吃掉 11,520 次 Redis 指令（34.6 萬/月），佔 Upstash 免費額度
+// 的 69%——而額度真的被燒完了。稽核時我一開始只看 src/、漏掉這支腳本，
+// 因此誤判成主要是 Vercel 掃描在燒。
+//
+// TTL 拉長不影響實際接手速度：route.ts 是 5 分鐘一次的 cron 才會去看這個
+// 心跳，90 秒和 240 秒對「多久後被接手」幾乎沒差，但把「單輪延遲就被誤判成
+// process 已死、兩邊同時碰同一批 trades」的風險降低了。
 const HEARTBEAT_KEY_PREFIX = 'live-runner:heartbeat:';
-const HEARTBEAT_TTL_SEC = 90;
+const HEARTBEAT_TTL_SEC = 240;
+const HEARTBEAT_WRITE_MS = 60_000;
+// kill switch 是人工緊急開關，不需要 15 秒級反應。快取 60 秒代表按下後最多
+// 60 秒生效——換掉 4,320 次/天的 Redis 讀取，這個交換划算。
+const KILLSWITCH_POLL_MS = 60_000;
 
 // 這些幣安錯誤代碼代表「這筆單本質上就不可能成功」——不是網路抖動、不是
 // 暫時性 rate limit，重試沒有意義，只會每輪浪費一次 API 呼叫、洗版 log。
@@ -564,12 +577,36 @@ async function cleanupAfterTradeClosed(
 // 還活著就要回報心跳——kill switch 啟動中不代表「process 死了」，這兩件
 // 事不能混在一起判斷，不然 route.ts 會在 kill switch 啟動期間誤判成
 // live-runner 已經停止、搶著接手，兩邊同時碰同一批 trades。
+let lastHeartbeatAt = 0;
 async function writeHeartbeat(redis: Redis, userId: string): Promise<void> {
+  if (Date.now() - lastHeartbeatAt < HEARTBEAT_WRITE_MS) return;
   try {
     await redis.set(`${HEARTBEAT_KEY_PREFIX}${userId}`, Date.now(), { ex: HEARTBEAT_TTL_SEC });
+    // 只有寫成功才更新時戳——失敗時下一輪要立刻重試，不然心跳會靜默斷掉
+    // 而 route.ts 會誤判成 process 已死並搶著接手。
+    lastHeartbeatAt = Date.now();
   } catch (e) {
     console.error(`[heartbeat] 寫入失敗: ${String(e).slice(0, 150)}`);
   }
+}
+
+// kill switch 快取。Redis 讀不到時（例如額度用盡）保留上一次讀到的值，
+// 沒讀過就當作未啟動——見 killSwitch.ts 對這個取捨的說明。
+let lastKsAt = 0;
+let cachedKs: KillSwitchState = { active: false, reason: null, activatedAt: null, readable: false };
+let ksWarnedAt = 0;
+async function pollKillSwitch(redis: Redis): Promise<KillSwitchState> {
+  if (Date.now() - lastKsAt < KILLSWITCH_POLL_MS) return cachedKs;
+  const ks = await getKillSwitchState(redis);
+  lastKsAt = Date.now();
+  if (ks.readable) {
+    cachedKs = ks;
+  } else if (Date.now() - ksWarnedAt > 10 * 60_000) {
+    // 每 10 分鐘吼一次就好，不要每輪洗版蓋掉其他有用的 log。
+    ksWarnedAt = Date.now();
+    console.error(`[killswitch] ⚠ 讀取失敗（Redis 異常）——當作未啟動，持倉監控照常進行。`);
+  }
+  return cachedKs;
 }
 
 async function runCycle(
@@ -580,7 +617,7 @@ async function runCycle(
 ): Promise<void> {
   await writeHeartbeat(redis, userId);
 
-  const ks = await getKillSwitchState(redis);
+  const ks = await pollKillSwitch(redis);
   if (ks.active) {
     console.log(`[${nowStr()}] kill switch 啟動中（${ks.reason ?? '無原因記錄'}）— 跳過整輪`);
     return;

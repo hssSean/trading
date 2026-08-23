@@ -16,13 +16,32 @@ export interface KillSwitchState {
   active: boolean;
   reason: string | null;
   activatedAt: number | null;
+  // 2026-08-23：false = Redis 讀取失敗，上面那些值是安全預設而不是真實狀態。
+  // 呼叫端必須看得出這個差別才能大聲抱怨，而不是安靜地當作「沒啟動」。
+  readable?: boolean;
 }
 
 const INACTIVE: KillSwitchState = { active: false, reason: null, activatedAt: null };
 
+// 2026-08-23 實際踩到：Upstash 免費額度用盡後這裡的裸 redis.get 開始丟例外，
+// 而 live-runner 的 runCycle 在**所有持倉監控之前**呼叫它、且沒有 try/catch，
+// 於是每一輪都在監控開始前就整個中斷。主迴圈接得住例外所以 process 沒死，
+// 只是每 15 秒印一行「這輪整個失敗」，什麼都沒做——移動止損不動、TP1 保本
+// 不觸發、時間止損不觸發、對帳停擺，而且完全沒有人發現。
+//
+// 讀不到時回 active:false（繼續監控）而不是 active:true（停止整輪），理由是
+// 兩種失敗的代價不對稱：kill switch 是罕用的人工緊急開關，暫時失去它的代價，
+// 遠小於失去移動止損與對帳——後者每一輪都在保護既有部位。硬止損掛在交易所
+// 那側不受影響，但利潤保護全靠這支。
+//
+// readable:false 讓呼叫端有機會把這件事吼出來，不要重蹈「靜默失效一整週」。
 export async function getKillSwitchState(redis: Redis): Promise<KillSwitchState> {
-  const raw = await redis.get<KillSwitchState>(KEY);
-  return raw ?? INACTIVE;
+  try {
+    const raw = await redis.get<KillSwitchState>(KEY);
+    return { ...(raw ?? INACTIVE), readable: true };
+  } catch {
+    return { ...INACTIVE, readable: false };
+  }
 }
 
 export async function activateKillSwitch(redis: Redis, reason: string): Promise<void> {
