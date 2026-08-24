@@ -256,3 +256,66 @@ describe('analyzeScoreAttribution — scoreBucketsByStrategy', () => {
     expect(r.scoreBucketsByStrategy.A.reduce((s, b) => s + b.count, 0)).toBe(3);
   });
 });
+
+// ── 2026-08-23 新增：顯著性 ────────────────────────────────────────
+// 這個專案一再踩同一個坑：報一個沒有誤差範圍的平均值，然後把雜訊當成結論。
+// 同一天稍早的選幣圈比較就是實例——差距 +0.130R 看起來像結論，算出標準誤
+// ±0.129R、t=1.00，兩組根本分不出來。這些測試守的是「別再讓雜訊看起來像
+// 訊號」。
+import { spearman } from '../src/lib/scoreAttribution';
+
+describe('spearman', () => {
+  it('完全單調遞增 → rho = 1', () => {
+    const r = spearman([1, 2, 3, 4, 5], [10, 20, 30, 40, 50]);
+    expect(r.rho).toBe(1);
+  });
+
+  it('完全單調遞減 → rho = -1', () => {
+    const r = spearman([1, 2, 3, 4, 5], [50, 40, 30, 20, 10]);
+    expect(r.rho).toBe(-1);
+  });
+
+  // 等級相關對非線性單調關係仍然是 1——這正是選它而非 Pearson 的理由，
+  // 因子分數是離散小整數、R 是厚尾分布。
+  it('非線性但單調 → 仍是 1（Pearson 會低於 1）', () => {
+    const r = spearman([1, 2, 3, 4, 5], [1, 4, 9, 100, 10000]);
+    expect(r.rho).toBe(1);
+  });
+
+  it('x 全部同分（毫無變異）→ rho = 0，不是 NaN', () => {
+    const r = spearman([5, 5, 5, 5, 5], [1, 2, 3, 4, 5]);
+    expect(r.rho).toBe(0);
+    expect(Number.isNaN(r.rho)).toBe(false);
+  });
+
+  it('樣本 < 3 → 回 0，不假裝算得出相關', () => {
+    expect(spearman([1, 2], [3, 4]).rho).toBe(0);
+    expect(spearman([], []).rho).toBe(0);
+  });
+
+  // 平手取平均名次：因子分數「很多筆同分」是常態，用競賽名次會產生偏誤。
+  it('平手值取平均名次', () => {
+    // xs 的中間三筆同分，ys 單調 → 相關應該存在但不到 1
+    const r = spearman([1, 2, 2, 2, 3], [1, 2, 3, 4, 5]);
+    expect(r.rho).toBeGreaterThan(0.7);
+    expect(r.rho).toBeLessThan(1);
+  });
+
+  // 核心防線：隨機無關的資料必須算出接近 0 的 rho 和 |t| < 2，
+  // 否則這支函數本身就會製造假訊號。
+  it('無關資料 → rho ≈ 0 且 |t| < 2', () => {
+    const xs = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4];
+    const ys = [7, 7, 2, 5, 3, 5, 9, 1, 4, 6, 2, 8, 6, 4, 1, 9, 3, 7, 5, 2];
+    const r = spearman(xs, ys);
+    expect(Math.abs(r.rho)).toBeLessThan(0.45);
+    expect(Math.abs(r.t)).toBeLessThan(2.5);
+  });
+
+  it('n 越大、同樣的 rho 越顯著（t 隨 n 增加）', () => {
+    const mk = (n: number) => Array.from({ length: n }, (_, i) => i);
+    const noisy = (n: number) => Array.from({ length: n }, (_, i) => (i % 2 === 0 ? i : i - 3));
+    const small = spearman(mk(10), noisy(10));
+    const big = spearman(mk(60), noisy(60));
+    expect(Math.abs(big.t)).toBeGreaterThan(Math.abs(small.t));
+  });
+});

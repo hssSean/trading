@@ -95,6 +95,12 @@ export interface BucketStat {
   winRate: number; // 0-100
   avgR: number;
   netR: number;
+  // 2026-08-23：avgR 的標準誤。沒有誤差範圍的平均值是這個專案一再踩到的坑
+  // ——103 筆切三桶、每桶約 34 筆，「高桶 +0.3R vs 低桶 -0.1R」看起來很有
+  // 說服力，但單筆 R 的標準差通常 >1R，34 筆的標準誤就有 0.17R 左右，這種
+  // 差距多半是雜訊。同一天稍早的選幣圈比較就是這樣：差距 +0.130R 看起來
+  // 像結論，算出標準誤 ±0.129R、t=1.00，兩組根本分不出來。
+  seR: number;
 }
 
 // 依數值排序切三等分（低/中/高），不用固定分數門檻——五組因子的實際數值
@@ -110,17 +116,81 @@ function bucketize<T>(items: T[], valueOf: (t: T) => number): Array<{ item: T; b
   }));
 }
 
-function summarize(trades: AttributionTrade[]): { count: number; winRate: number; avgR: number; netR: number } {
+function summarize(trades: AttributionTrade[]): { count: number; winRate: number; avgR: number; netR: number; seR: number } {
   const withOutcome = trades.filter(hasOutcome);
   const rs = withOutcome.map(t => calcRMultiple(t)).filter((r): r is number => r !== null);
   const wins = withOutcome.filter(isWin).length;
   const losses = withOutcome.filter(isLoss).length;
   const netR = rs.reduce((s, r) => s + r, 0);
+  const avgR = rs.length > 0 ? netR / rs.length : 0;
+  // 樣本標準差（n-1）→ 平均值的標準誤。n<2 時無從估計，回 0 並由呼叫端
+  // 用 count 判斷可信度——絕不回一個假的小標準誤讓單筆樣本看起來很確定。
+  const sd = rs.length > 1
+    ? Math.sqrt(rs.reduce((s, r) => s + (r - avgR) ** 2, 0) / (rs.length - 1))
+    : 0;
   return {
     count: withOutcome.length,
     winRate: (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0,
-    avgR: rs.length > 0 ? parseFloat((netR / rs.length).toFixed(2)) : 0,
+    avgR: parseFloat(avgR.toFixed(2)),
     netR: parseFloat(netR.toFixed(2)),
+    seR: rs.length > 1 ? parseFloat((sd / Math.sqrt(rs.length)).toFixed(3)) : 0,
+  };
+}
+
+// ── 因子與結果的等級相關（Spearman）─────────────────────────────
+//
+// 2026-08-23：切三桶會丟掉資訊，而且三個桶之間的比較很難一眼判斷顯著性。
+// 每組因子直接算一個「分數排名 vs R 排名」的相關係數，就有一個跨組可比的
+// 單一數字：≈0 代表這組完全沒有鑑別力。
+//
+// 用 Spearman（等級相關）而不是 Pearson：因子分數是離散且有上限的小整數
+// （每組上限 10-15），R 則是厚尾分布（偶爾 +3R、常常 -1R）。Pearson 會被
+// 少數幾筆極端 R 主導，等級相關對這兩種特性都穩健得多。
+export interface FactorCorrelation {
+  group: FactorGroup;
+  rho: number;   // -1 ~ 1，≈0 = 沒有預測力
+  n: number;
+  t: number;     // |t| >= 2 才算勉強分得出來
+}
+
+function rank(values: number[]): number[] {
+  // 平手取平均名次（standard competition ranking 會讓大量平手值產生偏誤，
+  // 而因子分數正是「很多筆同分」的典型情況）。
+  const idx = values.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+  const out = new Array<number>(values.length);
+  let i = 0;
+  while (i < idx.length) {
+    let j = i;
+    while (j + 1 < idx.length && idx[j + 1].v === idx[i].v) j++;
+    const avgRank = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) out[idx[k].i] = avgRank;
+    i = j + 1;
+  }
+  return out;
+}
+
+export function spearman(xs: number[], ys: number[]): { rho: number; n: number; t: number } {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 3) return { rho: 0, n, t: 0 };
+  const rx = rank(xs.slice(0, n));
+  const ry = rank(ys.slice(0, n));
+  const mx = rx.reduce((s, v) => s + v, 0) / n;
+  const my = ry.reduce((s, v) => s + v, 0) / n;
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    num += (rx[i] - mx) * (ry[i] - my);
+    dx  += (rx[i] - mx) ** 2;
+    dy  += (ry[i] - my) ** 2;
+  }
+  // 全部同分時分母為 0——那代表這個因子在這批樣本裡毫無變異，
+  // 相關性未定義，回 0（＝沒有鑑別力）而不是 NaN。
+  const denom = Math.sqrt(dx * dy);
+  const rho = denom > 0 ? num / denom : 0;
+  const t = Math.abs(rho) < 1 ? rho * Math.sqrt((n - 2) / (1 - rho * rho)) : 0;
+  return {
+    rho: parseFloat(rho.toFixed(3)),
+    n,
+    t: parseFloat(t.toFixed(2)),
   };
 }
 
@@ -181,6 +251,10 @@ export interface AttributionResult {
   // 'unknown'，不猜測、不當成 'A'——上一次用 `?? 'A'` 猜測正是 8/6 那次
   // 分析出包的根因，這裡不重蹈覆轍。
   scoreBucketsByStrategy: Record<string, BucketStat[]>;
+  // 2026-08-23：每組因子跟 R 的等級相關。切三桶回答「高低桶有沒有差」，
+  // 這個回答「這組到底有沒有單調的預測力」，而且五組之間可以直接比大小。
+  // rho≈0 且 |t|<2 = 這組是裝飾品，該考慮拿掉或重做，而不是微調權重。
+  factorCorrelations: FactorCorrelation[];
   sampleSize: { total: number; withBreakdown: number };
 }
 
@@ -241,8 +315,19 @@ export function analyzeScoreAttribution(trades: AttributionTrade[]): Attribution
     if (buckets.length > 0) scoreBucketsByStrategy[key] = buckets;
   }
 
+  // 只用「真的開過倉且算得出 R」的樣本——CANCELLED 沒有結果可以相關。
+  const withR = withBreakdown
+    .filter(hasOutcome)
+    .map(t => ({ t, r: calcRMultiple(t) }))
+    .filter((x): x is { t: AttributionTrade; r: number } => x.r !== null);
+  const factorCorrelations: FactorCorrelation[] = FACTOR_GROUPS.map(group => ({
+    group,
+    ...spearman(withR.map(x => x.t.scoreBreakdown![group]), withR.map(x => x.r)),
+  }));
+
   return {
     byFactorBucket,
+    factorCorrelations,
     factorGroupByDirection,
     extensionAtrBuckets,
     tagStats,

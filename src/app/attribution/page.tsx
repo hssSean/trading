@@ -13,6 +13,16 @@ interface BucketStat {
   winRate: number;
   avgR: number;
   netR: number;
+  // avgR 的標準誤。舊資料（這個欄位加上去之前的快取回應）沒有，所以可選；
+  // 缺值時 factorVerdict 會退回「分不出來」而不是假裝算得出顯著性。
+  seR?: number;
+}
+
+interface FactorCorrelation {
+  group: string;
+  rho: number;
+  n: number;
+  t: number;
 }
 
 interface FactorGroupDirectionAvg {
@@ -32,6 +42,7 @@ interface AttributionResponse {
   ok: boolean;
   reason?: string;
   byFactorBucket?: Record<string, BucketStat[]>;
+  factorCorrelations?: FactorCorrelation[];
   factorGroupByDirection?: FactorGroupDirectionAvg[];
   extensionAtrBuckets?: BucketStat[];
   tagStats?: Record<string, TagStat>;
@@ -74,15 +85,53 @@ const TAG_LABEL: Record<string, string> = {
   reversal_candle: '錘子/流星線',
 };
 
-// 高桶表現沒有比低桶好（甚至更差）= 這組因子在虛高，不是真正的品質訊號。
-function factorVerdict(buckets: BucketStat[]): { text: string; color: string } | null {
+// 2026-08-23 重寫。原本的判語只比較 `high.avgR < low.avgR`，沒有任何顯著性
+// 檢定就直接印出「這組是有效訊號」或「這組權重虛高」。每桶約 34 筆、單筆 R
+// 標準差 >1R，兩桶差距的標準誤大概 0.25R——這種樣本下純靠平均值大小下判語，
+// 等於擲硬幣然後把結果印成結論，而且資料每多幾筆就可能翻面。
+//
+// 這正是這個專案一再踩的坑（同一天稍早：選幣圈比較差距 +0.130R 看起來像
+// 結論，標準誤 ±0.129R、t=1.00，兩組根本分不出來）。而這個畫面正是要用來
+// 決定「哪一組該砍」的地方，判錯的代價是砍掉有用的因子或留著沒用的。
+//
+// 現在需要兩個獨立證據同時成立才給方向性判語：
+//   ① 高低桶差距 > 2 倍合併標準誤
+//   ② 該組因子與 R 的等級相關 |t| >= 2
+// 只有一個成立就是「訊號微弱」，兩個都不成立就誠實說「分不出來」。
+// 預期多數組在目前樣本下都會落在「分不出來」——那是正確答案，不是缺陷。
+function factorVerdict(
+  buckets: BucketStat[],
+  corr?: { rho: number; t: number; n: number },
+): { text: string; color: string } | null {
   if (buckets.length < 3) return null;
   const [low, , high] = buckets;
   if (low.count === 0 || high.count === 0) return null;
-  if (high.avgR < low.avgR) {
-    return { text: '高分反而較差 — 這組權重可能虛高', color: '#F6465D' };
+
+  const diff = high.avgR - low.avgR;
+  // 合併標準誤。任一桶算不出標準誤（n<2）時退回無限大，讓判定必然落到
+  // 「分不出來」——不確定的時候不要給方向性結論。
+  const lowSe = low.seR ?? 0;
+  const highSe = high.seR ?? 0;
+  const se = (lowSe > 0 && highSe > 0)
+    ? Math.sqrt(lowSe ** 2 + highSe ** 2)
+    : Infinity;
+  const bucketSignificant = Math.abs(diff) > 2 * se;
+  const corrSignificant = !!corr && Math.abs(corr.t) >= 2;
+
+  const detail = se === Infinity
+    ? `高低桶差 ${diff >= 0 ? '+' : ''}${diff.toFixed(2)}R`
+    : `高低桶差 ${diff >= 0 ? '+' : ''}${diff.toFixed(2)}R ±${se.toFixed(2)}`
+      + (corr ? `　rho=${corr.rho} t=${corr.t}` : '');
+
+  if (bucketSignificant && corrSignificant) {
+    return diff > 0
+      ? { text: `高分確實較好 — 這組是有效訊號（${detail}）`, color: '#0ECB81' }
+      : { text: `高分反而較差 — 這組權重虛高，該砍或重做（${detail}）`, color: '#F6465D' };
   }
-  return { text: '高分確實較好 — 這組是有效訊號', color: '#0ECB81' };
+  if (bucketSignificant || corrSignificant) {
+    return { text: `訊號微弱，只有一項證據成立 — 再等資料（${detail}）`, color: '#C99A2E' };
+  }
+  return { text: `分不出來 — 差距在雜訊範圍內，不可據此調權重（${detail}）`, color: '#5A7A8A' };
 }
 
 export default function AttributionPage() {
@@ -186,7 +235,8 @@ export default function AttributionPage() {
               </p>
               <div className="space-y-2">
                 {Object.entries(data.byFactorBucket ?? {}).map(([group, buckets]) => {
-                  const verdict = factorVerdict(buckets);
+                  const corr = data.factorCorrelations?.find(c => c.group === group);
+                  const verdict = factorVerdict(buckets, corr);
                   return (
                     <div key={group} className="bg-[#0D0D16] border border-[#1B222B] rounded-xl p-3">
                       <div className="flex items-center justify-between mb-1.5">
