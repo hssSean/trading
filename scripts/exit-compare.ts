@@ -35,6 +35,7 @@ import { adx } from '../src/analysis/indicators';
 import { fetchHistorical } from './backtest';
 import { simulateExit, pairedCompare, type ExitPolicyConfig, type ExitBar } from '../src/lib/exitPolicy';
 import axios from 'axios';
+import { pathToFileURL } from 'node:url';
 
 const MONTHS = Math.max(1, parseInt(process.argv[2] ?? '3', 10));
 const NSYM = Math.max(1, parseInt(process.argv[3] ?? '10', 10));
@@ -50,10 +51,10 @@ const SLIP = 0.0003;
 const ENTRY_COOLDOWN_BARS = 24;
 // 每筆訊號往後看的最大根數。要夠長才不會讓「讓贏家跑久一點」的政策被
 // 資料長度截斷（那會系統性低估它們）。
-const FORWARD_BARS = 200;
+export const FORWARD_BARS = 200;
 // 掛單等待成交的窗口。route.ts 的 WAITING_EXPIRY_HOURS = 8（1h K 線 → 8 根），
 // 超過就取消——這是三分之二訊號從未成交的來源。
-const WAIT_BARS = 8;
+export const WAIT_BARS = 8;
 
 // ── 線上實際參數（照抄，不是重新設計）──────────────────────────
 //   TP1_PARTIAL_FRACTION = 0.5          monitorMath.ts
@@ -61,7 +62,7 @@ const WAIT_BARS = 8;
 //   移動止損 = markPrice ∓ 2 × ATR(1h)   orderLifecycle.ts calcTrailingStopTarget
 //   盤整停滯 = 滿 8 根且進度在 ±0.3R      engine/timeStop.ts
 //   到期平倉 = 24h（1h K 線 → 24 根）     route.ts INTRADAY_CLOSE_HOURS
-const BASELINE: ExitPolicyConfig = {
+export const BASELINE: ExitPolicyConfig = {
   name: '現況（線上）', tp1Fraction: 0.5, breakevenAtR: 0.5, trailAtrMult: 2,
   stallBars: 8, stallBandR: 0.3, maxBars: 24,
 };
@@ -81,7 +82,7 @@ const POLICIES: ExitPolicyConfig[] = [
 ];
 
 // ── 工具 ────────────────────────────────────────────────────────
-function rollingAtr(candles: Candle[], period = 14): number[] {
+export function rollingAtr(candles: Candle[], period = 14): number[] {
   const tr: number[] = [];
   for (let i = 0; i < candles.length; i++) {
     const c = candles[i];
@@ -98,7 +99,7 @@ function rollingAtr(candles: Candle[], period = 14): number[] {
   return out;
 }
 
-function derive4h(c: Candle[]): Candle[] {
+export function derive4h(c: Candle[]): Candle[] {
   const out: Candle[] = [];
   const rem = c.length % 4;
   for (let i = rem === 0 ? 0 : rem; i + 3 < c.length; i += 4) {
@@ -112,7 +113,7 @@ function derive4h(c: Candle[]): Candle[] {
   return out;
 }
 
-function regimeAt(c: Candle[], i: number): 'trending' | 'ranging' | 'transitional' {
+export function regimeAt(c: Candle[], i: number): 'trending' | 'ranging' | 'transitional' {
   const s = Math.max(0, i - WINDOW_4H + 1);
   const { adx: a } = adx(derive4h(c.slice(s, i + 1)), 14);
   if (isNaN(a)) return 'ranging';
@@ -121,9 +122,9 @@ function regimeAt(c: Candle[], i: number): 'trending' | 'ranging' | 'transitiona
   return 'transitional';
 }
 
-interface Entry { symbol: string; sig: TradingSignal; idx: number }
+export interface Entry { symbol: string; sig: TradingSignal; idx: number }
 
-function collectEntries(symbol: string, candles: Candle[]): Entry[] {
+export function collectEntries(symbol: string, candles: Candle[]): Entry[] {
   const out: Entry[] = [];
   let lastEntryIdx = -Infinity;
   for (let i = WARMUP; i < candles.length - 1; i++) {
@@ -143,7 +144,7 @@ function collectEntries(symbol: string, candles: Candle[]): Entry[] {
   return out;
 }
 
-async function topSymbols(n: number): Promise<string[]> {
+export async function topSymbols(n: number): Promise<string[]> {
   const base = 'https://fapi.binance.com/fapi/v1';
   const [info, tick] = await Promise.all([
     axios.get(`${base}/exchangeInfo`).then(r => r.data),
@@ -256,4 +257,11 @@ async function main(): Promise<void> {
   console.log('─'.repeat(70));
 }
 
-main().catch(e => { console.error('exit-compare error:', e); process.exit(1); });
+// 只有直接執行才跑 main——entry-compare.ts 要 import 上面的共用工具，
+// 複製一份出去遲早會跟這裡分岔，而兩支腳本如果用不同的進場產生邏輯，
+// 比較結果就沒有意義了。
+const invokedDirectly =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  main().catch(e => { console.error('exit-compare error:', e); process.exit(1); });
+}
