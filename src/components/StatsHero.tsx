@@ -9,6 +9,17 @@ interface Props {
   equity: number[];             // cumulative equity curve for the sparkline
   closedCount: number;
   pendingCount: number;
+  // 2026-08-25：只算乾淨期（8/18 之後平倉）的 R。
+  //
+  // 上面的 totalR 涵蓋全部歷史，而歷史裡絕大部分是已知不可信的資料——實測
+  // 103 筆已成交共 +16.82R，其中 27 筆 8/4 前的舊單就佔了 +16.14R，8/18
+  // 之後的 21 筆是 −2.64R。使用者說「感覺只有大漲那天有營利」時畫面顯示
+  // +25.8R：**體感是對的，畫面是錯的**，而那個數字每天在影響他的判斷。
+  //
+  // 不藏舊資料（那是另一種不誠實），而是把兩個期間並列、標清楚哪個能拿來
+  // 判斷策略。分界依據見 src/lib/cleanPeriod.ts。
+  cleanR: number | null;
+  cleanCount: number;
 }
 
 const col  = (v: number | null) => (v == null ? '#E8ECF1' : v >= 0 ? '#0ECB81' : '#F6465D');
@@ -44,8 +55,15 @@ function Cell({ label, value, color, border }: { label: string; value: string; c
   );
 }
 
-export function StatsHero({ totalR, avgR, weekR, winRate, expectedValue, equity, closedCount, pendingCount }: Props) {
+export function StatsHero({
+  totalR, avgR, weekR, winRate, expectedValue, equity, closedCount, pendingCount,
+  cleanR, cleanCount,
+}: Props) {
   const ev = expectedValue == null ? null : parseFloat(expectedValue);
+  // 兩個期間差很多時才需要特別點出來。差不多的話多一行只是雜訊。
+  const worthSplitting = cleanR != null && totalR != null
+    && cleanCount > 0 && cleanCount < closedCount
+    && Math.abs(totalR - cleanR) >= 1;
   return (
     <div className="bg-card-2 border border-white/[0.06] rounded-xl px-3.5 py-3 mb-2.5">
       <div className="flex items-center">
@@ -69,6 +87,17 @@ export function StatsHero({ totalR, avgR, weekR, winRate, expectedValue, equity,
         <span className="flex-1" />
         <Spark data={equity} />
       </div>
+
+      {worthSplitting && (
+        <div className="flex items-baseline gap-1.5 mt-1.5">
+          <span className="text-[11px] num font-medium" style={{ color: col(cleanR) }}>
+            {sign(cleanR!)}{cleanR!.toFixed(1)}R
+          </span>
+          <span className="text-text-s text-[10px]">
+            自 8/18 起（{cleanCount} 筆）— 這段才能拿來判斷策略
+          </span>
+        </div>
+      )}
 
       <div className="flex mt-3 pt-3 border-t border-white/[0.06] -mx-3.5">
         <Cell label="近 7 日" value={weekR == null ? '—' : `${sign(weekR)}${weekR.toFixed(1)}R`} color={col(weekR)} />

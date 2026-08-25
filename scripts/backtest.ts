@@ -29,8 +29,18 @@ const SLIP        = 0.0003;  // 0.03% adverse slippage on entry
 const WARMUP      = 250;     // candles consumed as indicator warmup (not traded)
 const WINDOW_1H   = 200;     // rolling 1H candle window passed to signal generators
 const WINDOW_4H   = 540;     // rolling 4H candle count for ADX regime (90 days)
-const MIN_SCORE_A = 70;      // Strategy A: 0-100 scale (matches STRONG_THRESHOLD in route.ts)
-const MIN_SCORE_B = 15;      // Strategy B: 0-19 scale  (matches STRONG_THRESHOLD_B)
+// 2026-08-26：這兩個值原本是 70 / 15，而註解寫著「matches route.ts」——**是錯的**。
+// route.ts 實際是 STRONG_THRESHOLD = 65、STRONG_THRESHOLD_B = 13。
+//
+// 影響不是小數點：真實資料顯示 65-70 那一格是所有分數區間裡**最賠的**
+// （n=21，每筆 -0.351R），而那整段被回測排除掉了。也就是回測與所有依賴它的
+// 模擬（exit-compare / entry-compare）都跑在比線上更嚴格、更好看的子集上，
+// 基準線會系統性偏樂觀。
+//
+// 改動門檻會改變回測產生的訊號集合，所以這個 commit 之前跑出來的模擬數字
+// 不能跟之後的直接比較——要比就整批重跑。
+const MIN_SCORE_A = 65;      // Strategy A: 0-100 scale — route.ts STRONG_THRESHOLD
+const MIN_SCORE_B = 13;      // Strategy B: 0-19 scale  — route.ts STRONG_THRESHOLD_B
 
 const client = axios.create({
   baseURL: 'https://fapi.binance.com/fapi/v1',

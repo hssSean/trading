@@ -5,6 +5,7 @@ import { usePriceStore } from '@/store/usePriceStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
 import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
+import { isCleanPeriod } from '@/lib/cleanPeriod';
 import { TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
 import { StatsHero } from '@/components/StatsHero';
 import { TradeResult, TradeRecord } from '@/types';
@@ -751,6 +752,28 @@ export default function TradesPage() {
     };
   }, [closedResults]);
 
+  // 2026-08-25：只算乾淨期（8/18 之後平倉）的 R。
+  //
+  // 上面那個 totalR 涵蓋所有歷史，而歷史裡絕大部分是已知不可信的資料——
+  // 實測 103 筆已成交共 +16.82R，其中 27 筆 8/4 前的舊單就佔了 +16.14R，
+  // 8/18 之後的 21 筆是 −2.64R。使用者說「感覺只有大漲那天有營利」時，
+  // 畫面顯示 +25.8R：**體感是對的，畫面是錯的**，而那個數字每天都在影響
+  // 他對策略的判斷。
+  //
+  // 不把舊資料藏起來（那是另一種不誠實），而是把兩個期間並列、標清楚。
+  // 分界線的依據見 src/lib/cleanPeriod.ts。
+  const cleanStats = useMemo(() => {
+    let rSum = 0, n = 0;
+    closedResults.forEach(t => {
+      if (!isCleanPeriod(t)) return;
+      const r = calcRMultiple(t);
+      if (r === null) return;
+      rSum += r;
+      n++;
+    });
+    return { cleanR: n > 0 ? rSum : null, cleanCount: n };
+  }, [closedResults]);
+
   // ── Extended stats ───────────────────────────────────────────
   const avgWin  = wins.length   > 0 ? (wins.reduce((a, t)   => a + (t.pnlPercent ?? 0), 0) / wins.length).toFixed(2)   : null;
   const avgLoss = losses.length > 0 ? (losses.reduce((a, t) => a + (t.pnlPercent ?? 0), 0) / losses.length).toFixed(2) : null;
@@ -1271,6 +1294,8 @@ export default function TradesPage() {
           equity={equityR}
           closedCount={closedResults.length}
           pendingCount={pending.length}
+          cleanR={cleanStats.cleanR}
+          cleanCount={cleanStats.cleanCount}
         />
 
         {/* Expandable detail stats */}

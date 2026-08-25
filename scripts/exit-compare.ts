@@ -43,8 +43,11 @@ const NSYM = Math.max(1, parseInt(process.argv[3] ?? '10', 10));
 const WARMUP = 250;
 const WINDOW_1H = 200;
 const WINDOW_4H = 540;
-const MIN_SCORE_A = 70;
-const MIN_SCORE_B = 10;
+// 2026-08-26：對齊 route.ts 的 STRONG_THRESHOLD(65) / STRONG_THRESHOLD_B(13)。
+// 原本是 70/10，跟線上不符——65-70 那一格在真實資料裡是最賠的區間，
+// 用 70 等於把最差的一段排除掉，基準線會偏樂觀。見 backtest.ts 同名常數說明。
+const MIN_SCORE_A = 65;
+const MIN_SCORE_B = 13;
 const SLIP = 0.0003;
 // 進場冷卻：同一檔幣在這麼多根之內不重複進場。用來近似線上的 symbol 鎖，
 // 但**不依賴出場時間**——依賴的話成對比較就破功了（見檔頭說明 1）。
