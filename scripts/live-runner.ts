@@ -888,6 +888,18 @@ async function runCycle(
           // 對目前無法下單」，但幣種監控清單還是跳過持倉中）。
           // exchange_entry_order_id === null 保證沒下過任何單，不用撤條件單
           // （跟 entry_never_filled 同一個理由），也不是 LOSS，不用設冷卻。
+          //
+          // 2026-08-26 更正上面這句：「不是 LOSS 所以不用冷卻」在「冷卻＝避免
+          // 追虧損單」的框架下沒錯，但漏掉了另一個用途——**阻止訊號產生器對
+          // 一個根本下不了單的幣重複發訊號**。少了那層記憶，route.ts 每輪都會
+          // 重新發同一個幣：發單 → -4141 → 取消 → 再發，每 5 分鐘燒一次完整
+          // 指標計算加一則推播。使用者實測撞到，而且正是 Vercel CPU 額度爆掉
+          // （4h5m/4h）的原因之一。
+          //
+          // 修在 route.ts：掃描前查 close_reason='symbol_unavailable' 的近期
+          // 紀錄，把那些 symbol 整個剔除（見 src/lib/symbolAvailability.ts）。
+          // 沒有在這裡補 Redis 冷卻是刻意的——Supabase 那條在 Redis 死活兩種
+          // 狀態下都能運作，多一套平行機制只會多一個要維護、要對齊的東西。
           await cleanupAfterTradeClosed(binance, redis, row, false, false);
           // 2026-08-13：這條路徑同樣沒有推播——推薦單就這樣無聲消失，使用者
           // 只會在 App 裡看到卡片變成「交易對目前無法下單」。跟其他「推薦單

@@ -14,6 +14,7 @@ import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshen
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib/cancelShadow';
 import { shadowChanged, snapshot } from '@/lib/shadowWrite';
+import { unavailableSymbols, SYMBOL_UNAVAILABLE_REASON, SYMBOL_UNAVAILABLE_COOLDOWN_MS } from '@/lib/symbolAvailability';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -1886,6 +1887,11 @@ const SHADOW_GATES = new Set([
 ]);
 const SHADOW_MAX = 300; // hash size guard
 
+// 悲觀軌跡（同根 K 線同時觸及 TP/SL 時判賠）預設關閉——它讓每筆影子單多跑
+// 一次 walkTpSl，而 Vercel CPU 是目前唯一超標的額度。見 simulateShadow 內的
+// 說明。要打開就設 SHADOW_PESSIMISTIC=1。
+const PESSIMISTIC_SHADOW = process.env.SHADOW_PESSIMISTIC === '1';
+
 function simulateShadow(st: ShadowTrade, candles: Candle[], now: number): void {
   const isLong = st.direction === 'LONG';
   const waitMs   = WAITING_EXPIRY_HOURS * 3600 * 1000;
@@ -1915,7 +1921,15 @@ function simulateShadow(st: ShadowTrade, candles: Candle[], now: number): void {
   // 主軌跡仍用 optimistic：既有 shadow_trades 都是那個假設累積的，換掉會讓
   // 新舊資料混在同一個統計裡而看不出來。悲觀軌跡另存欄位、可選，舊資料
   // 沒有這些欄位時漏斗端會標示「樣本不足」而不是拿 0 當數字。
-  if (!st.pessDone) {
+  // 2026-08-26：改成預設關閉的開關。這條軌跡等於每筆影子單多跑一次
+  // walkTpSl（96-168 根 K 線），而 Vercel 的 Fluid Active CPU 額度剛好爆掉
+  // （4h5m/4h，每輪掃描的預算只有約 1.7 CPU 秒）。加它的時候只考慮了正確性，
+  // 沒算 CPU——CLAUDE.md 明寫「CPU 要省」，這是我漏掉的。
+  //
+  // 不刪除是因為它修的偏誤是真的（見上面說明），只是現在付不起：Upstash
+  // 額度也用盡了，影子資料這一週根本沒在累積，開著一點價值都沒有。
+  // 等 CPU 有餘裕（例如 cron 拉長之後）再設 SHADOW_PESSIMISTIC=1 打開。
+  if (PESSIMISTIC_SHADOW && !st.pessDone) {
     const pess = walkTpSl(candles, st.filledAt, levels, !!st.pessTp1Hit, 'pessimistic');
     st.pessTp1Hit = pess.tp1Hit;
     if (pess.done) {
@@ -2169,9 +2183,53 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const coins: string[] = coinsParam
+  const allCoins: string[] = coinsParam
     ? coinsParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
     : await getDefaultCoins();
+
+  // 2026-08-26：把「幣安端下不了單」的交易對從這一輪整個剔除。
+  //
+  // 實測：使用者一直收到同一個幣的推薦單，下單被幣安回 -4141（Symbol is
+  // closed）取消，下一輪再發，無限循環——每 5 分鐘燒一次完整指標計算加一則
+  // 推播，而 Vercel 的 Fluid Active CPU 額度就是這樣爆的（4h5m/4h）。
+  //
+  // 根因有兩層：
+  // ① 掃描幣種來自 fapi.binance.com（正式站）的 status==='TRADING'，但下單
+  //    打的是 demo-fapi（測試網）——兩邊的可交易清單不一樣。
+  // ② live-runner 撞到 -4141 時標記 CANCELLED 是對的，但呼叫
+  //    cleanupAfterTradeClosed(..., false, false) 刻意不設冷卻，理由是
+  //    「不是 LOSS，不用設冷卻」。那個推論在「冷卻＝避免追虧損單」的框架下
+  //    沒錯，但這裡冷卻的用途是**阻止對下不了單的幣重複發訊號**，少了它
+  //    訊號產生器對這件事完全沒有記憶。
+  //
+  // 記在 Supabase 而不是 Redis：Redis 是這種短期狀態的自然歸屬，但 8/23
+  // Upstash 額度用盡後所有 Redis 呼叫都在丟例外，正是這個迴圈失控的期間。
+  // close_reason='symbol_unavailable' 本來就已經寫進 trades 表，不用新表。
+  //
+  // 放在計算之前而不是發訊號之前：被擋的幣連 K 線都不用抓、指標都不用算，
+  // 順便省 CPU——而 CPU 正是爆掉的那個額度。
+  let coins = allCoins;
+  try {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    if (url && key) {
+      const { createClient } = await import('@supabase/supabase-js');
+      const { data } = await createClient(url, key)
+        .from('trades')
+        .select('symbol, close_reason, closed_at')
+        .eq('close_reason', SYMBOL_UNAVAILABLE_REASON)
+        .gte('closed_at', Date.now() - SYMBOL_UNAVAILABLE_COOLDOWN_MS);
+      const blocked = unavailableSymbols(data ?? [], Date.now());
+      if (blocked.size > 0) {
+        coins = allCoins.filter(c => !blocked.has(c));
+        console.log(`[analyze] 跳過幣安端不可交易的 symbol（${blocked.size} 個）: ${Array.from(blocked).join(', ')}`);
+      }
+    }
+  } catch (e) {
+    // 查不到就照原本的清單掃——這道是省錢/省吵的優化，不是風控，
+    // 絕不因為它失敗就讓整輪掃描停掉。
+    console.error(`[analyze] 查不可交易 symbol 失敗，照完整清單掃: ${String(e).slice(0, 150)}`);
+  }
 
   const timeframes = tfParam.split(',').map(s => s.trim()) as Timeframe[];
   // Entry timeframe: multi-TF analysis confirms direction; only this TF produces the entry/TP/SL.
