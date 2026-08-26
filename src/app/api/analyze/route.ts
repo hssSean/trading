@@ -15,6 +15,7 @@ import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type T
 import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib/cancelShadow';
 import { shadowChanged, snapshot } from '@/lib/shadowWrite';
 import { unavailableSymbols, SYMBOL_UNAVAILABLE_REASON, SYMBOL_UNAVAILABLE_COOLDOWN_MS } from '@/lib/symbolAvailability';
+import { decideLiveRunnerHandoff } from '@/lib/liveRunnerHandoff';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -342,32 +343,72 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   }
   const liveTradingUserIds = (liveUsers ?? []).map((p: { id: string }) => p.id);
 
+  // 2026-08-26：交接判斷改成 Redis + Supabase 雙來源。
+  //
+  // 原本只看 Redis，而且查詢失敗時保守假設「live-runner 還活著」不接手。
+  // 那個判斷單獨看是對的（避免兩邊搶著操作同一批 trades），但 8/23 Upstash
+  // 額度用盡時，live-runner 也同樣因為 Redis 掛掉而每輪中斷——兩個各自合理
+  // 的保守設計疊起來就是**沒有任何東西在監控持倉，而且完全無聲**。使用者
+  // 的 TP1 條件單從沒掛上，價格穿過 TP1 什麼都沒發生，好幾天沒人發現。
+  //
+  // 判斷邏輯抽成 decideLiveRunnerHandoff（純函數 + 9 個測試）：只有在**所有
+  // 拿得到的來源都說死掉**時才接手，因為兩種誤判的代價不對稱——誤判成死掉
+  // 會讓兩邊同時動同一批真實部位，誤判成活著只是這輪沒監控、下輪還能修正。
   const heartbeatRedis = getRedis();
   const liveUserIds: string[] = [];
   if (liveTradingUserIds.length > 0) {
+    let redisBeats: (number | null)[] | undefined;
     if (heartbeatRedis) {
       try {
-        const heartbeats = await Promise.all(
-          liveTradingUserIds.map((id: string) => heartbeatRedis.get(`live-runner:heartbeat:${id}`)),
+        redisBeats = await Promise.all(
+          liveTradingUserIds.map((id: string) => heartbeatRedis.get<number>(`live-runner:heartbeat:${id}`)),
         );
-        liveTradingUserIds.forEach((id: string, i: number) => {
-          if (heartbeats[i] !== null) {
-            liveUserIds.push(id);
-          } else {
-            console.log(`[monitor] userId=${id.slice(0, 8)} live_trading_enabled=true 但心跳已過期，這支重新接手監控`);
-          }
-        });
       } catch (e) {
-        // Redis 查詢失敗：保守起見當作全部「還活著」（維持排除），不要因為
-        // Redis 暫時連不上就讓兩邊搶著處理同一批 trades——那樣的風險比
-        // 「這一輪繼續信任 live-runner 還在跑」更高。
-        console.error(`[monitor] 查心跳失敗，這輪維持排除已知的 live_trading_enabled 使用者: ${String(e).slice(0, 150)}`);
-        liveUserIds.push(...liveTradingUserIds);
+        console.error(`[monitor] Redis 查心跳失敗，改看 Supabase 心跳: ${String(e).slice(0, 150)}`);
       }
-    } else {
-      // Redis 沒設定，沒辦法判斷心跳，同上邏輯：保守維持排除。
-      liveUserIds.push(...liveTradingUserIds);
     }
+
+    // Supabase 心跳。欄位可能還沒 ALTER TABLE——查詢失敗時留 undefined
+    // （＝這個來源不可用），不要當成 null（＝確定沒心跳）。
+    let dbBeats: Map<string, number | null> | undefined;
+    try {
+      const { data, error } = await admin
+        .from('profiles').select('id, live_runner_heartbeat_at').in('id', liveTradingUserIds);
+      if (error) {
+        if (error.code === '42703' || error.code === 'PGRST204') {
+          console.error('[monitor] profiles.live_runner_heartbeat_at 不存在——Redis 掛掉時無法判斷 live-runner 死活。'
+            + ' 請執行：ALTER TABLE profiles ADD COLUMN IF NOT EXISTS live_runner_heartbeat_at BIGINT;');
+        } else {
+          console.error(`[monitor] 查 Supabase 心跳失敗: [${error.code}] ${error.message}`);
+        }
+      } else {
+        dbBeats = new Map((data ?? []).map((p: { id: string; live_runner_heartbeat_at: number | null }) =>
+          [p.id, p.live_runner_heartbeat_at ?? null]));
+      }
+    } catch (e) {
+      console.error(`[monitor] 查 Supabase 心跳例外: ${String(e).slice(0, 150)}`);
+    }
+
+    const now = Date.now();
+    liveTradingUserIds.forEach((id: string, i: number) => {
+      const decision = decideLiveRunnerHandoff({
+        redisHeartbeat: redisBeats ? redisBeats[i] : undefined,
+        dbHeartbeatAt: dbBeats ? (dbBeats.get(id) ?? null) : undefined,
+        now,
+        staleMs: LIVE_RUNNER_STALE_MS,
+      });
+      if (decision.takeOver) {
+        console.log(`[monitor] userId=${id.slice(0, 8)} 兩個心跳來源都判定 live-runner 已停止，這支重新接手監控`);
+        return;
+      }
+      liveUserIds.push(id);
+      if (decision.reason === 'no-signal') {
+        // 這是最危險的狀態：兩個來源都查不到，等於「不知道有沒有人在管」。
+        // 維持保守不接手，但要大聲講——8/23 那次就是這個狀態安靜了好幾天。
+        console.error(`[monitor] ⚠ userId=${id.slice(0, 8)} 兩個心跳來源都查不到，無法判斷 live-runner 死活；`
+          + ' 維持不接手（避免兩邊搶著操作），但持倉可能完全沒人監控——請檢查 live-runner 與 Redis。');
+      }
+    });
   }
 
   // ── Fetch waiting and active trades separately ────────────────
@@ -1885,6 +1926,10 @@ const SHADOW_GATES = new Set([
   'same_dir_cap', 'total_risk_cap', 'circuit_breaker', 'event_filter', 'insert_failed',
   'score_gate',
 ]);
+// live-runner 心跳超過這麼久沒更新就視為停止。它每 60 秒寫一次（Redis TTL
+// 240 秒），這裡取同一個數字——4 倍寫入間隔的緩衝，單輪延遲不會被誤判。
+const LIVE_RUNNER_STALE_MS = 240_000;
+
 const SHADOW_MAX = 300; // hash size guard
 
 // 悲觀軌跡（同根 K 線同時觸及 TP/SL 時判賠）預設關閉——它讓每筆影子單多跑

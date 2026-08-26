@@ -578,16 +578,52 @@ async function cleanupAfterTradeClosed(
 // 事不能混在一起判斷，不然 route.ts 會在 kill switch 啟動期間誤判成
 // live-runner 已經停止、搶著接手，兩邊同時碰同一批 trades。
 let lastHeartbeatAt = 0;
-async function writeHeartbeat(redis: Redis, userId: string): Promise<void> {
+let dbHeartbeatColumnMissing = false;
+
+// 2026-08-26：心跳雙寫 Redis + Supabase。
+//
+// 8/23-8/26 的無聲空窗就是因為交接判斷只有 Redis 一個來源：Upstash 額度用盡
+// → route.ts 查不到心跳 → 保守假設 live-runner 還活著、整批排除不接手；
+// 而 live-runner 同時也因為 Redis 掛掉每輪中斷 → **沒有任何東西在監控持倉**，
+// TP1 條件單從沒掛上，完全沒有錯誤訊息。
+//
+// Redis 仍然是主要來源（有 TTL、自動過期、便宜）；Supabase 是它掛掉時的
+// 第二意見。兩個來源獨立失敗才會回到「無法判斷」。
+async function writeHeartbeat(redis: Redis, supabase: SupabaseClient, userId: string): Promise<void> {
   if (Date.now() - lastHeartbeatAt < HEARTBEAT_WRITE_MS) return;
+  const at = Date.now();
+  let redisOk = false;
+
   try {
-    await redis.set(`${HEARTBEAT_KEY_PREFIX}${userId}`, Date.now(), { ex: HEARTBEAT_TTL_SEC });
-    // 只有寫成功才更新時戳——失敗時下一輪要立刻重試，不然心跳會靜默斷掉
-    // 而 route.ts 會誤判成 process 已死並搶著接手。
-    lastHeartbeatAt = Date.now();
+    await redis.set(`${HEARTBEAT_KEY_PREFIX}${userId}`, at, { ex: HEARTBEAT_TTL_SEC });
+    redisOk = true;
   } catch (e) {
-    console.error(`[heartbeat] 寫入失敗: ${String(e).slice(0, 150)}`);
+    console.error(`[heartbeat] Redis 寫入失敗: ${String(e).slice(0, 150)}`);
   }
+
+  let dbOk = false;
+  if (!dbHeartbeatColumnMissing) {
+    const { error } = await supabase
+      .from('profiles').update({ live_runner_heartbeat_at: at }).eq('id', userId);
+    if (error) {
+      // 42703 / PGRST204 ＝ 欄位還沒 ALTER TABLE。只提醒一次就閉嘴，但要講清楚
+      // 後果——沒有這個欄位，Redis 掛掉時就退回單一來源，8/23 那種空窗會重演。
+      if (error.code === '42703' || error.code === 'PGRST204') {
+        dbHeartbeatColumnMissing = true;
+        console.error('⚠  profiles.live_runner_heartbeat_at 欄位不存在——Redis 掛掉時無法判斷 live-runner 死活，');
+        console.error('⚠  route.ts 會退回「假設還活著」而不接手，等於沒有任何東西在監控持倉（2026-08-23 實際發生過）。');
+        console.error('⚠  請執行：ALTER TABLE profiles ADD COLUMN IF NOT EXISTS live_runner_heartbeat_at BIGINT;');
+      } else {
+        console.error(`[heartbeat] Supabase 寫入失敗: [${error.code}] ${error.message}`);
+      }
+    } else {
+      dbOk = true;
+    }
+  }
+
+  // 任一邊寫成功就推進節流時戳；兩邊都失敗時下一輪立刻重試，不讓心跳靜默
+  // 斷掉——那會讓 route.ts 誤判成 process 已死並搶著接手同一批 trades。
+  if (redisOk || dbOk) lastHeartbeatAt = at;
 }
 
 // kill switch 快取。Redis 讀不到時（例如額度用盡）保留上一次讀到的值，
@@ -615,7 +651,7 @@ async function runCycle(
   redis: Redis,
   userId: string,
 ): Promise<void> {
-  await writeHeartbeat(redis, userId);
+  await writeHeartbeat(redis, supabase, userId);
 
   const ks = await pollKillSwitch(redis);
   if (ks.active) {
