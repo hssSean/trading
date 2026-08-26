@@ -221,6 +221,25 @@ export interface TradeRecord {
   // unconfirmed local guess that must never be displayed as a real position or allowed
   // to out-rank a later server read. See tradeSync.ts resolveStatus.
   statusConfirmed?: boolean;
+  // 2026-08-26：這筆單有沒有真的送單到交易所（live-runner 真倉），還是純 DB
+  // 模擬推演。**三態，undefined 不等於 false**：
+  //   true      exchange_entry_order_id 有值 → 真倉，TP1 是預掛在交易所的
+  //             reduceOnly 條件單，觸價由交易所自動平 50%，使用者不用做事
+  //   false     欄位讀得到但是 null → DB 模擬，系統從不下單，50% 要手動平
+  //   undefined 欄位讀不到（authenticated role 的欄位權限問題，status /
+  //             signal_price 都有過前科）→ **不知道**，畫面不可以往任一邊斷言
+  //
+  // 加這個欄位是因為 trades 卡片原本**無條件**顯示「請手動平掉 50%」，
+  // 對真倉使用者是錯的指示——交易所已經自動平掉 50%，再手動平 50% 等於
+  // 平掉剩下那半的一半，最後只剩原始部位的 25%。
+  executedOnExchange?: boolean;
+  // TP1 的 reduceOnly 條件單有沒有真的掛在交易所上。同樣是三態。
+  //
+  // 為什麼不能只看 executedOnExchange：那個只說明「進場單送到交易所過」，
+  // 不保證 TP1 那張單掛上了。2026-08-23 的 Redis 空窗期就是這種狀態——
+  // 進場單有、live-runner 死了所以 TP1 單從沒掛上，價格穿過 TP1 什麼都沒發生。
+  // 分開這一態，那種異常才會直接顯示在卡片上而不是無聲。
+  tp1OrderPlaced?: boolean;
   signalPrice?: number;           // market price when signal was generated
   tier?: 'A' | 'B';               // v2.1 signal tier (B = half-risk light position)
   scoreBreakdown?: ScoreBreakdown; // per-group contributions for attribution

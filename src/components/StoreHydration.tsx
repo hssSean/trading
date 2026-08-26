@@ -168,6 +168,15 @@ function rowToRecord(r: Record<string, unknown>): TradeRecord {
     closeReason: (r.close_reason as string | null) ?? undefined,
     tier:        ((r.tier as string | null) as 'A' | 'B' | undefined) ?? undefined,
     scoreBreakdown: (r.score_breakdown as TradeRecord['scoreBreakdown'] | null) ?? undefined,
+    // 2026-08-26：真倉 vs DB 模擬。三態——用 `in` 檢查而不是 `!= null`，因為
+    // 「欄位讀不到」（authenticated role 欄位權限，status/signal_price 都有過
+    // 前科）跟「欄位是 null（沒送過單）」意義完全不同，畫面對前者不能斷言。
+    executedOnExchange: 'exchange_entry_order_id' in r
+      ? r.exchange_entry_order_id != null
+      : undefined,
+    tp1OrderPlaced: 'exchange_tp1_algo_id' in r
+      ? r.exchange_tp1_algo_id != null
+      : undefined,
   };
 }
 
