@@ -3,7 +3,7 @@ import { useState, useCallback, useMemo, memo } from 'react';
 import { useStore } from '@/store/useStore';
 import { usePriceStore } from '@/store/usePriceStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
-import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
+import { calcPositionPlan, tierRiskMultiplier, MAX_TOTAL_RISK_PCT } from '@/lib/position';
 import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
 import { isCleanPeriod } from '@/lib/cleanPeriod';
 import { TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
@@ -1525,30 +1525,55 @@ export default function TradesPage() {
         )}
 
         {/* Portfolio Heat */}
-        {pending.length > 0 && (
-          <div className={`rounded-md px-3.5 py-2.5 mb-3 border flex items-center justify-between ${
-            pending.length >= 5 ? 'border-[#F6465D]/40'
-            : pending.length >= 3 ? 'border-[#C99A2E]/40'
-            : 'border-[#1B222B]'
-          }`}>
-            <div>
-              <div className="tlabel">帳戶總曝險</div>
-              <p className={`text-[15px] num mt-0.5 ${
-                pending.length >= 5 ? 'text-[#F6465D]'
-                : pending.length >= 3 ? 'text-[#C99A2E]' : 'text-[#E8ECF1]'
-              }`}>{pending.length}%</p>
+        {/*
+          2026-08-26：原本這塊把每筆風險**寫死成 1%**，總曝險直接顯示成
+          `{pending.length}%`——等於「持倉數量」冒充「風險百分比」。
+
+          但下面每張卡片的「倉位計算」用的是真正的設定值
+          （riskPct × tierRiskMultiplier）。實測畫面：表頭寫「帳戶總曝險 2% ·
+          風險在控制範圍內」，同一畫面往下兩張卡片各是 10% 和 3.3%——真實
+          規劃曝險 13.3%，而 MAX_TOTAL_RISK_PCT 是 5。**低報 6 倍多，還附上
+          一句「在控制範圍內」。**
+
+          警示門檻也一起改：原本用「持倉筆數 >= 3 / >= 5」當風險等級，那跟
+          實際風險無關（3 筆各 0.5% 遠比 1 筆 10% 安全）。改成跟
+          MAX_TOTAL_RISK_PCT 比。
+
+          注意：這是**建議倉位**的曝險（給手動下單參考）。live-runner 真倉是
+          用訊號自帶的 suggested_risk_pct（ATR 衍生 0.5/1.0/1.5）下單，跟這裡
+          的設定值是兩回事——所以文案講「規劃曝險」而不是「帳戶曝險」，
+          不要讓人以為這是交易所的真實數字。
+        */}
+        {pending.length > 0 && (() => {
+          const plannedRisk = pending.reduce(
+            (sum, t) => sum + riskPct * tierRiskMultiplier(t.symbol, t.tier), 0);
+          const overCap = plannedRisk > MAX_TOTAL_RISK_PCT;
+          const nearCap = plannedRisk > MAX_TOTAL_RISK_PCT * 0.6;
+          const color = overCap ? '#F6465D' : nearCap ? '#C99A2E' : '#E8ECF1';
+          return (
+            <div className={`rounded-md px-3.5 py-2.5 mb-3 border flex items-center justify-between ${
+              overCap ? 'border-[#F6465D]/40' : nearCap ? 'border-[#C99A2E]/40' : 'border-[#1B222B]'
+            }`}>
+              <div>
+                <div className="tlabel">規劃總曝險</div>
+                <p className="text-[15px] num mt-0.5" style={{ color }}>
+                  {plannedRisk.toFixed(1)}%
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-[#565E6B] text-[10px] num">
+                  {pending.length} 筆持倉 · 上限 {MAX_TOTAL_RISK_PCT}%
+                </p>
+                {overCap
+                  ? <p className="text-[#F6465D] text-[10px]">超過上限，建議暫停開新倉</p>
+                  : nearCap
+                  ? <p className="text-[#C99A2E] text-[10px]">接近上限</p>
+                  : <p className="text-[#3A424E] text-[9px]">在上限內</p>
+                }
+              </div>
             </div>
-            <div className="text-right">
-              <p className="text-[#565E6B] text-[10px] num">{pending.length} 筆持倉 × 1% 風險</p>
-              {pending.length >= 5
-                ? <p className="text-[#F6465D] text-[10px]">高風險，建議暫停開新倉</p>
-                : pending.length >= 3
-                ? <p className="text-[#C99A2E] text-[10px]">注意：總曝險偏高</p>
-                : <p className="text-[#3A424E] text-[9px]">風險在控制範圍內</p>
-              }
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Row 1: 狀態 filter */}
         <div className="flex gap-1.5 mb-2 flex-wrap">
