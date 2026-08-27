@@ -3,7 +3,7 @@ import { useState, useCallback, useMemo, memo } from 'react';
 import { useStore } from '@/store/useStore';
 import { usePriceStore } from '@/store/usePriceStore';
 import { deleteTradePermanently, loadFromSupabase, saveToSupabase, fullSyncFromSupabase } from '@/components/StoreHydration';
-import { calcPositionPlan, tierRiskMultiplier, MAX_TOTAL_RISK_PCT } from '@/lib/position';
+import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
 import { isCleanPeriod } from '@/lib/cleanPeriod';
 import { TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
@@ -1547,12 +1547,25 @@ export default function TradesPage() {
         {pending.length > 0 && (() => {
           const plannedRisk = pending.reduce(
             (sum, t) => sum + riskPct * tierRiskMultiplier(t.symbol, t.tier), 0);
-          const overCap = plannedRisk > MAX_TOTAL_RISK_PCT;
-          const nearCap = plannedRisk > MAX_TOTAL_RISK_PCT * 0.6;
-          const color = overCap ? '#F6465D' : nearCap ? '#C99A2E' : '#E8ECF1';
+          // 2026-08-26 二修：第一版拿這個數字跟 MAX_TOTAL_RISK_PCT(5) 比大小，
+          // 那是**兩個不同單位**——route.ts 自己的訊息就寫明「與實際帳戶風險%
+          // 無關，僅為持倉數量代理值」（每筆貢獻 suggested_risk_pct ≈ 0.5~1.5，
+          // 所以 5 實質上是「大約 5 筆持倉」）。拿它當帳戶風險%的上限，是我
+          // 半小時前才在別處批評過的同一種單位錯誤。
+          //
+          // 這裡不跟任何「上限」比，因為這個維度**沒有被強制執行的上限**：
+          // total_risk_cap 那道關卡擋的是持倉數量代理值，不是這個。改成直接
+          // 講出這個數字的字面意義——全部止損會損失多少本金——那是精確的，
+          // 不需要任何門檻或代理。
+          //
+          // 顏色門檻是顯示用的判斷，不是系統強制值，所以刻意用「連續虧損」
+          // 的框架跟設定頁一致（設定頁對單筆 >=5% 標「極高風險」）。
+          const danger = plannedRisk >= 20;
+          const warn = plannedRisk >= 10;
+          const color = danger ? '#F6465D' : warn ? '#C99A2E' : '#E8ECF1';
           return (
             <div className={`rounded-md px-3.5 py-2.5 mb-3 border flex items-center justify-between ${
-              overCap ? 'border-[#F6465D]/40' : nearCap ? 'border-[#C99A2E]/40' : 'border-[#1B222B]'
+              danger ? 'border-[#F6465D]/40' : warn ? 'border-[#C99A2E]/40' : 'border-[#1B222B]'
             }`}>
               <div>
                 <div className="tlabel">規劃總曝險</div>
@@ -1562,13 +1575,13 @@ export default function TradesPage() {
               </div>
               <div className="text-right">
                 <p className="text-[#565E6B] text-[10px] num">
-                  {pending.length} 筆持倉 · 上限 {MAX_TOTAL_RISK_PCT}%
+                  {pending.length} 筆持倉全部止損 = 損失本金 {plannedRisk.toFixed(1)}%
                 </p>
-                {overCap
-                  ? <p className="text-[#F6465D] text-[10px]">超過上限，建議暫停開新倉</p>
-                  : nearCap
-                  ? <p className="text-[#C99A2E] text-[10px]">接近上限</p>
-                  : <p className="text-[#3A424E] text-[9px]">在上限內</p>
+                {danger
+                  ? <p className="text-[#F6465D] text-[10px]">曝險很高，建議暫停開新倉</p>
+                  : warn
+                  ? <p className="text-[#C99A2E] text-[10px]">曝險偏高</p>
+                  : <p className="text-[#3A424E] text-[9px]">依建議倉位計算</p>
                 }
               </div>
             </div>
