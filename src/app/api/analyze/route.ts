@@ -16,6 +16,7 @@ import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib
 import { shadowChanged, snapshot } from '@/lib/shadowWrite';
 import { unavailableSymbols, SYMBOL_UNAVAILABLE_REASON, SYMBOL_UNAVAILABLE_COOLDOWN_MS } from '@/lib/symbolAvailability';
 import { decideLiveRunnerHandoff } from '@/lib/liveRunnerHandoff';
+import { activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS } from '@/lib/tradeCooldown';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -134,7 +135,15 @@ async function setLossCooldown(symbol: string, direction: string, ttlSec: number
   }
 }
 
+// 2026-08-26：從 Supabase 已平倉紀錄推導出來的冷卻集合，每輪掃描開始時重建。
+// 加這條是因為原本的兩個來源在 Redis 掛掉時都等於失效——記憶體是 Vercel
+// 單一實例的、冷啟就空，Redis 則直接丟例外。詳見 src/lib/tradeCooldown.ts。
+let derivedCooldowns: Set<string> = new Set();
+
 async function isOnLossCooldown(symbol: string, direction: string): Promise<boolean> {
+  // 三個來源取聯集：任一邊說在冷卻就擋。對風控來說「多擋」的代價遠小於
+  // 「漏擋」——漏擋等於剛被證偽的 setup 立刻重進，正是這個機制要防的事。
+  if (derivedCooldowns.has(cooldownKey(symbol, direction))) return true;
   const mem = memLossCd.get(`${symbol}:${direction}`);
   if (mem && mem > Date.now()) return true;
   const r = getRedis();
@@ -2253,27 +2262,53 @@ export async function GET(req: NextRequest) {
   //
   // 放在計算之前而不是發訊號之前：被擋的幣連 K 線都不用抓、指標都不用算，
   // 順便省 CPU——而 CPU 正是爆掉的那個額度。
+  //
+  // 2026-08-26（同一次查詢順便做的第二件事）：虧損冷卻也從這批紀錄推導。
+  //
+  // 冷卻原本只存在 Redis（`loss_cd:{symbol}:{direction}`）。route.ts 讀取時
+  // 「記憶體優先、再查 Redis」，但那個記憶體是 Vercel 單一實例的、冷啟就空，
+  // 實質等於只有 Redis；live-runner 寫入更是純 Redis、連記憶體 fallback 都沒有。
+  // 於是 8/23 Upstash 額度用盡後**冷卻完全失效**——連續虧損的同一個標的同方向
+  // 可以立刻再發一次。這是 Redis 死掉時唯一還會讓人真的虧錢的缺口（熔斷本來
+  // 就會 fallback 去 Supabase 重算，回撤停機本來就讀 Supabase）。
+  //
+  // 用推導而不是雙寫：需要的資訊已經全部在 trades 表裡（result / close_reason /
+  // closed_at / symbol / direction），多存一份只會多一個會跟事實漂移的副本。
+  // Redis 那條路徑保留，兩者取**聯集**——任一邊說在冷卻就擋。對風控來說
+  // 「多擋」的代價遠小於「漏擋」。
   let coins = allCoins;
   try {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
     if (url && key) {
+      const now = Date.now();
       const { createClient } = await import('@supabase/supabase-js');
+      // 一次查詢餵兩個用途，時間窗取兩者的最大值（symbol_unavailable 24h、
+      // LOSS 冷卻 24h、時間止損 4h）。
       const { data } = await createClient(url, key)
         .from('trades')
-        .select('symbol, close_reason, closed_at')
-        .eq('close_reason', SYMBOL_UNAVAILABLE_REASON)
-        .gte('closed_at', Date.now() - SYMBOL_UNAVAILABLE_COOLDOWN_MS);
-      const blocked = unavailableSymbols(data ?? [], Date.now());
+        .select('symbol, direction, result, close_reason, closed_at')
+        .not('closed_at', 'is', null)
+        .gte('closed_at', now - Math.max(SYMBOL_UNAVAILABLE_COOLDOWN_MS, LOSS_COOLDOWN_MS));
+      const rows = data ?? [];
+
+      const blocked = unavailableSymbols(rows, now);
       if (blocked.size > 0) {
         coins = allCoins.filter(c => !blocked.has(c));
         console.log(`[analyze] 跳過幣安端不可交易的 symbol（${blocked.size} 個）: ${Array.from(blocked).join(', ')}`);
       }
+
+      derivedCooldowns = activeCooldowns(rows, now);
+      if (derivedCooldowns.size > 0) {
+        console.log(`[analyze] 冷卻中（由 Supabase 紀錄推導）${derivedCooldowns.size} 組: ${Array.from(derivedCooldowns).join(', ')}`);
+      }
     }
   } catch (e) {
-    // 查不到就照原本的清單掃——這道是省錢/省吵的優化，不是風控，
-    // 絕不因為它失敗就讓整輪掃描停掉。
-    console.error(`[analyze] 查不可交易 symbol 失敗，照完整清單掃: ${String(e).slice(0, 150)}`);
+    // 查詢失敗時把推導出來的冷卻清空——**不要沿用上一輪的**。這個變數是
+    // module-level 的，Vercel 實例會被重用，留著舊值會讓冷卻在資料早就過期
+    // 之後還繼續擋，而且完全看不出來。清空之後仍有 Redis/記憶體那條路徑。
+    derivedCooldowns = new Set();
+    console.error(`[analyze] 查已平倉紀錄失敗（不可交易 symbol + 冷卻都會退回 Redis 那條路）: ${String(e).slice(0, 150)}`);
   }
 
   const timeframes = tfParam.split(',').map(s => s.trim()) as Timeframe[];
