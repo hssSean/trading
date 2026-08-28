@@ -432,7 +432,32 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   const excludeLiveUsers = <T extends { not: (col: string, op: string, val: string) => T }>(q: T): T =>
     liveUserIds.length > 0 ? q.not('user_id', 'in', `(${liveUserIds.join(',')})`) : q;
 
-  const baseQ = () => excludeLiveUsers(admin.from('trades').select('*').is('result', null));
+  // 2026-08-27：**每一筆單自己就知道該不該被模擬** —— 有 exchange_entry_order_id
+  // 就代表 live-runner 在交易所下過真單，這一筆的狀態只能來自交易所對帳，
+  // 絕不能用 K 線模擬去推。
+  //
+  // 為什麼不能只靠上面的 excludeLiveUsers：那個依賴 profiles.live_trading_enabled，
+  // 而該欄位查詢失敗時（例如還沒 ALTER TABLE）liveTradingUserIds 是空陣列＝
+  // **完全不排除**——失敗方向是錯的。而且那個旗標在前端完全沒有 UI，使用者
+  // 無從得知也無從設定。
+  //
+  // 實測後果（2026-08-27）：XRPUSDT 被這支的 K 線模擬判定「保本出場」寫進 DB
+  // （pnl −0.05%），但交易所上那個部位**還開著而且 +4.88%**——止損掛在開倉價、
+  // 標記價根本沒碰到。差別在於這支用**收盤價 K 線**判定，幣安用**標記價**觸發，
+  // 下影線碰到但標記價沒到就會造出一筆從沒發生過的出場。
+  //
+  // 後果不只是紀錄錯：這些假虧損進了回撤計算，把權益回撤推到 13R > 12R 門檻，
+  // **整個系統被自己捏造的虧損停機**。跟 2026-08-19 那次（8.01R vs 8R，程式碼
+  // 註解自己寫「這 8R 回撤是用有 bug 的系統跑出來的」）是同一個病。
+  //
+  // 有真單卻沒人管的情況怎麼辦：這支本來就不能下單，模擬它只會產生假紀錄，
+  // 跳過才是唯一正確的行為。真正的解法是 live-runner 要活著（心跳雙寫，
+  // 9d3acfb），不是讓這支去假裝管理它。
+  const excludeExchangeManaged = <T extends { is: (col: string, val: null) => T }>(q: T): T =>
+    q.is('exchange_entry_order_id', null);
+
+  const baseQ = () => excludeExchangeManaged(
+    excludeLiveUsers(admin.from('trades').select('*').is('result', null)));
 
   // 2026-07-26: NULL status used to be swept into the ACTIVE net ("status column
   // didn't exist yet" legacy assumption). But a NEW trade can also land with status
@@ -454,8 +479,9 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
   ] = await Promise.all([
     baseQ().or('status.eq.waiting,status.is.null'),
     baseQ().or('status.eq.active,status.eq.tp1_hit'),
-    excludeLiveUsers(admin.from('trades').select('*')
-      .eq('status', 'tp1_hit').eq('result', 'WIN_TP1').is('closed_at', null)),
+    // 這條也要擋——tp1-watching 的單同樣可能是 live-runner 在交易所管的。
+    excludeExchangeManaged(excludeLiveUsers(admin.from('trades').select('*')
+      .eq('status', 'tp1_hit').eq('result', 'WIN_TP1').is('closed_at', null))),
   ]);
 
   if (waitErr)  console.error('[monitor] waiting query error:', waitErr.message);
@@ -1838,15 +1864,38 @@ async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; 
   // 等於這道關卡不存在）。確認後把量測基準推到確認當下：只看之後平倉的單，
   // 等於「我看過了，從現在開始重新算」。這樣風險上限完全沒有放寬，但系統
   // 不會再永久卡死。確認方式見 DELETE handler 的 ?scope=drawdown。
+  // 2026-08-27：確認時間戳雙來源讀取（Redis + Supabase），取較晚的那個。
+  //
+  // 原本只存 Redis。8/23 Upstash 額度用盡後，這個確認**寫不進也讀不到**——
+  // 而回撤停機本身是從 Supabase 算的、照常會觸發。結果是使用者被停機、
+  // 而且**完全沒有解除的辦法**，只能等 9/1 額度重置。這道關卡的設計本意是
+  // 「停下來讓人工檢查」，不是「卡死到下個月」。
+  //
+  // 取兩者較晚的：確認是單向往前推的動作，晚的那個一定是比較新的一次確認。
   let ackAt = 0;
   {
     const r = getRedis();
     if (r) {
       try {
         const v = await r.get(DRAWDOWN_ACK_KEY(profileId));
-        if (v !== null && v !== undefined) ackAt = Number(v) || 0;
-      } catch { /* 讀不到就當沒確認過，維持原本行為 */ }
+        if (v !== null && v !== undefined) ackAt = Math.max(ackAt, Number(v) || 0);
+      } catch { /* 讀不到就往下試 Supabase */ }
     }
+    try {
+      const { createClient: mk } = await import('@supabase/supabase-js');
+      const { data, error } = await mk(url, key)
+        .from('profiles').select('drawdown_ack_at').eq('id', profileId).single();
+      if (error) {
+        if (error.code === '42703' || error.code === 'PGRST204' || error.code === 'PGRST116') {
+          // 欄位還沒 ALTER TABLE。只有 Redis 那條路可用——Redis 掛掉時就會
+          // 變成無法解除，所以這裡要講清楚，不要靜默。
+          console.error('[drawdown] profiles.drawdown_ack_at 不存在——Redis 掛掉時將無法解除回撤停機。'
+            + ' 請執行：ALTER TABLE profiles ADD COLUMN IF NOT EXISTS drawdown_ack_at BIGINT;');
+        }
+      } else if (data?.drawdown_ack_at != null) {
+        ackAt = Math.max(ackAt, Number(data.drawdown_ack_at) || 0);
+      }
+    } catch { /* 兩邊都讀不到就當沒確認過，維持原本行為 */ }
   }
 
   try {
@@ -3405,19 +3454,50 @@ export async function DELETE(req: NextRequest) {
       if (!pid) {
         return NextResponse.json({ ok: false, error: 'SUPABASE_PROFILE_ID 未設定，無法確認回撤停機' }, { status: 400 });
       }
-      if (!r) {
-        return NextResponse.json({ ok: false, error: 'Redis 未設定，回撤確認需要持久化' }, { status: 400 });
-      }
+      // 2026-08-27：雙寫 Redis + Supabase。原本只寫 Redis，而且 Redis 沒設定
+      // 就直接拒絕——8/23 Upstash 額度用盡後，回撤停機照常從 Supabase 算出來
+      // 會觸發，但這個解除**寫不進去**，使用者被停機且完全沒有出口，只能等
+      // 下個月額度重置。這道關卡的本意是「停下來讓人工檢查」，不是「卡死到
+      // 下個月」。任一邊寫成功就算解除成功。
       const at = Date.now();
-      try {
-        await r.set(DRAWDOWN_ACK_KEY(pid), at);
-        return NextResponse.json({
-          ok: true, scope: 'drawdown', acknowledgedAt: at,
-          note: '回撤停機已確認解除——權益回撤改從此刻之後平倉的交易重新計算（風險上限未變動）',
-        });
-      } catch (e) {
-        return NextResponse.json({ ok: false, error: `寫入確認失敗: ${String(e).slice(0, 120)}` }, { status: 500 });
+      let redisOk = false, dbOk = false;
+      const errs: string[] = [];
+
+      if (r) {
+        try { await r.set(DRAWDOWN_ACK_KEY(pid), at); redisOk = true; }
+        catch (e) { errs.push(`Redis: ${String(e).slice(0, 100)}`); }
       }
+
+      try {
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+        const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+        if (url && key) {
+          const { createClient: mk } = await import('@supabase/supabase-js');
+          const { error } = await mk(url, key)
+            .from('profiles').update({ drawdown_ack_at: at }).eq('id', pid);
+          if (error) {
+            errs.push(error.code === '42703' || error.code === 'PGRST204'
+              ? 'Supabase: profiles.drawdown_ack_at 欄位不存在（請執行 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS drawdown_ack_at BIGINT;）'
+              : `Supabase: [${error.code}] ${error.message}`);
+          } else {
+            dbOk = true;
+          }
+        }
+      } catch (e) {
+        errs.push(`Supabase: ${String(e).slice(0, 100)}`);
+      }
+
+      if (!redisOk && !dbOk) {
+        return NextResponse.json({
+          ok: false, error: `兩個儲存都寫入失敗，確認未生效：${errs.join(' ｜ ')}`,
+        }, { status: 500 });
+      }
+      return NextResponse.json({
+        ok: true, scope: 'drawdown', acknowledgedAt: at,
+        persistedTo: [redisOk && 'redis', dbOk && 'supabase'].filter(Boolean),
+        ...(errs.length > 0 ? { warnings: errs } : {}),
+        note: '回撤停機已確認解除——權益回撤改從此刻之後平倉的交易重新計算（風險上限未變動）',
+      });
     }
 
     if (r) {
