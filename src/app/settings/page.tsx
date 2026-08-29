@@ -53,6 +53,10 @@ interface AnalyzeResult {
   skipped?: string;
   analyzedAt?: string;
   minScore?: number;
+  // API 一直有回這兩個，但這個型別漏了，所以診斷面板只顯示「已通知：無」而
+  // 不說原因。停機/熔斷時「無」是必然結果，不講原因會被讀成「沒有好訊號」。
+  circuitBreaker?: string | null;
+  drawdownHalt?: string | null;
   notified?: string[];
   results?: {
     symbol: string;
@@ -100,6 +104,8 @@ export default function SettingsPage() {
   const [resetMsg,    setResetMsg]    = useState('');
   const [fullResetting, setFullResetting] = useState(false);
   const [fullResetMsg,  setFullResetMsg]  = useState('');
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackMsg,  setAckMsg]  = useState('');
   // Local string state so the field can be cleared while typing — committing
   // parseFloat directly made empty input snap back to the previous value
   // (the "stuck 1" bug: could never type 20 over a cleared field).
@@ -337,6 +343,46 @@ export default function SettingsPage() {
     setWebhookSecret(secret.trim() || 'abc123');
   };
 
+  // 2026-08-29：回撤停機的解除原本只有 API（DELETE /api/analyze?scope=drawdown），
+  // 沒有任何 UI。停機時系統不發任何新推薦單，而解除需要自己組一個帶 JWT 的
+  // fetch——實際發生過使用者被停機好幾天、完全不知道能解除。這是唯一一道
+  // 「必須人工介入才會恢復」的關卡，卻是唯一沒有按鈕的，補上。
+  //
+  // 刻意把回應的 persistedTo 原樣顯示：解除必須寫進 Redis 或 Supabase 才算數，
+  // 而 8/23 Upstash 額度用盡時 Redis 那條路是死的。不顯示寫到哪，使用者會
+  // 以為按了就好，實際上可能兩邊都沒寫進去（那種情況 API 回 500，訊息會直接
+  // 帶出要跑的 ALTER TABLE）。
+  const ackDrawdown = async () => {
+    if (!confirm('確認已人工檢查過策略？\n\n解除後權益回撤會從此刻之後平倉的交易重新計算。風險上限不變。')) return;
+    setAckBusy(true);
+    setAckMsg('');
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const jwt = session?.access_token ?? '';
+      const res = await fetch('/api/analyze?scope=drawdown', {
+        method: 'DELETE',
+        headers: {
+          'x-webhook-secret': secret.trim() || 'abc123',
+          ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+        },
+      });
+      const d = await res.json().catch(() => ({})) as {
+        ok?: boolean; error?: string; persistedTo?: string[]; warnings?: string[];
+      };
+      if (!d.ok) {
+        setAckMsg(`解除失敗：${d.error ?? `HTTP ${res.status}`}`);
+        return;
+      }
+      const where = (d.persistedTo ?? []).join(' + ') || '（無）';
+      setAckMsg(`已解除回撤停機（寫入：${where}）`
+        + (d.warnings?.length ? `\n注意：${d.warnings.join(' ｜ ')}` : ''));
+    } catch (e) {
+      setAckMsg(`解除失敗：${String(e).slice(0, 120)}`);
+    } finally {
+      setAckBusy(false);
+    }
+  };
+
   // Manually trigger analyze and show full diagnostic
   const runDiag = async () => {
     setDiagLoading(true);
@@ -531,10 +577,40 @@ export default function SettingsPage() {
               <p className="text-accent num">{diagResult.ok ? `分析完成（已掃描 ${diagResult.results?.length ?? 0} 檔）` : '分析失敗'}</p>
               <p className="text-text-s">
                 已通知：{diagResult.notified?.join(', ') || '無'}
-                {!diagResult.notified?.length && (
+                {!diagResult.notified?.length && !diagResult.drawdownHalt && !diagResult.circuitBreaker && (
                   <span className="text-text-m">（無＝這次沒有新訊號通過進場關卡，非未執行——下方為各幣即時分析結果）</span>
                 )}
               </p>
+
+              {/* 停機/熔斷時「已通知：無」是必然的，跟「沒有好訊號」是兩回事。
+                  回撤停機還是唯一需要人工確認才會恢復的關卡，所以按鈕就放這裡。 */}
+              {diagResult.circuitBreaker && (
+                <p className="text-down/90 border border-down/30 rounded-[10px] px-3 py-2">
+                  當日熔斷中：{diagResult.circuitBreaker}
+                  <span className="block text-text-m mt-1">熔斷是每日自動重置的，不需要手動解除。</span>
+                </p>
+              )}
+              {diagResult.drawdownHalt && (
+                <div className="border border-down/30 rounded-[10px] px-3 py-2 space-y-2">
+                  <p className="text-down/90">回撤停機中：{diagResult.drawdownHalt}</p>
+                  <p className="text-text-m">
+                    這道關卡不會自己解除——它的用意是「策略可能失效，停下來讓人工檢查」。
+                    檢查完按下面確認，之後只計算此刻以後平倉的交易重新算回撤，風險上限不變。
+                  </p>
+                  <button
+                    onClick={ackDrawdown}
+                    disabled={ackBusy}
+                    className="w-full py-2 rounded-full border border-[#C99A2E]/40 text-[#C99A2E] text-xs"
+                  >
+                    {ackBusy ? '確認中…' : '我已檢查過策略，解除回撤停機'}
+                  </button>
+                </div>
+              )}
+              {ackMsg && (
+                <p className={`whitespace-pre-line rounded-[10px] px-3 py-2 border ${
+                  ackMsg.includes('失敗') ? 'border-down/30 text-down' : 'border-up/30 text-up'
+                }`}>{ackMsg}</p>
+              )}
               {diagResult.results?.map((r) => (
                 <div key={r.symbol} className={`rounded-[10px] px-3 py-2 border ${
                   diagResult.notified?.includes(r.symbol) ? 'border-up/30' :
