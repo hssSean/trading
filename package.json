@@ -10,6 +10,7 @@
     "backtest": "npx tsx scripts/backtest.ts",
     "testnet-reconcile": "npx tsx scripts/testnet-reconcile.ts",
     "audit-exits": "npx tsx scripts/audit-fabricated-exits.ts",
+    "status": "npx tsx scripts/status.ts",
     "live-runner": "npx tsx scripts/live-runner.ts",
     "test": "vitest run"
   },
