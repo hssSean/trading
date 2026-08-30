@@ -70,6 +70,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { BinanceFuturesClient, loadBinanceConfigFromEnv, UserTrade } from '../src/engine/binanceClient';
 import { auditTradeExit, type AuditVerdict } from '../src/lib/exitAudit';
+import { pairedCompare } from '../src/lib/exitPolicy';
 import { loadEnvFile, reportEnvLoad } from './loadEnvFile';
 import { writeFileSync } from 'fs';
 
@@ -387,6 +388,41 @@ async function main() {
   const noisy = new Set(['ZECUSDT', 'HYPEUSDT']);
   show2('排除 ZEC/HYPE（配對最不可靠）', rStats(withR.filter(f => !noisy.has(f.symbol))));
   show2('只看判定 OK 的', rStats(withR.filter(f => f.verdict === 'OK')));
+
+  // ── DB 模擬 vs 真實：系統性偏誤有多大 ──
+  //
+  // 這一段的用途不是評斷這 73 筆，而是評斷**另外那 76 筆**。純 DB 模擬的單
+  // 沒有 exchange_entry_order_id，永遠無法對帳——但它們跟真倉共用同一套推演
+  // 邏輯（K 線收盤價 + 滑價模型）。所以在真倉上量到的偏誤，就是對那 76 筆
+  // 誤差的最好估計。
+  //
+  // 成對比較（同一筆單的兩個量測），不是兩組平均值相比——配對消掉了「不同
+  // 單本來就有不同結果」這個最大的變異來源，檢定力高很多。
+  const paired = findings.filter(f => f.dbPnlPct != null && f.realPnlPct != null);
+  if (paired.length >= 2) {
+    const cmp = pairedCompare(
+      paired.map(f => f.dbPnlPct as number),
+      paired.map(f => f.realPnlPct as number),
+    );
+    console.log(`\n── DB 模擬 vs 真實成交（n=${cmp.n} 成對）──`);
+    console.log(`  真實 − DB 模擬 = ${fmt(cmp.meanDiff, 3)} 個百分點/筆   t=${fmt(cmp.t, 2)}`
+      + `   ${cmp.significant ? '← 顯著' : '（不顯著）'}`);
+    // 符號檢定：只看「方向對不對」，不看幅度。
+    //
+    // 這裡刻意兩種檢定都跑，因為它們會不一致而那個不一致本身就是資訊。
+    // t 檢定用到幅度，被幾筆 +4R 的捏造出場（厚尾）稀釋掉檢定力；符號檢定
+    // 只數正負，對厚尾免疫。偏誤如果是「方向一致但幅度不定」，t 會看不到而
+    // 符號檢定看得到——那正是系統性偏誤的典型形狀。
+    const diffs = paired.map(f => (f.realPnlPct as number) - (f.dbPnlPct as number)).filter(d => d !== 0);
+    const pos = diffs.filter(d => d > 0).length;
+    const nz = diffs.length;
+    // 常態近似（n=69 遠超過需要的 30），H0: 正負各半。
+    const z = nz > 0 ? (pos - nz / 2) / Math.sqrt(nz * 0.25) : 0;
+    console.log(`  DB 低估結果的比例 ${fmt(pos / nz * 100, 1)}%（${pos}/${nz}）  `
+      + `符號檢定 z=${fmt(z, 2)}  ${Math.abs(z) >= 1.96 ? '← 顯著' : '（不顯著）'}`);
+    console.log(`  偏誤為正代表 DB 模擬系統性地把結果記得比實際差；`);
+    console.log(`  同一套推演也用在另外 76 筆無法對帳的純模擬單上。`);
+  }
 
   const wins = withR.filter(f => (f.realR as number) > 0).length;
   console.log(`\n  勝率 ${fmt(wins / withR.length * 100, 1)}%（${wins}/${withR.length}）`);
