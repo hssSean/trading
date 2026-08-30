@@ -281,6 +281,32 @@ async function main() {
     console.log('\n沒有查到硬證據等級的捏造出場。');
   }
 
+  // NO_CLOSE_FILL 的下一個問題一定是「那倉位現在還開著嗎」——這決定要不要
+  // 立刻處理（真的開著＝有未受管理的曝險），還是只是配對誤差。直接查完，
+  // 不要讓人拿著報告再去手動比對。positionRisk 是 GET，唯讀。
+  const noClose = byVerdict('NO_CLOSE_FILL');
+  if (noClose.length > 0) {
+    console.log(`\n── NO_CLOSE_FILL 的 symbol 現在的實際倉位 ──`);
+    for (const sym of Array.from(new Set(noClose.map(f => f.symbol)))) {
+      try {
+        const pos = await client.getPositionRisk(sym);
+        const live = pos.filter(p => parseFloat(p.positionAmt) !== 0);
+        if (live.length === 0) {
+          console.log(`  ${sym}：目前無倉位 → 倉位已經平掉了（可能是手動平的），`
+            + `配對不到是因為平倉成交被同 symbol 的其他單先消耗掉`);
+        } else {
+          for (const p of live) {
+            console.log(`  ${sym}：⚠ 仍有倉位 ${p.positionAmt} @ ${p.entryPrice}，`
+              + `未實現損益 ${fmt(parseFloat(p.unRealizedProfit), 4)} USDT`);
+          }
+        }
+      } catch (e) {
+        console.log(`  ${sym}：查詢失敗 ${e instanceof Error ? e.message : String(e)}`);
+      }
+      await sleep(250);
+    }
+  }
+
   const outPath = `audit-fabricated-exits-${new Date().toISOString().slice(0, 10)}.json`;
   writeFileSync(outPath, JSON.stringify({ generatedAt: Date.now(), days: DAYS, findings }, null, 2), 'utf-8');
   console.log(`\n完整結果已寫入 ${outPath}（UTF-8）`);

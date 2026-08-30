@@ -37,7 +37,16 @@ export interface LoadEnvResult {
   skipped: string[];
 }
 
-export function loadEnvFile(fileName = '.env.local'): LoadEnvResult {
+/**
+ * 預設讀 `.env.local`，可用 `ENV_FILE` 環境變數指定別的路徑：
+ *
+ *     ENV_FILE=env.txt npm run audit-exits
+ *
+ * 加這個是因為實際發生過：使用者把金鑰貼在自己命名的 env.txt，而搬移檔案
+ * 這種事不該為了配合一個寫死的檔名去做——金鑰檔搬來搬去正是外洩的來源。
+ * 讓工具去配合檔案，不是讓人去配合工具。
+ */
+export function loadEnvFile(fileName = process.env.ENV_FILE || '.env.local'): LoadEnvResult {
   const path = resolve(process.cwd(), fileName);
   if (!existsSync(path)) {
     return { path, found: false, applied: [], skipped: [] };
