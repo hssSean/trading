@@ -18,6 +18,12 @@ out/
 .env.development.local
 .env.test.local
 .env.production.local
+# 手動貼金鑰用的暫存檔。副檔名 .txt 不在上面任何一條規則裡，會以未追蹤狀態
+# 出現在 git status，下一次 git add -A 就進版控了。正式的設定檔請用 .env.local。
+env.txt
+*.env.txt
+# 對帳報告含 trade_id 與實際損益，不需要進版控。
+audit-fabricated-exits-*.json
 
 # debug
 npm-debug.log*
