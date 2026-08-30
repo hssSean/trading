@@ -236,7 +236,16 @@ export class BinanceFuturesClient {
   // tradeBridge.ts 的 needs_reconcile 分支。orderId 帶進去可以只查特定訂單
   // 產生的成交（algoOrder 觸發後查 Query Algo Order 拿到的 actualOrderId，
   // 用它查這裡才對得上）。
-  async getUserTrades(symbol: string, params: { orderId?: number; startTime?: number; endTime?: number; limit?: number } = {}): Promise<UserTrade[]> {
+  //
+  // `fromId` 用於分頁：回傳 id >= fromId 的成交。**幣安不接受 fromId 與
+  // startTime/endTime 併用**（會忽略時間參數），所以呼叫端要嘛用時間窗、
+  // 要嘛用 id 遊標，不能兩者同時帶。單次上限 1000 筆——高頻交易的 symbol
+  // 光靠時間窗會被靜默截斷（2026-08-30 實測 HYPEUSDT 七天內 1012 筆成交，
+  // 對帳結果因此不完整），需要 fromId 續抓。
+  async getUserTrades(
+    symbol: string,
+    params: { orderId?: number; startTime?: number; endTime?: number; fromId?: number; limit?: number } = {},
+  ): Promise<UserTrade[]> {
     return this.signedRequest('GET', '/v1/userTrades', { symbol, ...params });
   }
 

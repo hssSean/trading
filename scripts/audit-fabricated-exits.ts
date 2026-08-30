@@ -115,6 +115,10 @@ interface Finding {
   realizedPnlUsdt: number | null;
   entryQty: number | null;
   closedQty: number | null;
+  /** 這筆單真正冒的風險（USDT）＝ 成交數量 × |進場價 − 止損價|。 */
+  riskUsdt: number | null;
+  /** 真實 R 倍數 ＝ 已實現損益 ÷ 風險。專案一律用 R 衡量，不用原始 %。 */
+  realR: number | null;
   note: string;
 }
 
@@ -126,23 +130,53 @@ function ts(t: number | null): string {
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-/** 撈某個 symbol 在 [from, to] 區間內的全部成交，自動分 7 天一段。 */
+const PAGE = 1000; // 幣安 userTrades 單次上限
+
+/**
+ * 撈某個 symbol 在 [from, to] 區間內的**全部**成交。
+ *
+ * 分 7 天一段（幣安時間窗上限），而**單一時間窗塞滿 1000 筆時要用 fromId
+ * 續抓**——2026-08-30 實測 HYPEUSDT 七天內 1012 筆成交，原本只用時間窗的
+ * 版本會靜默漏掉超出的部分，而漏掉的成交會讓對帳把正常平倉判成
+ * NO_CLOSE_FILL（硬證據等級的誤判），也讓已實現損益總計失真。
+ *
+ * fromId 不能跟 startTime/endTime 併用（幣安會忽略時間參數），所以續抓時
+ * 只帶 fromId，回傳的結果自己按時間濾回窗內。
+ */
 async function fetchAllUserTrades(
   client: BinanceFuturesClient, symbol: string, from: number, to: number,
 ): Promise<UserTrade[]> {
-  const out: UserTrade[] = [];
+  const byId = new Map<number, UserTrade>(); // 時間窗與 id 遊標會重疊，用 id 去重
+
   for (let start = from; start < to; start += WINDOW_MS) {
     const end = Math.min(start + WINDOW_MS, to);
-    // limit 1000 是單次上限。理論上單一 symbol 七天內超過 1000 筆成交會截斷，
-    // 但那個量級遠超這個系統的交易頻率；真的發生時下面的 warn 會講出來。
-    const batch = await client.getUserTrades(symbol, { startTime: start, endTime: end, limit: 1000 });
-    if (batch.length === 1000) {
-      console.warn(`⚠ ${symbol} ${ts(start)} 起七天內成交達 1000 筆上限，可能被截斷`);
-    }
-    out.push(...batch);
+    let batch = await client.getUserTrades(symbol, { startTime: start, endTime: end, limit: PAGE });
+    batch.forEach(f => byId.set(f.id, f));
     await sleep(250); // 幣安 REST 權重限制，慢一點沒關係
+
+    // 這個窗被塞滿了，代表可能還有更多。用 id 遊標往前推到拿不滿一頁，
+    // 或推出這個時間窗為止。
+    //
+    // 迴圈上界是保險絲：分頁條件寫錯（例如 fromId 沒有往前）會變成無限
+    // 迴圈打幣安 API，那比漏資料更糟。100 頁 = 10 萬筆，遠超任何合理情況。
+    let guard = 0;
+    while (batch.length === PAGE && guard++ < 100) {
+      const lastId = Math.max(...batch.map(f => f.id));
+      batch = await client.getUserTrades(symbol, { fromId: lastId + 1, limit: PAGE });
+      await sleep(250);
+      if (batch.length === 0) break;
+
+      const inWindow = batch.filter(f => f.time <= end);
+      inWindow.forEach(f => byId.set(f.id, f));
+      // 有成交超出這個窗了，剩下的交給下一個窗的時間查詢處理。
+      if (inWindow.length < batch.length) break;
+    }
+    if (guard >= 100) {
+      console.warn(`⚠ ${symbol} ${ts(start)} 起分頁超過 100 頁，已中止——結果可能不完整`);
+    }
   }
-  return out.sort((a, b) => a.time - b.time);
+
+  return Array.from(byId.values()).sort((a, b) => a.time - b.time);
 }
 
 async function main() {
@@ -232,11 +266,21 @@ async function main() {
           break;
       }
 
+      // R 倍數要用**真實成交量與真實進場均價**算風險，不能用 DB 的 entry：
+      // DB 記的是訊號價，真實成交可能滑價，而 R 的分母錯了整個 R 就錯了。
+      // 止損價只有 DB 有（那是我們的決定，不是交易所的事實）。
+      const stopDist = t.stop_loss != null && r.entryAvg != null
+        ? Math.abs(r.entryAvg - t.stop_loss) : null;
+      const riskUsdt = stopDist != null && stopDist > 0 && r.entryQty != null
+        ? stopDist * r.entryQty : null;
+      const realR = riskUsdt != null && riskUsdt > 0 && r.realizedPnlUsdt != null
+        ? r.realizedPnlUsdt / riskUsdt : null;
+
       findings.push({
         id: t.id, symbol, direction: t.direction, verdict: r.verdict,
         closedAt: t.closed_at, dbResult: t.result, dbPnlPct: t.pnl_percent,
         realPnlPct: r.realPnlPct, realizedPnlUsdt: r.realizedPnlUsdt,
-        entryQty: r.entryQty, closedQty: r.closedQty, note,
+        entryQty: r.entryQty, closedQty: r.closedQty, riskUsdt, realR, note,
       });
     }
   }
@@ -306,6 +350,47 @@ async function main() {
       await sleep(250);
     }
   }
+
+  // ── 真實 R 分布 ──
+  //
+  // 這才是能回答「策略有沒有邊際」的數字。USDT 總額看不出好壞——它同時混了
+  // 倉位大小的變化；R 已經除掉風險，每一筆都是可比的。專案慣例（規格書 §4）
+  // 一律用 R，原始 % 在 ATR 止損下會嚴重誤導。
+  //
+  // 單樣本 t 檢定對「平均 R = 0」。t 只是把「效果量」跟「樣本雜訊」放在同一
+  // 把尺上，不是「策略好不好」的裁決——|t| < 2 代表**這批資料分不出來**，
+  // 不代表沒有邊際，也不代表有。
+  const withR = findings.filter(f => f.realR != null && Number.isFinite(f.realR));
+  const rStats = (list: Finding[]) => {
+    const xs = list.map(f => f.realR as number);
+    const n = xs.length;
+    if (n < 2) return { n, mean: NaN, sd: NaN, t: NaN, total: NaN };
+    const mean = xs.reduce((s, v) => s + v, 0) / n;
+    const sd = Math.sqrt(xs.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1));
+    return { n, mean, sd, t: sd > 0 ? mean / (sd / Math.sqrt(n)) : 0, total: mean * n };
+  };
+
+  console.log(`\n${'='.repeat(76)}`);
+  console.log('真實 R 分布（已實現損益 ÷ 真實風險）');
+  console.log('='.repeat(76));
+
+  const show2 = (label: string, s: ReturnType<typeof rStats>) => {
+    console.log(`  ${label.padEnd(34)} n=${String(s.n).padStart(3)}  `
+      + `每筆 ${fmt(s.mean, 3).padStart(7)}R  合計 ${fmt(s.total, 2).padStart(8)}R  `
+      + `sd ${fmt(s.sd, 2)}  t=${fmt(s.t, 2)}`);
+  };
+  show2('全部', rStats(withR));
+
+  // 同一個 symbol 上成交筆數遠多於單數時，FIFO 配對最不可靠。ZEC/HYPE 是
+  // 明顯的例子（800/1012 筆成交對 10/7 筆單），而 HYPE 還撞到查詢上限。
+  // 拿掉它們看結論會不會翻——會翻就代表結論是被配對誤差撐起來的。
+  const noisy = new Set(['ZECUSDT', 'HYPEUSDT']);
+  show2('排除 ZEC/HYPE（配對最不可靠）', rStats(withR.filter(f => !noisy.has(f.symbol))));
+  show2('只看判定 OK 的', rStats(withR.filter(f => f.verdict === 'OK')));
+
+  const wins = withR.filter(f => (f.realR as number) > 0).length;
+  console.log(`\n  勝率 ${fmt(wins / withR.length * 100, 1)}%（${wins}/${withR.length}）`);
+  console.log('  |t| < 2 代表這批資料分不出「平均 R ≠ 0」——不等於沒有邊際，也不等於有。');
 
   const outPath = `audit-fabricated-exits-${new Date().toISOString().slice(0, 10)}.json`;
   writeFileSync(outPath, JSON.stringify({ generatedAt: Date.now(), days: DAYS, findings }, null, 2), 'utf-8');
