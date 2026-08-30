@@ -1,8 +1,62 @@
 # 待辦清單
 
-> 最後更新：2026-08-26
+> 最後更新：2026-08-30
 > 排序依「該不該現在做」，不是依技術難度。
 > 標 🔬 的是**樣本不足**，動了也分不出是改對還是雜訊——刻意不做。
+
+## 🔴 需要人工執行（我做不到，必須是你）
+
+1. **`git push origin main`** — 累積多個 commit 未推。
+2. **EC2 `git pull` + 重啟 live-runner** — `npm run status` 顯示
+   `live-runner 心跳 從未`，代表 EC2 還在舊 code（舊版心跳只寫 Redis，
+   而 Redis 額度是空的）。它現在**能跑**（3 筆真倉的止損止盈都在），但
+   route.ts 判斷不了它死沒死——那正是 8/23 「整週沒人監控持倉」的成因。
+3. **Supabase migration**（標記髒資料用）：
+   ```sql
+   ALTER TABLE trades
+     ADD COLUMN IF NOT EXISTS audit_verdict TEXT,
+     ADD COLUMN IF NOT EXISTS audit_real_pnl_usdt DOUBLE PRECISION,
+     ADD COLUMN IF NOT EXISTS audit_real_r DOUBLE PRECISION,
+     ADD COLUMN IF NOT EXISTS audit_at BIGINT;
+   ```
+   跑完執行 `npx tsx scripts/apply-audit-marks.ts <報告.json> --apply`。
+4. **Vercel Fluid CPU 檢查**（見下方 8/30 那節）。
+
+## 🔴 真錢之前必須補：完全沒有絕對金額的損失上限
+
+```
+grep -riE "MAX_DAILY_LOSS|DAILY_LOSS_USDT" src/ scripts/   → 無結果
+```
+
+現有上限全部是 R 倍數與百分比。**R 的分母（止損距離）本身會浮動**，所以
+R 上限不等於金額上限。真錢需要一道「今天虧超過 X USDT 就全部停手」的硬閘。
+
+相關：`DEFAULT_MAX_DRAWDOWN_R = 12`（`route.ts:1840`）是為了脫困臨時從 8
+放寬的暫定值。「因為卡住所以調鬆」是最糟的訂法，要回到 8 或用資料訂。
+
+`live-runner.ts:80` 的 `--live` 硬擋是刻意保留的安全閥，**這兩項完成之前
+不要拆**。
+
+## 2026-08-30：真實成交對帳 → 第一組可信的績效數字
+
+完整證據見 **`docs/ANALYSIS-2026-08-30-真實成交對帳.md`**（調參前先讀）。
+
+拿幣安真實成交對帳 73 筆真倉，第一次得到不受 DB 模擬污染的績效：
+
+```
+真實績效  n=69  每筆 -0.107R  合計 -7.36R  t=-0.69   勝率 27.5%
+DB 模擬偏誤      DB 低估 67.6%（46/68）    z=2.91  ← 顯著
+```
+
+- **策略有無邊際仍然回答不了**（t=−0.69），跟 8/25 三層模擬結論一致，
+  但這次是真實成交而非模擬。
+- **唯一顯著的發現是量測系統本身有偏誤**：DB 模擬系統性地把結果記得比實際
+  差。而另外 76 筆純模擬單永遠無法對帳，卻共用同一套推演邏輯——**所有建立
+  在模擬資料上的歷史統計都偏悲觀**。
+- 檢定力：sd=1.29，要偵測 +0.1R/筆 需要 n≈665（約一年）。**「9 月底驗證
+  策略可獲利」在數學上不可能。**
+- ⚠ 報告裡「只看判定 OK 的 t=−2.75」是**選擇偏誤**，不可引用。理由見該
+  文件第四節。
 
 ## 🔴 交接判斷只靠 Redis——兩邊同時壞掉時沒有任何東西在監控持倉
 
