@@ -48,10 +48,15 @@
  *
  *   npx tsx scripts/audit-fabricated-exits.ts [天數]     # 預設 90 天
  *
- * 環境變數（跟 live-runner 同一組，設在 shell 裡，不要貼進 chat）：
+ * 環境變數（跟 live-runner 同一組）。寫進專案根目錄的 `.env.local`
+ * （已在 .gitignore 裡）或設在 shell 裡皆可，shell 優先：
  *   NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
  *   TRADING_USER_ID
  *   BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET
+ *
+ * ⚠ 這些值不要貼進任何聊天視窗、issue 或截圖。service role key 是繞過所有
+ *   RLS 的資料庫管理員權限，幣安 secret 有合約交易權限。載入器只印變數名
+ *   不印值，這支腳本的錯誤處理也只吐回應內容不吐請求標頭。
  *
  * ## 已知限制（報告裡也會印出來）
  *
@@ -65,6 +70,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { BinanceFuturesClient, loadBinanceConfigFromEnv, UserTrade } from '../src/engine/binanceClient';
 import { auditTradeExit, type AuditVerdict } from '../src/lib/exitAudit';
+import { loadEnvFile, reportEnvLoad } from './loadEnvFile';
 import { writeFileSync } from 'fs';
 
 const DAYS = Number(process.argv[2] ?? 90);
@@ -140,6 +146,8 @@ async function fetchAllUserTrades(
 }
 
 async function main() {
+  reportEnvLoad(loadEnvFile());
+
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const userId = process.env.TRADING_USER_ID;
