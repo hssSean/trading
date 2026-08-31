@@ -89,9 +89,38 @@ async function main() {
     }
   }
 
+  // 「為什麼沒訊號」最常見的答案是回撤停機，而它是從 Supabase 已平倉交易算的
+  // ——不需要 Redis，也不需要打 /api/analyze（那會真的跑一輪完整掃描，在 CPU
+  // 額度吃緊時不該為了診斷去燒）。用線上同一個 calcDrawdown 與同一套口徑
+  // （R 倍數 × tier 權重），算出來的數字才跟關卡實際看到的一致。
+  const { calcDrawdown } = await import('../src/lib/monitorMath');
+  const limit = parseFloat(process.env.MAX_DRAWDOWN_R ?? '12');
+  let q = db.from('trades').select('closed_at, pnl_percent, entry, stop_loss, tier')
+    .eq('user_id', uid).not('closed_at', 'is', null).not('result', 'is', null);
+  if (ack != null && Number(ack) > 0) q = q.gt('closed_at', Number(ack));
+  const { data: eq } = await q.order('closed_at', { ascending: true });
+
+  const points = (eq ?? []).flatMap(t => {
+    if (t.pnl_percent == null || !t.entry || !t.stop_loss) return [];
+    const stopPct = Math.abs(t.entry - t.stop_loss) / t.entry * 100;
+    if (stopPct <= 0) return [];
+    return [{ closedAt: t.closed_at as number, accountR: (t.pnl_percent / stopPct) * (t.tier === 'B' ? 0.5 : 1.0) }];
+  });
+
+  if (points.length > 0) {
+    const d = calcDrawdown(points);
+    const halted = d.drawdown >= limit;
+    console.log(`\n回撤（確認時間之後 ${points.length} 筆）`);
+    console.log(`  高點 ${d.peak.toFixed(2)}R → 目前 ${d.current.toFixed(2)}R，回撤 ${d.drawdown.toFixed(2)}R / 上限 ${limit}R`);
+    if (halted) {
+      console.log(`  ⚠ 已達上限 → **回撤停機中，不會發任何新推薦單**`);
+      console.log(`     設定頁「手動觸發分析」下方有解除按鈕。`);
+    }
+  }
+
   if (lastOpened != null && Date.now() - lastOpened > 12 * H) {
-    console.log(`\n⚠ 超過 12 小時沒有新訊號。可能原因：回撤停機、熔斷、或掃描根本沒在跑。`);
-    console.log(`  設定頁按「手動觸發分析」會直接顯示是哪一個。`);
+    console.log(`\n⚠ 超過 12 小時沒有新訊號。上面的回撤沒超標的話，`);
+    console.log(`  就是熔斷／事件窗口／單純沒有合格訊號——設定頁「手動觸發分析」會直接說是哪一個。`);
   }
   console.log('');
 }

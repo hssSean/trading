@@ -34,7 +34,28 @@ R 上限不等於金額上限。真錢需要一道「今天虧超過 X USDT 就�
 相關：`DEFAULT_MAX_DRAWDOWN_R = 12`（`route.ts:1840`）是為了脫困臨時從 8
 放寬的暫定值。「因為卡住所以調鬆」是最糟的訂法，要回到 8 或用資料訂。
 
-`live-runner.ts:80` 的 `--live` 硬擋是刻意保留的安全閥，**這兩項完成之前
+### webhook secret 是 `abc123`
+
+cron 打的網址是 `…/api/analyze?secret=abc123`。伺服器端正式站是 fail-closed
+（`checkAuth`，`route.ts:269`），所以 Vercel 上的 `WEBHOOK_SECRET` 實際值就是
+`abc123`——自動掃描器字典裡的第一批。
+
+**testnet 期間財務損失是 0，所以不急；但真錢之前一定要換**，因為拿到 secret
+能做的不只是燒 CPU：`DELETE /api/analyze` 只要 webhook secret 就過
+（`route.ts:3433`），不帶 symbol 會清掉 `tlock:*`、`circuit_breaker*`、
+`btc_pause:*`、`loss_cd:*`——**熔斷、止損後冷卻、BTC 暫停、訊號鎖全部解除**；
+加 `?scope=drawdown` 還能解除回撤停機。等於把所有風控的開關放在一個猜得到的
+網址後面。
+
+換的時候一次做完兩件事：換成隨機長字串，**並改用 header**。`checkAuth` 是
+header 優先（`x-webhook-secret` ?? query param），cron-job.org 的「進階」分頁
+可設自訂 header——secret 現在在 query string 裡，會留在 cron-job.org 的執行
+紀錄與任何中間節點。
+
+順序：先設 Vercel 環境變數 → 等重新部署 → 再改 cron。空窗期 cron 收到 401，
+後果只是少跑幾輪掃描（系統本來就有約一半的呼叫在撞鎖跳過），無資料損失。
+
+`live-runner.ts:80` 的 `--live` 硬擋是刻意保留的安全閥，**上述三項完成之前
 不要拆**。
 
 ## 2026-08-30：真實成交對帳 → 第一組可信的績效數字
