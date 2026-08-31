@@ -158,6 +158,16 @@ export interface UserTrade {
   buyer: boolean;
 }
 
+// GET /fapi/v1/income 的一筆流水。`income` 是字串，正數入帳、負數出帳。
+export interface IncomeRecord {
+  symbol: string;
+  incomeType: string;   // REALIZED_PNL / COMMISSION / FUNDING_FEE / TRANSFER / …
+  income: string;
+  asset: string;
+  time: number;
+  tranId: number;
+}
+
 export interface OpenOrder {
   symbol: string;
   orderId: number;
@@ -247,6 +257,21 @@ export class BinanceFuturesClient {
     params: { orderId?: number; startTime?: number; endTime?: number; fromId?: number; limit?: number } = {},
   ): Promise<UserTrade[]> {
     return this.signedRequest('GET', '/v1/userTrades', { symbol, ...params });
+  }
+
+  // GET /fapi/v1/income —— 帳戶層級的資金流水（已實現損益／手續費／資金費率）。
+  //
+  // 為什麼日虧損上限要用這個而不是我們自己的 trades 表：2026-08-30 的對帳
+  // 證明 DB 記的損益相對真實成交有統計顯著的系統性偏誤（低估 67.6%，
+  // 符號檢定 z=2.91，見 docs/ANALYSIS-2026-08-30-真實成交對帳.md）。
+  // 拿一個已知會說謊的來源當硬性風控的依據沒有意義——這是交易所自己的帳。
+  //
+  // 跟 userTrades 的差別：那個要逐 symbol 查，這個是帳戶級一次拿完，而且
+  // 已經含手續費與資金費率——那些同樣會把餘額吃掉，日虧損上限不能漏算。
+  async getIncome(params: {
+    symbol?: string; incomeType?: string; startTime?: number; endTime?: number; limit?: number;
+  } = {}): Promise<IncomeRecord[]> {
+    return this.signedRequest('GET', '/v1/income', params);
   }
 
   // 條件單專用查詢——見 AlgoOrder 註解，2025-12 遷移後止損/止盈單只會出現

@@ -35,6 +35,47 @@ function risk(overrides: Partial<RiskCheckInput> = {}): RiskCheckInput {
   };
 }
 
+// 日虧損上限（src/lib/dailyLossCap.ts）——唯一一道用「錢」而不是 R 衡量的
+// 關卡，也是唯一一道 fail-closed 的。這裡測的是它有沒有真的接在下單路徑上；
+// 門檻邏輯本身的測試在 tests/dailyLossCap.test.ts。
+describe('decideTradeAction — 日虧損上限', () => {
+  it('沒設上限時不影響既有行為', () => {
+    expect(decideTradeAction(tradeRow(), snapshot(), risk()).kind).toBe('place_entry');
+  });
+
+  it('今日虧損達上限 → skip_entry', () => {
+    const a = decideTradeAction(tradeRow(), snapshot(),
+      risk({ dailyRealizedUsdt: -120, dailyLossCapUsdt: 80 }));
+    expect(a.kind).toBe('skip_entry');
+    if (a.kind !== 'skip_entry') return;
+    expect(a.reason).toContain('已達上限');
+  });
+
+  it('未達上限照常下單', () => {
+    expect(decideTradeAction(tradeRow(), snapshot(),
+      risk({ dailyRealizedUsdt: -20, dailyLossCapUsdt: 80 })).kind).toBe('place_entry');
+  });
+
+  // 設了上限卻查不到今日損益就擋——跟專案其餘關卡（查詢失敗放行）相反，
+  // 是刻意的：fail-open 的下檔是無上限虧損。
+  it('設了上限但查不到損益 → 擋（fail-closed）', () => {
+    const a = decideTradeAction(tradeRow(), snapshot(),
+      risk({ dailyRealizedUsdt: null, dailyLossCapUsdt: 80 }));
+    expect(a.kind).toBe('skip_entry');
+  });
+
+  // 這道關卡排在全局風險上限之前——它一旦觸發，後面的計算都沒有意義。
+  it('同時超過日虧損與全局風險時，回報的是日虧損', () => {
+    const a = decideTradeAction(tradeRow(), snapshot(), risk({
+      totalOpenRiskPct: 4.5, thisTradeRiskPct: 1,
+      dailyRealizedUsdt: -120, dailyLossCapUsdt: 80,
+    }));
+    expect(a.kind).toBe('skip_entry');
+    if (a.kind !== 'skip_entry') return;
+    expect(a.reason).toContain('已達上限');
+  });
+});
+
 describe('decideTradeAction — no entry order placed yet', () => {
   it('places the entry order when risk and liquidation checks pass', () => {
     const a = decideTradeAction(tradeRow(), snapshot(), risk());

@@ -16,6 +16,7 @@ import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
 import { decideTimeStop, tfBarMinutes, TimeStopCloseReason, TimeStopTimeframe } from './timeStop';
 import { MAX_TOTAL_RISK_PCT } from '@/lib/position';
 import { CloseReason } from '@/lib/monitorMath';
+import { evaluateDailyLossCap } from '@/lib/dailyLossCap';
 
 // 2026-08-11：實測撞到——SOLUSDT 掛單等了 15 小時 28 分還沒成交，Redis
 // 的 tlock 因此正確地一直卡著（避免同個 symbol 被重複追蹤），但表面上
@@ -167,6 +168,15 @@ export interface RiskCheckInput {
   totalOpenRiskPct: number;  // checkTotalOpenRisk 目前的加總（不含這筆）
   thisTradeRiskPct: number;  // 這筆要加的 suggested_risk_pct
   liquidation: Pick<LiquidationPriceInput, 'isolatedMarginUSDT' | 'maintMarginRatio' | 'maintAmount'>;
+  // 日虧損上限（見 src/lib/dailyLossCap.ts）。兩個都是選填——沒帶就是不啟用
+  // 這道關卡，既有呼叫端與測試不受影響。
+  //
+  // `dailyRealizedUsdt` 必須來自**交易所**的 income 流水，不能用我們的 trades
+  // 表：2026-08-30 對帳證明 DB 記的損益有統計顯著的系統性偏誤（z=2.91）。
+  // 帶 `null` 表示查不到——**設了上限卻查不到會擋單（fail-closed）**，那是
+  // 刻意的，理由見 dailyLossCap.ts 檔頭。
+  dailyRealizedUsdt?: number | null;
+  dailyLossCapUsdt?: number | null;
 }
 
 // 2026-08-20：全局風險額度加總——**只算真的送到交易所的單**。
@@ -250,6 +260,17 @@ export function decideTradeAction(
 ): TradeAction {
   // 1. 還沒真的在交易所下過進場單。
   if (trade.exchangeEntryOrderId === null) {
+    // 日虧損上限最先擋——它是用「錢」衡量的最後一道防線，其餘上限都是 R 或
+    // 百分比，而 R 的分母（止損距離）會隨波動浮動，R 上限不等於金額上限。
+    // 放在最前面是因為它一旦觸發，後面所有計算都沒有意義。
+    const dailyCap = evaluateDailyLossCap({
+      realizedUsdt: risk.dailyRealizedUsdt ?? null,
+      capUsdt: risk.dailyLossCapUsdt,
+    });
+    if (dailyCap.blocked) {
+      return { kind: 'skip_entry', reason: dailyCap.reason ?? '日虧損上限' };
+    }
+
     const wouldBeTotal = risk.totalOpenRiskPct + risk.thisTradeRiskPct;
     if (wouldBeTotal > MAX_TOTAL_RISK_PCT) {
       return {

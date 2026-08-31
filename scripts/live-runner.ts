@@ -72,6 +72,7 @@ import { TimeStopCloseReason } from '../src/engine/timeStop';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
 import { calcSimpleAtr, TP1_PARTIAL_FRACTION, updateMfeMae } from '../src/lib/monitorMath';
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
+import { readDailyLossCapFromEnv, sumTradingIncome, utcDayStart } from '../src/lib/dailyLossCap';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
 
@@ -341,6 +342,7 @@ async function buildRiskInput(
   binance: BinanceFuturesClient,
   row: DbTradeRow,
   totalOpenRiskPct: number,
+  daily: { realizedUsdt: number | null; capUsdt: number | null } = { realizedUsdt: null, capUsdt: null },
 ): Promise<(RiskCheckInput & { leverage: number }) | null> {
   const balances = await binance.getBalance();
   const usdt = balances.find(b => b.asset === 'USDT');
@@ -376,6 +378,8 @@ async function buildRiskInput(
       maintMarginRatio: bracket.maintMarginRatio,
       maintAmount: bracket.cum,
     },
+    dailyRealizedUsdt: daily.realizedUsdt,
+    dailyLossCapUsdt: daily.capUsdt,
     leverage,
   };
 }
@@ -717,6 +721,28 @@ async function runCycle(
     suggestedRiskPct: t.suggested_risk_pct,
   })));
 
+  // 日虧損上限（MAX_DAILY_LOSS_USDT）。每輪查一次帳戶級的 income 流水，所有
+  // trade 共用——不是每筆單各查一次。
+  //
+  // 用交易所的帳而不是我們的 trades 表：2026-08-30 對帳證明 DB 記的損益有
+  // 統計顯著的系統性偏誤（z=2.91）。詳見 src/lib/dailyLossCap.ts 檔頭。
+  const dailyLossCapUsdt = readDailyLossCapFromEnv();
+  let dailyRealizedUsdt: number | null = null;
+  if (dailyLossCapUsdt !== null) {
+    const dayStart = utcDayStart(Date.now());
+    try {
+      const income = await binance.getIncome({ startTime: dayStart, limit: 1000 });
+      dailyRealizedUsdt = sumTradingIncome(income, dayStart);
+      console.log(`[${nowStr()}] 今日已實現損益 ${dailyRealizedUsdt.toFixed(2)} USDT`
+        + `（上限 ${dailyLossCapUsdt}）`);
+    } catch (e) {
+      // 刻意留 null —— evaluateDailyLossCap 會 fail-closed 擋掉新倉。這道關卡
+      // 跟其餘關卡相反，理由見 dailyLossCap.ts：fail-open 的下檔是無上限虧損。
+      console.error(`[${nowStr()}] ⚠ 查不到今日 income，日虧損上限無法驗證，`
+        + `這輪不開新倉：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   const client: TradeExecutorClient = {
     placeOrder: (params) => binance.placeOrder(params),
     cancelOrder: (symbol, orderId, isAlgoOrder) => binance.cancelOrder(symbol, orderId, isAlgoOrder),
@@ -822,7 +848,8 @@ async function runCycle(
         // 這個分支只在「還沒送過進場單」時走，而 calcTotalOpenRisk 已經把這種
         // 單排除掉了——這筆自己本來就不在 totalOpenRiskPct 裡，不能再減一次
         // （減了會少算，把上限放寬）。直接傳總和＝「其他已掛單/持倉的風險」。
-        const built = await buildRiskInput(binance, row, totalOpenRiskPct);
+        const built = await buildRiskInput(binance, row, totalOpenRiskPct,
+          { realizedUsdt: dailyRealizedUsdt, capUsdt: dailyLossCapUsdt });
         if (!built) continue; // 抓不到分級資料，這輪跳過，見 buildRiskInput 說明
         risk = built;
       } else {
@@ -1089,6 +1116,17 @@ async function main() {
   const userId = process.env.TRADING_USER_ID;
 
   console.log(`[${nowStr()}] live-runner 啟動（testnet，${CYCLE_MS / 1000}秒/輪，會真的下單）`);
+
+  // 沒設就要講出來。這是唯一一道用「錢」衡量的上限，其餘（MAX_TOTAL_RISK_PCT、
+  // MAX_DRAWDOWN_R、熔斷）都是 R 或百分比，而 R 的分母會隨波動浮動——沒有這道
+  // 就沒有任何以金額為單位的下檔保護。沉默地不啟用，會讓人以為有。
+  const capAtBoot = readDailyLossCapFromEnv();
+  if (capAtBoot === null) {
+    console.warn(`[${nowStr()}] ⚠ MAX_DAILY_LOSS_USDT 未設定——沒有任何「絕對金額」的日虧損上限。`
+      + ` 現有上限都是 R 倍數或百分比，而 R 的分母（止損距離）會隨波動浮動。`);
+  } else {
+    console.log(`[${nowStr()}] 日虧損上限 ${capAtBoot} USDT（達標後暫停開新倉至 UTC 隔日，既有部位不動）`);
+  }
 
   let stopped = false;
   const stop = () => {
