@@ -43,9 +43,30 @@ npm test             # vitest 全套（= npx vitest run）
 npx next build       # production build（push 前的最後檢查）
 npm run live-runner  # 真倉常駐腳本（testnet，會真的下單）
 npm run backtest     # 回測
-npm run testnet-reconcile   # testnet 對帳
+npm run testnet-reconcile   # testnet 交易所介面煙霧測試（會真的下單）
 curl -s "http://localhost:3000/api/analyze"   # 本機無 WEBHOOK_SECRET 時可直接跑真實掃描
 ```
+
+### 診斷工具（2026-08/09 新增，全部唯讀）
+
+**回答「現在到底怎麼了」之前先跑這些，不要靠猜或開一堆網頁。** 這個專案發生過
+多次「靜默停擺一週才發現」（live-runner 整週沒監控持倉、DB 模擬捏造出場把系統
+自己停掉），成因都是狀態分散在 Vercel／Supabase／Upstash／幣安四個地方。
+
+```bash
+npm run status          # 系統活著嗎：最後訊號時間、持倉、保護單、回撤、心跳
+npm run audit-exits     # 拿幣安真實成交對帳 DB 的損益紀錄
+npm run funnel-verdict  # 各風控濾網到底在保護還是在害（含悲觀覆蓋率把關）
+npx tsx scripts/drawdown-threshold.ts   # 用 bootstrap 訂回撤門檻
+npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料，預設試跑
+```
+
+金鑰放 `.env.local`，或用 `ENV_FILE=env.txt` 指定別的檔案。載入器只印變數名
+不印值（`scripts/loadEnvFile.ts`）。
+
+**`npm run status` 是排查任何「為什麼沒訊號／為什麼沒平倉」的第一步**——它會
+直接算出回撤、列出每筆真倉的止損止盈單，並分辨「TP1 已觸發」與「TP1 單根本
+沒掛上」。後者是 2026-08-23 那次「打到 TP1 卻沒出 50%」的形狀。
 
 ## 部署流程
 
@@ -63,6 +84,8 @@ curl -s "http://localhost:3000/api/analyze"   # 本機無 WEBHOOK_SECRET 時可�
 | `src/store/useStore.ts` | Zustand + localStorage persist + Supabase 同步 |
 | `scripts/live-runner.ts` | 真倉常駐迴圈（testnet）。檔頭註解是這支「現在實際做什麼」最準的來源 |
 | `src/engine/tradeBridge.ts` | 真倉決策純函數（該下單／該撤單／該關倉），live-runner 的大腦 |
+| `src/lib/dailyLossCap.ts` | 日虧損上限。**唯一用「錢」而不是 R 衡量、也是唯一 fail-closed 的關卡**，兩個性質都跟專案其餘部分相反，改之前先讀檔頭 |
+| `src/lib/exitAudit.ts` | 對帳配對（幣安成交 ↔ 我們的 trade），判語分硬/軟證據兩級 |
 | `docs/TODO.md` | 待辦與優先級。已完成的搬到 `docs/TODO-archive.md` |
 | `docs/ANALYSIS-*.md` | 歷次策略體檢；**調參前先讀最新那份**，很多「看起來該改」的東西已經驗證過無效 |
 | `加密貨幣合約推薦單系統-策略規格書-v2.1.md`（使用者 Downloads） | 策略規格書；調參前先讀 |
@@ -70,6 +93,8 @@ curl -s "http://localhost:3000/api/analyze"   # 本機無 WEBHOOK_SECRET 時可�
 ## 專案慣例
 
 - **調參紀律（規格書 §4）**：一次只動一個濾網，先看拒絕漏斗與影子模擬的淨 R 數據再決定放寬或收緊；淨 R ≤ 0 的關卡代表擋得對，不要動。
+  - **看漏斗淨 R 之前先看悲觀覆蓋率**（`npm run funnel-verdict` 會自動把關）。`29b2499` 之前結案的影子單永遠沒有悲觀值，`netRPess` 是 0，而 0 會讓「兩端同號」的判斷失效——樂觀 +24 配悲觀 0 看起來像跨零，實際上只是沒算。2026-09-01 實測八道關卡只有 `circuit_breaker` 覆蓋率達標。
+  - **目前狀態：不要調參。** 真實成交 n=78 每筆 −0.081R、t=−0.55，跟三層模擬結論一致（測不出邊際）。檢定力 sd=1.31，偵測 +0.1R/筆 需 n≈680。詳見 `docs/ANALYSIS-2026-08-30-真實成交對帳.md`。
 - **損益一律用 R 倍數**（損益% ÷ 止損距離%）與帳戶實際損益衡量，不用原始價格 %——ATR 止損的原始 % 會嚴重誤導（熔斷曾因此誤鎖整天）。
 - **Supabase 缺欄位**：insert 對 `42703`/`PGRST204` 有兩段式 fallback；新增欄位時要同步更新 fallback 剝除清單並提醒使用者跑 `ALTER TABLE`。
 - **Redis 指令數要省**：批次讀寫（hash/hgetall、單次 lpush 多值），避免迴圈內逐鍵操作；Upstash 免費額度有限。
