@@ -42,7 +42,7 @@ async function main() {
     .eq('id', uid).single();
 
   const { data: recent } = await db.from('trades')
-    .select('symbol, direction, result, opened_at, closed_at, exchange_entry_order_id')
+    .select('symbol, direction, result, status, opened_at, closed_at, exchange_entry_order_id')
     .eq('user_id', uid).order('opened_at', { ascending: false }).limit(200);
   const rows = recent ?? [];
 
@@ -78,14 +78,43 @@ async function main() {
     // STOP_MARKET / TAKE_PROFIT_MARKET 都活在 algo 端點）。而且 account 級
     // 不帶 symbol 才查得到，帶了會是空——見 binanceClient.ts 的實測註解。
     const algos = await client.getOpenAlgoOrders();
+    // decideTp1OrderPlacement 有一條 skip：positionQty × 0.5 用 stepSize 取整
+    // 後為 0 就跳過 TP1 單。小部位配上粗 stepSize（例如整數）會中這條，而且
+    // 是靜默的。把部位量與 stepSize 一起印出來，才分得出「沒掛上」是這個原因
+    // 還是別的。
+    const info = await client.getExchangeInfo();
+    const steps = new Map<string, number>();
+    for (const s of info.symbols as Array<{ symbol: string; filters: Array<{ filterType: string; stepSize?: string }> }>) {
+      const lot = s.filters?.find(f => f.filterType === 'LOT_SIZE');
+      if (lot?.stepSize) steps.set(s.symbol, parseFloat(lot.stepSize));
+    }
+
     for (const o of liveOpen) {
       const mine = algos.filter(a => a.symbol === o.symbol);
       const sl = mine.filter(a => a.orderType.includes('STOP'));
       const tp = mine.filter(a => a.orderType.includes('TAKE_PROFIT'));
-      const ok = sl.length > 0;
-      console.log(`  ${ok ? '✅' : '⚠'} ${o.symbol.replace('USDT', '').padEnd(6)} `
-        + `止損 ${sl.length} 張 / 止盈 ${tp.length} 張`
-        + (ok ? '' : '  ← 有倉位但沒有止損單，這筆的下檔沒有任何保護'));
+      // 「有倉沒止盈」有兩種完全不同的意思，不講清楚會誤判：
+      //   status='tp1_hit' → TP1 已經觸發、50% 已平，條件單被消耗掉，正常
+      //   status 還是 active → TP1 單根本沒掛上，價格穿過 TP1 不會有動作
+      // 後者正是 2026-08-23 Redis 空窗期那個「打到 TP1 卻沒出 50%」的形狀。
+      const tp1Fired = o.status === 'tp1_hit';
+      const stopOk = sl.length > 0;
+      const tpOk = tp.length > 0 || tp1Fired;
+      const flag = !stopOk ? '⚠' : !tpOk ? '⚠' : '✅';
+      let note = '';
+      if (!stopOk) note = '  ← 有倉位但沒有止損單，下檔沒有任何保護';
+      else if (tp1Fired && tp.length === 0) note = '  （TP1 已觸發、50% 已平，條件單被消耗掉是正常的）';
+      else if (!tpOk) {
+        const step = steps.get(o.symbol);
+        const pos = await client.getPositionRisk(o.symbol);
+        const qty = Math.abs(parseFloat(pos.find(p => p.symbol === o.symbol)?.positionAmt ?? '0'));
+        const halfFloored = step ? Math.floor((qty * 0.5) / step) * step : null;
+        note = `  ← TP1 條件單沒掛上（status=${o.status ?? '?'}），價格穿過 TP1 不會自動平 50%`
+          + `\n       部位 ${qty} / stepSize ${step ?? '?'} → 一半取整後 ${halfFloored ?? '?'}`
+          + (halfFloored === 0 ? '　**這就是原因：取整後為 0 所以被跳過**' : '');
+      }
+      console.log(`  ${flag} ${o.symbol.replace('USDT', '').padEnd(6)} `
+        + `止損 ${sl.length} 張 / 止盈 ${tp.length} 張${note}`);
     }
   }
 
