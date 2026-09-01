@@ -222,12 +222,15 @@ async function main() {
   console.log(`涉及 ${symbols.length} 個 symbol，開始撈幣安成交紀錄…`);
 
   const findings: Finding[] = [];
+  /** 每個 symbol 的「成交筆數 ÷ 單數」。密度越高，FIFO 配對越不可靠。 */
+  const fillDensity = new Map<string, number>();
 
   for (const symbol of symbols) {
     const rows = real.filter(t => t.symbol === symbol)
       .sort((a, b) => (a.opened_at ?? 0) - (b.opened_at ?? 0));
     const earliest = Math.min(...rows.map(t => t.opened_at ?? t.filled_at ?? since));
     const fills = await fetchAllUserTrades(client, symbol, earliest - 3600_000, Date.now());
+    fillDensity.set(symbol, rows.length > 0 ? fills.length / rows.length : 0);
     console.log(`  ${symbol}: ${rows.length} 筆單 / ${fills.length} 筆成交`);
 
     // FIFO 配對：已被前面的單消耗掉的成交不再重複使用。幣安不記我們的
@@ -349,6 +352,48 @@ async function main() {
         console.log(`  ${sym}：查詢失敗 ${e instanceof Error ? e.message : String(e)}`);
       }
       await sleep(250);
+    }
+  }
+
+  // ── 軟證據分類：realR 到底還能不能信 ──
+  //
+  // 硬證據（NO_CLOSE_FILL / SIGN_FLIP）已經確定 DB 是錯的。軟證據
+  // （AMOUNT_MISMATCH / PARTIAL_CLOSE）比較麻煩：DB 跟現實對不上，但**對不上
+  // 不代表 realR 是錯的**——realR 來自交易所成交紀錄，DB 錯不影響它。
+  //
+  // 真正會讓 realR 失真的只有一件事：**FIFO 把別筆單的平倉成交配給了這筆**。
+  // 幣安不記我們的 trade_id，同一個 symbol 上成交筆數遠多於單數時就會發生。
+  // 所以分類的關鍵不是「差多少」，是「這個 symbol 的成交密度高不高」。
+  //
+  // 另外把 -0.05% 那個簽名單獨挑出來——那是保本價扣掉 STOP_EXIT_SLIPPAGE_PCT，
+  // 等於捏造出場那個 bug 的殘留，只是這幾筆的真實結果後來是虧的所以沒被判成
+  // SIGN_FLIP。它們的 realR 是可信的（DB 錯、交易所對）。
+  // NO_ENTRY_FILL 不在這裡分類——那些連 realR 都沒有，沒有東西可判。
+  const withRealR = findings.filter(f =>
+    f.verdict === 'AMOUNT_MISMATCH' || f.verdict === 'PARTIAL_CLOSE');
+  if (withRealR.length > 0) {
+    const FAKE_BE = 0.02;            // -0.05% 的容差
+    const DENSE = 20;                // 每筆單超過 20 筆成交就當高密度
+    const cat = { fabricated: [] as Finding[], fifo: [] as Finding[], normal: [] as Finding[] };
+    for (const f of withRealR) {
+      const dense = (fillDensity.get(f.symbol) ?? 0) >= DENSE;
+      if (f.dbPnlPct != null && Math.abs(f.dbPnlPct + 0.05) < FAKE_BE) cat.fabricated.push(f);
+      else if (dense) cat.fifo.push(f);
+      else cat.normal.push(f);
+    }
+    const sumR = (l: Finding[]) => l.reduce((s, f) => s + (f.realR ?? 0), 0);
+
+    console.log(`\n${'='.repeat(76)}`);
+    console.log(`軟證據分類（${withRealR.length} 筆）—— 判斷 realR 還能不能用`);
+    console.log('='.repeat(76));
+    console.log(`  捏造保本出場的殘留（DB 記 -0.05%）  ${String(cat.fabricated.length).padStart(3)} 筆  `
+      + `合計 ${fmt(sumR(cat.fabricated), 2)}R  → realR 可信（錯的是 DB）`);
+    console.log(`  高成交密度，FIFO 可能誤配            ${String(cat.fifo.length).padStart(3)} 筆  `
+      + `合計 ${fmt(sumR(cat.fifo), 2)}R  → realR 存疑`);
+    console.log(`  一般滑價/部分成交誤差                ${String(cat.normal.length).padStart(3)} 筆  `
+      + `合計 ${fmt(sumR(cat.normal), 2)}R  → realR 可信`);
+    if (cat.fifo.length > 0) {
+      console.log(`  存疑的 symbol：${Array.from(new Set(cat.fifo.map(f => f.symbol))).join(', ')}`);
     }
   }
 
