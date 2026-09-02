@@ -92,6 +92,8 @@ interface TradeRow {
   filled_at: number | null;
   closed_at: number | null;
   exchange_entry_order_id: string | number | null;
+  /** TP1 條件單的 algoId。有值＝真的掛上過。 */
+  exchange_tp1_algo_id?: string | number | null;
 }
 
 // 判語與配對邏輯都在 src/lib/exitAudit.ts（有單元測試）。這裡只負責查詢與呈現。
@@ -195,7 +197,7 @@ async function main() {
   console.log(`查詢 ${DAYS} 天內已結束的交易（${ts(since)} 起）…`);
   const { data, error } = await db
     .from('trades')
-    .select('id, symbol, direction, entry, stop_loss, exit_price, pnl_percent, result, close_reason, opened_at, filled_at, closed_at, exchange_entry_order_id')
+    .select('id, symbol, direction, entry, stop_loss, exit_price, pnl_percent, result, close_reason, opened_at, filled_at, closed_at, exchange_entry_order_id, exchange_tp1_algo_id')
     .eq('user_id', userId)
     .not('result', 'is', null)
     .gte('closed_at', since)
@@ -224,6 +226,8 @@ async function main() {
   const findings: Finding[] = [];
   /** 每個 symbol 的「成交筆數 ÷ 單數」。密度越高，FIFO 配對越不可靠。 */
   const fillDensity = new Map<string, number>();
+  /** trade_id → TP1 條件單有沒有真的掛上。用來衡量「執行忠實度」。 */
+  const tp1Placed = new Map<string, boolean | null>();
 
   for (const symbol of symbols) {
     const rows = real.filter(t => t.symbol === symbol)
@@ -280,6 +284,7 @@ async function main() {
       const realR = riskUsdt != null && riskUsdt > 0 && r.realizedPnlUsdt != null
         ? r.realizedPnlUsdt / riskUsdt : null;
 
+      tp1Placed.set(t.id, t.exchange_tp1_algo_id != null);
       findings.push({
         id: t.id, symbol, direction: t.direction, verdict: r.verdict,
         closedAt: t.closed_at, dbResult: t.result, dbPnlPct: t.pnl_percent,
@@ -468,6 +473,38 @@ async function main() {
     console.log(`  偏誤為正代表 DB 模擬系統性地把結果記得比實際差；`);
     console.log(`  同一套推演也用在另外 76 筆無法對帳的純模擬單上。`);
   }
+
+  // ── 執行忠實度：這些單真的照策略跑過嗎 ──
+  //
+  // 這一段回答的問題跟上面完全不同。上面問「策略賺不賺」，這裡問**「我們到底
+  // 有沒有在測策略」**。
+  //
+  // 策略設計是 TP1 平 50%、剩下交給移動止損。如果 TP1 條件單根本沒掛上，
+  // 那筆單就不是「策略的表現」——它是「策略的殘缺版本」的表現：吃到全部的
+  // 下檔風險，卻拿不到設計中的部分獲利了結。
+  //
+  // 2026-09-01 實測有兩種讓單子偏離設計的機制：TP1 單沒掛上（UNI 實測撞到），
+  // 以及部分成交被誤標成「從未開倉」變成沒人管的孤兒（ARB 實測撞到，已修）。
+  // 兩者都會讓量到的 R 系統性偏低，而且跟策略好壞無關。
+  const tp1Groups = { placed: [] as Finding[], notPlaced: [] as Finding[], unknown: [] as Finding[] };
+  for (const f of withR) {
+    const v = tp1Placed.get(f.id);
+    if (v === true) tp1Groups.placed.push(f);
+    else if (v === false) tp1Groups.notPlaced.push(f);
+    else tp1Groups.unknown.push(f);
+  }
+  const grpStat = (l: Finding[]) => {
+    const s = rStats(l);
+    return `n=${String(s.n).padStart(3)}  每筆 ${fmt(s.mean, 3).padStart(7)}R  合計 ${fmt(s.total, 2).padStart(8)}R`;
+  };
+  console.log(`\n${'='.repeat(76)}`);
+  console.log('執行忠實度：TP1 條件單有沒有真的掛上');
+  console.log('='.repeat(76));
+  console.log(`  有掛上      ${grpStat(tp1Groups.placed)}`);
+  console.log(`  沒掛上      ${grpStat(tp1Groups.notPlaced)}`);
+  console.log(`  讀不到欄位  ${grpStat(tp1Groups.unknown)}`);
+  console.log(`  沒掛上的單吃到全部下檔風險，卻拿不到設計中的 TP1 部分獲利了結——`);
+  console.log(`  那不是「策略的表現」，是「策略殘缺版本」的表現。`);
 
   const wins = withR.filter(f => (f.realR as number) > 0).length;
   console.log(`\n  勝率 ${fmt(wins / withR.length * 100, 1)}%（${wins}/${withR.length}）`);
