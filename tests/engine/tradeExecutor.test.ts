@@ -20,10 +20,12 @@ class FakeClient implements TradeExecutorClient {
     this.callSequence.push('place');
     return { orderId: this.nextOrderId++, clientOrderId: params.newClientOrderId ?? '', status: 'NEW' };
   }
+  /** 撤單回應的 executedQty——部分成交的限價單被撤掉後這裡會 > 0。 */
+  cancelExecutedQty = '0';
   async cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean) {
     this.cancelOrderCalls.push({ symbol, orderId, isAlgoOrder });
     this.callSequence.push('cancel');
-    return { orderId, status: 'CANCELED' };
+    return { orderId, status: 'CANCELED', executedQty: this.cancelExecutedQty };
   }
 }
 
@@ -224,5 +226,46 @@ describe('executeTradeAction — cancel_stale_entry', () => {
     expect(r.executed).toBe(true);
     expect(client.cancelOrderCalls).toEqual([{ symbol: 'BTCUSDT', orderId: 111, isAlgoOrder: false }]);
     expect(persist.neverFilledCalls).toEqual(['trade-1']);
+  });
+
+  // 2026-09-01 實測撞到：ARBUSDT 在幣安有 1,123.2 顆部位，App 卻顯示
+  // 「真倉進場單過期未成交（真實從未開倉）」。限價單部分成交時狀態仍算 open
+  // （PARTIALLY_FILLED），掛滿 4 根 K 線一樣會走到 cancel_stale_entry；撤掉的
+  // 只是未成交的剩餘部分，已成交那部分是真實部位。
+  //
+  // 標成「從未開倉」的後果比記錯損益嚴重得多——系統不知道那個部位存在，就
+  // 沒有任何東西在管它：不移動止損、不掛 TP1、不時間止損。
+  it('部分成交時不可標記為「從未成交」——那會留下沒人管的裸倉', async () => {
+    const client = new FakeClient();
+    client.cancelExecutedQty = '1123.2'; // 撤掉剩餘，但已成交 1123.2
+    const persist = new FakePersist();
+    const action: TradeAction = { kind: 'cancel_stale_entry', symbol: 'ARBUSDT', orderId: 222, reason: '掛單過期' };
+
+    const r = await executeTradeAction(client, persist, 'trade-2', action);
+
+    expect(client.cancelOrderCalls).toHaveLength(1); // 撤單照做（清掉未成交的部分）
+    expect(persist.neverFilledCalls).toEqual([]);    // 但不可寫「從未成交」
+    expect(r.note).toContain('1123.2');
+  });
+
+  it('完全沒成交時照舊標記', async () => {
+    const client = new FakeClient();
+    client.cancelExecutedQty = '0';
+    const persist = new FakePersist();
+    const r = await executeTradeAction(client, persist, 'trade-3',
+      { kind: 'cancel_stale_entry', symbol: 'BTCUSDT', orderId: 333, reason: '掛單過期' });
+    expect(persist.neverFilledCalls).toEqual(['trade-3']);
+    expect(r.executed).toBe(true);
+  });
+
+  // 舊的測試替身不會回傳 executedQty。缺欄位時當成 0（維持原行為），
+  // 不要因為讀不到就保守地不標記——那會讓所有正常過期的掛單卡住不結案。
+  it('回應沒有 executedQty 欄位時，維持原本的標記行為', async () => {
+    const client = new FakeClient();
+    client.cancelExecutedQty = undefined as unknown as string;
+    const persist = new FakePersist();
+    await executeTradeAction(client, persist, 'trade-4',
+      { kind: 'cancel_stale_entry', symbol: 'BTCUSDT', orderId: 444, reason: '掛單過期' });
+    expect(persist.neverFilledCalls).toEqual(['trade-4']);
   });
 });

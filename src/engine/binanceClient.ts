@@ -217,14 +217,65 @@ export class BinanceFuturesClient {
     });
   }
 
+  // ── 時鐘偏移 ──────────────────────────────────────────────────────────
+  //
+  // 2026-09-01 實測：本機時鐘比幣安伺服器快約 1 秒，所有簽名請求收到
+  //
+  //     {"code":-1021,"msg":"Timestamp for this request was 1000ms ahead of
+  //      the server's time."}
+  //
+  // **`recvWindow` 救不了這個**——它處理的是「請求太慢」（時間戳落後），
+  // 而這裡是時間戳跑到伺服器**前面**，幣安對未來時間的容忍固定約 1000ms，
+  // 跟 recvWindow 無關。
+  //
+  // 危險的地方在於它是**間歇性**的：偏移剛好在邊界時，有些請求過、有些不過。
+  // live-runner 的全帳戶對帳包在 try/catch 裡只印 log，所以它可以失敗很久
+  // 都沒人發現——而那正是「孤兒部位沒被抓到」的原因之一。
+  //
+  // 解法是標準做法：拿伺服器時間算偏移，之後所有簽名都用校正過的時間戳。
+  // 收到 -1021 時重新同步並重試一次，讓它自己痊癒（時鐘會持續漂移）。
+  private timeOffsetMs = 0;
+  private timeSyncedAt = 0;
+  private static readonly TIME_RESYNC_MS = 30 * 60_000;
+
+  private async syncTime(): Promise<void> {
+    // 公開端點，不需要簽名——所以時鐘壞掉時這支一定叫得動。
+    const before = Date.now();
+    const res = await this.http.get<{ serverTime: number }>('/v1/time');
+    const after = Date.now();
+    // 扣掉一半來回延遲，估計送達伺服器當下的本機時間。
+    this.timeOffsetMs = res.data.serverTime - (before + (after - before) / 2);
+    this.timeSyncedAt = after;
+  }
+
   private async signedRequest<T>(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
     params: Record<string, string | number | boolean | undefined> = {},
   ): Promise<T> {
-    const qs = buildSignedQuery(params, this.secret, Date.now());
-    const res = await this.http.request<T>({ method, url: `${path}?${qs}` });
-    return res.data;
+    if (Date.now() - this.timeSyncedAt > BinanceFuturesClient.TIME_RESYNC_MS) {
+      // 同步失敗不擋住請求——偏移 0 就是修正前的行為，不比原本差。
+      try { await this.syncTime(); } catch { /* 用現有偏移繼續 */ }
+    }
+
+    const send = async () => {
+      const qs = buildSignedQuery(params, this.secret, Date.now() + Math.round(this.timeOffsetMs));
+      const res = await this.http.request<T>({ method, url: `${path}?${qs}` });
+      return res.data;
+    };
+
+    try {
+      return await send();
+    } catch (e) {
+      // -1021 = 時間戳超出容許範圍。重新同步後重試一次。只重試這一個錯誤碼，
+      // 而且只重試一次——下單是**非冪等**操作，盲目重試會變成重複下單。
+      // （幣安端的 newClientOrderId 冪等保護只在同一個 ID 上成立，這裡重送的
+      // 是同一個 query 字串，所以安全；但仍然只給一次機會。）
+      const code = (e as { response?: { data?: { code?: number } } })?.response?.data?.code;
+      if (code !== -1021) throw e;
+      await this.syncTime();
+      return await send();
+    }
   }
 
   // ── Read-only — safe to call freely, no money movement ──────────────────
@@ -337,7 +388,17 @@ export class BinanceFuturesClient {
   // isAlgoOrder：呼叫端必須自己知道要取消的是條件單還是一般單（一個 orderId
   // 沒辦法從數字本身分辨是 orderId 還是 algoId 的命名空間，猜錯會撤錯單）。
   // runner.ts 的兩個呼叫點各自清楚知道自己在撤哪一種，見 runner.ts attemptCancel。
-  async cancelOrder(symbol: string, orderId: number, isAlgoOrder = false): Promise<{ orderId: number; status: string }> {
+  //
+  // 回傳 `executedQty`：撤掉一張**部分成交**的限價單時，撤掉的只是未成交的
+  // 剩餘部分，已成交那部分是**真實部位**。呼叫端不看這個欄位就會把「撤單
+  // 成功」讀成「這單從沒開過倉」——2026-09-01 實測撞到：ARBUSDT 在幣安有
+  // 1,123.2 顆部位，App 卻顯示「真倉進場單過期未成交（真實從未開倉）」，
+  // 於是那個部位沒有任何東西在管（不移動止損、不掛 TP1、不時間止損）。
+  //
+  // algoOrder 端點沒有這個欄位（條件單觸發前不會有部分成交），回 undefined。
+  async cancelOrder(
+    symbol: string, orderId: number, isAlgoOrder = false,
+  ): Promise<{ orderId: number; status: string; executedQty?: string }> {
     if (isAlgoOrder) {
       const res = await this.signedRequest<{ algoId: number; algoStatus: string }>(
         'DELETE', '/v1/algoOrder', { symbol, algoId: orderId },

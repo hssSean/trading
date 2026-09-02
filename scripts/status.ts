@@ -70,6 +70,38 @@ async function main() {
   // 那筆寫入會失敗。真正該問的是「那些真倉現在有保護單嗎」，那個只有交易所
   // 答得出來，而且是唯讀查詢。有倉沒止損 = 有錢在冒險而且沒人看著。
   const liveOpen = open.filter(o => o.exchange_entry_order_id != null);
+  if (process.env.BINANCE_TESTNET_API_KEY) {
+    const { BinanceFuturesClient, loadBinanceConfigFromEnv } = await import('../src/engine/binanceClient');
+    const client = new BinanceFuturesClient(loadBinanceConfigFromEnv(true));
+
+    // ── 孤兒部位：幣安上有，但 DB 不知道 ──
+    //
+    // 這一段補的是先前的盲點：舊版只檢查「DB 認為開著」的單的保護單，所以
+    // **「DB 不知道它存在」的部位完全查不到**。2026-09-01 實測撞到：ARBUSDT
+    // 在幣安有 1,123.2 顆，App 顯示「真倉進場單過期未成交（真實從未開倉）」
+    // ——限價單部分成交後被當成過期撤單，已成交那部分變成沒人管的裸倉。
+    //
+    // 孤兒部位是最危險的狀態：不移動止損、不掛 TP1、不時間止損、不計入
+    // 風險額度。所以要用**帳戶級**查詢（不帶 symbol），拿全部有部位的
+    // symbol 去比對 DB，而不是反過來。
+    const allPos = await client.getPositionRisk();
+    const livePos = allPos.filter(p => parseFloat(p.positionAmt) !== 0);
+    const knownSymbols = new Set(open.map(o => o.symbol));
+    const orphans = livePos.filter(p => !knownSymbols.has(p.symbol));
+
+    if (orphans.length > 0) {
+      console.log(`\n⚠⚠ 孤兒部位 ${orphans.length} 筆——幣安上有部位，但 DB 沒有對應的未平倉紀錄`);
+      for (const p of orphans) {
+        console.log(`  ${p.symbol.replace('USDT', '').padEnd(8)} ${p.positionAmt} @ ${p.entryPrice}`
+          + `  未實現 ${parseFloat(p.unRealizedProfit).toFixed(2)} USDT`);
+      }
+      console.log(`  這些部位沒有任何自動化在管（不移動止損、不掛 TP1、不時間止損、不計入風險額度）。`);
+      console.log(`  常見成因：限價單部分成交後被判定過期撤單，已成交部分被標成「從未開倉」。`);
+    } else if (livePos.length > 0) {
+      console.log(`\n幣安上 ${livePos.length} 個部位全部對得上 DB 紀錄，無孤兒。`);
+    }
+  }
+
   if (liveOpen.length > 0 && process.env.BINANCE_TESTNET_API_KEY) {
     console.log(`\n── 真倉的交易所保護單 ──`);
     const { BinanceFuturesClient, loadBinanceConfigFromEnv } = await import('../src/engine/binanceClient');

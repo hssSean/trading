@@ -12,7 +12,11 @@ import { TimeStopCloseReason } from './timeStop';
 
 export interface TradeExecutorClient {
   placeOrder(params: PlaceOrderParams): Promise<{ orderId: number; clientOrderId: string; status: string }>;
-  cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean): Promise<{ orderId: number; status: string }>;
+  // executedQty：撤掉部分成交的限價單時，撤掉的只是未成交的剩餘部分，已成交
+  // 那部分是**真實部位**。cancel_stale_entry 一定要看這個，才不會把「撤單
+  // 成功」誤讀成「從沒開過倉」。選填是為了不強迫既有測試替身全部改寫。
+  cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean):
+    Promise<{ orderId: number; status: string; executedQty?: string }>;
 }
 
 // 每個方法對應一種要寫回 Supabase trades 表的變化。呼叫端（live-runner）
@@ -135,9 +139,30 @@ export async function executeTradeAction(
     case 'cancel_stale_entry': {
       // LIMIT 進場單掛太久沒成交，主動撤——isAlgoOrder=false，這是一般
       // /fapi/v1/order 端點的單，不是條件單（跟 place_initial_stop 用的
-      // algoOrder 端點不一樣）。撤成功後跟 entry_never_filled 同一個語意：
-      // 從未真的開過倉，複用同一個 persist 方法，不新增一個。
-      await client.cancelOrder(action.symbol, action.orderId, false);
+      // algoOrder 端點不一樣）。
+      const res = await client.cancelOrder(action.symbol, action.orderId, false);
+
+      // 2026-09-01：**撤單成功不等於從沒開過倉。**
+      //
+      // 限價單部分成交時狀態仍算 open（PARTIALLY_FILLED），所以掛滿 4 根
+      // K 線一樣會走到這裡；撤掉的只是**未成交的剩餘部分**，已成交那部分
+      // 是真實部位。原本這裡無條件 markEntryNeverFilled，結果實測撞到：
+      // ARBUSDT 在幣安有 1,123.2 顆部位，App 顯示「真倉進場單過期未成交
+      // （真實從未開倉）」——系統不知道它存在，就沒有任何東西在管它：
+      // 不移動止損、不掛 TP1、不時間止損。比「記錯損益」嚴重得多。
+      //
+      // 不標記的話，這筆的 exchange_entry_order_id 還在、positionQty > 0，
+      // 下一輪 decideTradeAction 會走「部位已存在」那條路補掛止損、恢復
+      // 正常管理。所以正確處置就是**什麼都不寫**，讓下一輪接手。
+      const executed = parseFloat(res.executedQty ?? '0');
+      if (Number.isFinite(executed) && executed > 0) {
+        return {
+          executed: true,
+          note: `${action.reason}｜⚠ 但該單已部分成交 ${executed}，實際有部位——`
+            + `不標記為未成交，下一輪會接手補掛止損`,
+        };
+      }
+
       await persist.markEntryNeverFilled(tradeId);
       return { executed: true, note: action.reason };
     }
