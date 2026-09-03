@@ -9,6 +9,7 @@ const atrOf = (n: number, v = 2) => Array(n).fill(v);
 const NONE: ExitPolicyConfig = {
   name: 'none', tp1Fraction: 0, breakevenAtR: null, trailAtrMult: null,
   stallBars: null, stallBandR: 0.3, maxBars: null,
+  tp1AtR: null, tp2AtR: null,
 };
 const p = (o: Partial<ExitPolicyConfig>): ExitPolicyConfig => ({ ...NONE, ...o });
 
@@ -176,6 +177,50 @@ describe('SHORT 方向對稱', () => {
     const bars = [bar(100, 97.5, 98), bar(106, 99, 105)];
     const r = simulateExit({ ...S, bars, atr: atrOf(2) }, p({ breakevenAtR: 0.5 }));
     expect(r.r).toBe(0);
+  });
+});
+
+// 2026-09-03：TP 位置是唯一沒被量測過的參數家族。先前 10 個變體全部只動出場
+// 管理，而位置直接決定勝率——目標越遠越難達到，而實測缺的正是勝率
+// （26.3% vs 兩平所需 30.8%）。
+describe('TP 位置覆寫（tp1AtR / tp2AtR）', () => {
+  it('把 TP1 拉近到 +0.5R，原本構不到 +1R 的走勢也能觸及', () => {
+    const bars = [bar(103, 99, 102)]; // 最高 103 = +0.6R，構不到原本的 TP1(105)
+    expect(simulateExit({ ...L, bars, atr: atrOf(1) }, NONE).tp1Hit).toBe(false);
+    expect(simulateExit({ ...L, bars, atr: atrOf(1) },
+      p({ tp1AtR: 0.5, tp1Fraction: 1 })).tp1Hit).toBe(true);
+  });
+
+  it('把 TP2 推遠到 +3R，原本會在 +2R 結案的單改成繼續持有', () => {
+    const bars = [bar(111, 100, 110)]; // 觸及原 TP2(110) 但構不到 +3R(115)
+    expect(simulateExit({ ...L, bars, atr: atrOf(1) }, NONE).reason).toBe('tp2');
+    expect(simulateExit({ ...L, bars, atr: atrOf(1) }, p({ tp2AtR: 3 })).reason).not.toBe('tp2');
+  });
+
+  // 覆寫用 entry ± risk × 倍數算，做空要往下算。方向寫反會讓其中一邊的目標
+  // 落在虧損側，整批比較直接失去意義。
+  it('做空方向對稱', () => {
+    const S = { entry: 100, stopLoss: 105, tp1: 95, tp2: 90, isLong: false };
+    const bars = [bar(100, 97, 97.5)]; // 跌到 97 = +0.6R
+    expect(simulateExit({ ...S, bars, atr: atrOf(1) }, p({ tp1AtR: 0.5, tp1Fraction: 1 })).tp1Hit).toBe(true);
+    expect(simulateExit({ ...S, bars, atr: atrOf(1) }, p({ tp1AtR: 1.5, tp1Fraction: 1 })).tp1Hit).toBe(false);
+  });
+
+  it('null 時完全沿用訊號自帶的價位', () => {
+    const bars = [bar(106, 100, 105)];
+    const a = simulateExit({ ...L, bars, atr: atrOf(1) }, p({ tp1Fraction: 1 }));
+    const b = simulateExit({ ...L, bars, atr: atrOf(1) }, p({ tp1Fraction: 1, tp1AtR: null, tp2AtR: null }));
+    expect(a).toEqual(b);
+  });
+
+  // 拉近 TP1 的**代價**：觸及率上升但單筆實現的 R 變小。這個 trade-off 才是
+  // 整組測試的重點——沒有它就只會看到「更常獲利」而誤判成改善。
+  it('拉近 TP1 提高觸及率，但單筆實現的 R 變小', () => {
+    const bars = [bar(106, 100, 105), bar(104, 99, 100)];
+    const far  = simulateExit({ ...L, bars, atr: atrOf(2) }, p({ tp1Fraction: 1 }));
+    const near = simulateExit({ ...L, bars, atr: atrOf(2) }, p({ tp1Fraction: 1, tp1AtR: 0.5 }));
+    expect(near.tp1Hit).toBe(true);
+    expect(near.r).toBeLessThan(far.r);
   });
 });
 

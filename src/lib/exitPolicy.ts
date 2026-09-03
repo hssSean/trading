@@ -43,6 +43,22 @@ export interface ExitPolicyConfig {
   stallBandR: number;
   /** 最多持有幾根 K 線；null = 不限 */
   maxBars: number | null;
+  /**
+   * 把 TP1／TP2 移到「進場價 ± 風險 × 這個倍數」；null = 用訊號自帶的價位。
+   *
+   * 2026-09-03 加。先前 10 個變體**全部只動出場管理**（保本點、移動止損倍數、
+   * 停滯、到期、TP1 比例），沒有一個動到 **TP 的位置本身**——而位置直接決定
+   * 勝率：目標越遠越難達到。
+   *
+   * 線上是 `signals.ts` buildSignalLevels 的 TP1 = +2R、TP2 = +3.5R
+   * （intraday 則是 +1.5R / +2.0R）。實測賠率結構是勝率 26.3%、平均賺
+   * +1.569R、平均賠 -0.700R，兩平需要 30.8%——**缺的就是勝率**，而把 TP1
+   * 拉近是唯一直接作用在勝率上的參數。
+   *
+   * 代價是平均賺會下降，兩者誰勝誰負只能實測。這正是這個欄位存在的理由。
+   */
+  tp1AtR: number | null;
+  tp2AtR: number | null;
 }
 
 export interface ExitBar { high: number; low: number; close: number }
@@ -70,12 +86,19 @@ export interface ExitOutcome {
 }
 
 export function simulateExit(input: ExitInput, policy: ExitPolicyConfig): ExitOutcome {
-  const { entry, stopLoss, tp1, tp2, isLong, bars, atr } = input;
+  const { entry, stopLoss, isLong, bars, atr } = input;
   const risk = Math.abs(entry - stopLoss);
   // 止損距離為 0 的訊號沒有 R 可言，直接判無效而不是回 Infinity/NaN 污染統計。
   if (risk <= 0 || bars.length === 0) {
     return { r: 0, reason: 'open', barsHeld: 0, mfeR: 0, tp1Hit: false };
   }
+
+  // TP 位置覆寫。方向由 isLong 決定，所以同一個倍數對多空都是「有利方向」。
+  // 覆寫後不再參考訊號自帶的 tp1/tp2——那是刻意的：要比較的就是「如果當初
+  // 把目標放在別的地方會怎樣」，混用會讓比較失去意義。
+  const atR = (mult: number) => (isLong ? entry + risk * mult : entry - risk * mult);
+  const tp1 = policy.tp1AtR != null ? atR(policy.tp1AtR) : input.tp1;
+  const tp2 = policy.tp2AtR != null ? atR(policy.tp2AtR) : input.tp2;
 
   const rOf = (price: number) => (isLong ? price - entry : entry - price) / risk;
   const favourable = (bar: ExitBar) => (isLong ? bar.high : bar.low);

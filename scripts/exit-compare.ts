@@ -68,6 +68,7 @@ export const WAIT_BARS = 8;
 export const BASELINE: ExitPolicyConfig = {
   name: '現況（線上）', tp1Fraction: 0.5, breakevenAtR: 0.5, trailAtrMult: 2,
   stallBars: 8, stallBandR: 0.3, maxBars: 24,
+  tp1AtR: null, tp2AtR: null,
 };
 const v = (name: string, o: Partial<ExitPolicyConfig>): ExitPolicyConfig => ({ ...BASELINE, name, ...o });
 
@@ -82,6 +83,20 @@ const POLICIES: ExitPolicyConfig[] = [
   v('移動止損放寬 3×ATR', { trailAtrMult: 3 }),
   v('到期延長到 72 根', { maxBars: 72 }),
   v('拿掉停滯＋到期延長', { stallBars: null, maxBars: 72 }),
+
+  // 2026-09-03 新增：**TP 位置**。先前 10 個變體全部只動出場管理，沒有一個
+  // 動到目標位置本身——而位置直接決定勝率。線上是 TP1 +2R / TP2 +3.5R
+  // （buildSignalLevels）。實測賠率結構：勝率 26.3%、平均賺 +1.569R、
+  // 平均賠 -0.700R，兩平需要 30.8%——缺的就是勝率。
+  //
+  // 拉近 TP1 會提高觸及率但降低單筆實現的 R，兩者誰勝誰負只能實測。
+  // 這是目前唯一還沒被排除的參數家族。
+  v('TP1 拉近到 +1.0R', { tp1AtR: 1.0 }),
+  v('TP1 拉近到 +1.5R', { tp1AtR: 1.5 }),
+  v('TP1 推遠到 +2.5R', { tp1AtR: 2.5 }),
+  v('TP2 拉近到 +2.5R', { tp2AtR: 2.5 }),
+  v('TP1 +1.5R ＋ TP2 +2.5R', { tp1AtR: 1.5, tp2AtR: 2.5 }),
+  v('TP1 +1.0R ＋ TP2 +2.0R', { tp1AtR: 1.0, tp2AtR: 2.0 }),
 ];
 
 // ── 工具 ────────────────────────────────────────────────────────
