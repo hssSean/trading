@@ -246,6 +246,10 @@ describe('executeTradeAction — cancel_stale_entry', () => {
     expect(client.cancelOrderCalls).toHaveLength(1); // 撤單照做（清掉未成交的部分）
     expect(persist.neverFilledCalls).toEqual([]);    // 但不可寫「從未成交」
     expect(r.note).toContain('1123.2');
+    // live-runner 對 cancel_stale_entry 會跑 cleanupAfterTradeClosed（撤殘留
+    // 條件單 + 解 symbol 鎖）。對還開著的部位跑那個等於把保護單撤掉——比
+    // 原本那個「標成從未開倉」的 bug 更糟，所以一定要擋住。
+    expect(r.stillOpen).toBe(true);
   });
 
   it('完全沒成交時照舊標記', async () => {
@@ -256,6 +260,7 @@ describe('executeTradeAction — cancel_stale_entry', () => {
       { kind: 'cancel_stale_entry', symbol: 'BTCUSDT', orderId: 333, reason: '掛單過期' });
     expect(persist.neverFilledCalls).toEqual(['trade-3']);
     expect(r.executed).toBe(true);
+    expect(r.stillOpen).toBeFalsy(); // 真的沒成交，善後照跑
   });
 
   // 舊的測試替身不會回傳 executedQty。缺欄位時當成 0（維持原行為），

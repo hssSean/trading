@@ -916,9 +916,15 @@ async function runCycle(
         // 「幣安端還掛著止盈單」「App 誤判持倉中」這兩個善後缺口重演。
         // cancel_stale_entry（掛單過期主動撤單）跟 entry_never_filled
         // 同一個語意——從未真的開過倉，一併觸發清理。
+        // result.stillOpen：cancel_stale_entry 撤掉的是一張**部分成交**的
+        // 限價單時，已成交那部分是真實部位。對還開著的部位跑結束善後
+        // （撤殘留條件單 + 解 symbol 鎖）等於把保護單撤掉——比原本那個
+        // 「標成從未開倉」的 bug 更糟。見 tradeExecutor.ts ExecutionResult。
         if (
-          action.kind === 'sync_closed_position' || action.kind === 'entry_never_filled'
-          || action.kind === 'cancel_stale_entry'
+          !result.stillOpen && (
+            action.kind === 'sync_closed_position' || action.kind === 'entry_never_filled'
+            || action.kind === 'cancel_stale_entry'
+          )
         ) {
           await cleanupAfterTradeClosed(
             binance, redis, row,

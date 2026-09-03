@@ -57,6 +57,16 @@ export interface TradePersistence {
 export interface ExecutionResult {
   executed: boolean;
   note: string;
+  /**
+   * 這筆 trade **還活著**，呼叫端不可以跑「已結束」的善後流程。
+   *
+   * 目前唯一會設的情況：`cancel_stale_entry` 撤掉的是一張**部分成交**的
+   * 限價單——撤單成功但已成交那部分是真實部位。live-runner 對
+   * cancel_stale_entry 會呼叫 cleanupAfterTradeClosed（撤殘留條件單 + 解
+   * Redis symbol 鎖），對還開著的部位跑那個流程等於**把保護單撤掉**，
+   * 比原本的 bug 更糟。
+   */
+  stillOpen?: boolean;
 }
 
 export async function executeTradeAction(
@@ -158,8 +168,9 @@ export async function executeTradeAction(
       if (Number.isFinite(executed) && executed > 0) {
         return {
           executed: true,
+          stillOpen: true, // 呼叫端不可跑「已結束」的善後（那會撤掉保護單）
           note: `${action.reason}｜⚠ 但該單已部分成交 ${executed}，實際有部位——`
-            + `不標記為未成交，下一輪會接手補掛止損`,
+            + `不標記為未成交、不做結束善後，下一輪會接手補掛止損`,
         };
       }
 
