@@ -16,7 +16,10 @@ import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib
 import { shadowChanged, snapshot } from '@/lib/shadowWrite';
 import { unavailableSymbols, SYMBOL_UNAVAILABLE_REASON, SYMBOL_UNAVAILABLE_COOLDOWN_MS } from '@/lib/symbolAvailability';
 import { decideLiveRunnerHandoff } from '@/lib/liveRunnerHandoff';
-import { activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS } from '@/lib/tradeCooldown';
+import {
+  activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS,
+  symbolsOnSignalCooldown, symbolsInSameCandle, SIGNAL_COOLDOWN_MS,
+} from '@/lib/tradeCooldown';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -139,6 +142,12 @@ async function setLossCooldown(symbol: string, direction: string, ttlSec: number
 // 加這條是因為原本的兩個來源在 Redis 掛掉時都等於失效——記憶體是 Vercel
 // 單一實例的、冷啟就空，Redis 則直接丟例外。詳見 src/lib/tradeCooldown.ts。
 let derivedCooldowns: Set<string> = new Set();
+// 2026-09-04：6h 訊號冷卻與同 4h 蠟燭原本只掛在 tlock（純 Redis）上，Redis 空窗
+// 期兩道一起 fail-open。這兩個是從 trades.opened_at 推導出來的備援，跟 Redis
+// 那條路取聯集。跟 derivedCooldowns 一樣是 module-level，所以查詢失敗時**一定要
+// 清空**，不能沿用上一輪——Vercel 實例會重用，留舊值會靜默擋住不該擋的。
+let derivedSignalCooldown: Set<string> = new Set();
+let derivedSameCandle: Set<string> = new Set();
 
 async function isOnLossCooldown(symbol: string, direction: string): Promise<boolean> {
   // 三個來源取聯集：任一邊說在冷卻就擋。對風控來說「多擋」的代價遠小於
@@ -2351,12 +2360,28 @@ export async function GET(req: NextRequest) {
       if (derivedCooldowns.size > 0) {
         console.log(`[analyze] 冷卻中（由 Supabase 紀錄推導）${derivedCooldowns.size} 組: ${Array.from(derivedCooldowns).join(', ')}`);
       }
+
+      // 訊號冷卻與同蠟燭要看 **opened_at**（訊號發出時間），而且**不能只看
+      // 已平倉的單**——還開著的、CANCELLED 的，都代表這個 symbol 剛發過訊號。
+      // 所以是獨立的一次查詢，不能沿用上面那批 closed_at 的資料。
+      const { data: recent } = await createClient(url, key)
+        .from('trades')
+        .select('symbol, direction, opened_at')
+        .gte('opened_at', now - SIGNAL_COOLDOWN_MS);
+      const recentRows = recent ?? [];
+      derivedSignalCooldown = symbolsOnSignalCooldown(recentRows, now);
+      derivedSameCandle = symbolsInSameCandle(recentRows, now);
+      if (derivedSignalCooldown.size > 0) {
+        console.log(`[analyze] 訊號冷卻中（推導）${derivedSignalCooldown.size} 個: ${Array.from(derivedSignalCooldown).join(', ')}`);
+      }
     }
   } catch (e) {
     // 查詢失敗時把推導出來的冷卻清空——**不要沿用上一輪的**。這個變數是
     // module-level 的，Vercel 實例會被重用，留著舊值會讓冷卻在資料早就過期
     // 之後還繼續擋，而且完全看不出來。清空之後仍有 Redis/記憶體那條路徑。
     derivedCooldowns = new Set();
+    derivedSignalCooldown = new Set();
+    derivedSameCandle = new Set();
     console.error(`[analyze] 查已平倉紀錄失敗（不可交易 symbol + 冷卻都會退回 Redis 那條路）: ${String(e).slice(0, 150)}`);
   }
 
@@ -2769,8 +2794,14 @@ export async function GET(req: NextRequest) {
       const now       = Date.now();
 
       const locked     = !!last && last.locked;
-      const sameCandle = !!last && !locked && last.candleBucket === nowBucket && last.direction === topStrong?.direction;
-      const onCooldown = !!last && !locked && (now - last.sentAt) < COOLDOWN_MS;
+      // 2026-09-04：這兩道原本只看 `last`（tlock，純 Redis）。Redis 空窗期
+      // `last` 是 null，兩道一起 fail-open——實測造成同一支幣 0–1 分鐘內反覆
+      // 進出（7 筆，日期全落在 8/23–9/1 的 Redis 空窗期內）。改成跟 Supabase
+      // 推導的結果取**聯集**：任一邊說在冷卻就擋。
+      const sameCandle = (!!last && !locked && last.candleBucket === nowBucket && last.direction === topStrong?.direction)
+        || (!locked && !!topStrong && derivedSameCandle.has(cooldownKey(symbol, topStrong.direction)));
+      const onCooldown = (!!last && !locked && (now - last.sentAt) < COOLDOWN_MS)
+        || (!locked && derivedSignalCooldown.has(symbol));
 
       let skipReason: string | undefined;
       let skipKey:    string | undefined; // v2.1 §0: machine-readable gate id for the reject funnel
@@ -2795,8 +2826,12 @@ export async function GET(req: NextRequest) {
         { skipKey = 'locked';         skipReason = `跳過 — 持倉中 (${last?.direction})`; }
       else if (sameCandle)
         { skipKey = 'same_candle';    skipReason = `跳過 — 同 4h 蠟燭 (${topStrong?.direction})`; }
-      else if (onCooldown && last)
-        { skipKey = 'cooldown';       skipReason = `跳過 — 冷卻中 (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min)`; }
+      // `last` 可能是 null（Redis 掛掉時冷卻由 Supabase 推導而來），那種情況
+      // 算不出剩餘分鐘數——不要因此漏掉這道關卡，改寫成不帶數字的文案。
+      else if (onCooldown)
+        { skipKey = 'cooldown';       skipReason = last
+            ? `跳過 — 冷卻中 (${Math.round((COOLDOWN_MS - (now - last.sentAt)) / 60000)}min)`
+            : '跳過 — 冷卻中（由 Supabase 紀錄推導，6h 內已發過此幣訊號）'; }
       else if (topStrong && !confluenceMet)
         { skipKey = 'confluence';     skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向，4H bias: ${entryTfBias ?? '中性'})`; }
       else if (topStrong && !entrySignal)

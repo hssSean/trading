@@ -13,7 +13,7 @@ import { auditTradeExit, type AuditFill } from '../src/lib/exitAudit';
 const f = (o: Partial<AuditFill> & { id: number }): AuditFill => ({
   orderId: 999, side: 'BUY', price: '100', qty: '1', realizedPnl: '0', time: 1000, ...o,
 });
-const NONE = new Set<number>();
+const NONE = new Map<number, number>();
 
 // 做多：orderId 111 進場 1 顆 @100
 const entryLong = f({ id: 1, orderId: 111, side: 'BUY', price: '100', qty: '1', time: 1000 });
@@ -113,15 +113,45 @@ describe('auditTradeExit — 重疊倉位的 FIFO 配對', () => {
       f({ id: 2, orderId: 222, side: 'SELL', price: '105', qty: '1', realizedPnl: '5', time: 2000 }),
     ];
     // id=2 已被同 symbol 的前一筆單用掉
-    const r = auditTradeExit({ entryOrderId: 111, dbPnlPercent: 5, fills, consumed: new Set([2]) });
+    const r = auditTradeExit({ entryOrderId: 111, dbPnlPercent: 5, fills, consumed: new Map([[2, 1]]) });
     expect(r.verdict).toBe('NO_CLOSE_FILL');
   });
 
-  it('回報 consumedIds 讓呼叫端能累積，且包含進場成交', () => {
+  it('回報 consumedDelta 讓呼叫端能累加，且包含進場成交', () => {
     const fills = [entryLong, f({ id: 2, orderId: 222, side: 'SELL', price: '105', qty: '1', realizedPnl: '5', time: 2000 })];
     const r = auditTradeExit({ entryOrderId: 111, dbPnlPercent: 5, fills, consumed: NONE });
-    expect(r.consumedIds).toContain(1);
-    expect(r.consumedIds).toContain(2);
+    expect(r.consumedDelta).toEqual(expect.arrayContaining([[1, 1], [2, 1]]));
+  });
+
+  // 2026-09-04 的核心修正。原本一張成交被部分用掉就整筆標記已用，剩餘量
+  // 再也配不到別的單——實測讓對帳只涵蓋 64.9% 的交易所已實現損益，而且
+  // 逐幣有符號相反的（SOL 交易所 +58.71、稽核 -64.57）。
+  it('大額平倉成交只被部分用掉時，剩餘量要留給下一筆單', () => {
+    const big = f({ id: 2, orderId: 222, side: 'SELL', price: '105', qty: '4', realizedPnl: '20', time: 2000 });
+    const first = auditTradeExit({ entryOrderId: 111, dbPnlPercent: 5, fills: [entryLong, big], consumed: NONE });
+    expect(first.closedQty).toBeCloseTo(1);
+    // 只登記用掉 1，不是整筆 4
+    expect(first.consumedDelta).toEqual(expect.arrayContaining([[2, 1]]));
+
+    // 同 symbol 的第二筆單（另一個 entry order）應該還配得到剩下的 3
+    const entry2 = f({ id: 3, orderId: 333, side: 'BUY', price: '100', qty: '3', time: 1500 });
+    const acc = new Map<number, number>();
+    for (const [id, qty] of first.consumedDelta) acc.set(id, (acc.get(id) ?? 0) + qty);
+
+    const second = auditTradeExit({
+      entryOrderId: 333, dbPnlPercent: 5, fills: [entryLong, entry2, big], consumed: acc,
+    });
+    expect(second.closedQty).toBeCloseTo(3);        // 拿到剩下的 3
+    expect(second.realizedPnlUsdt).toBeCloseTo(15); // 20 × (3/4)
+    expect(second.verdict).toBe('OK');
+  });
+
+  it('剩餘量用完之後就配不到了', () => {
+    const one = f({ id: 2, orderId: 222, side: 'SELL', price: '105', qty: '1', realizedPnl: '5', time: 2000 });
+    const r = auditTradeExit({
+      entryOrderId: 111, dbPnlPercent: 5, fills: [entryLong, one], consumed: new Map([[2, 1]]),
+    });
+    expect(r.verdict).toBe('NO_CLOSE_FILL');
   });
 
   it('平倉量不足 → PARTIAL_CLOSE 而不是 OK', () => {

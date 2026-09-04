@@ -237,9 +237,11 @@ async function main() {
     fillDensity.set(symbol, rows.length > 0 ? fills.length / rows.length : 0);
     console.log(`  ${symbol}: ${rows.length} 筆單 / ${fills.length} 筆成交`);
 
-    // FIFO 配對：已被前面的單消耗掉的成交不再重複使用。幣安不記我們的
-    // trade_id，重疊倉位只能這樣近似——見檔頭「已知限制」。
-    const consumed = new Set<number>();
+    // FIFO 配對：記錄每筆成交**已被用掉的數量**，不是「用過沒」。一張大額
+    // 平倉成交常橫跨多筆單，用布林集合會讓剩餘量永遠配不到（2026-09-04 實測
+    // 涵蓋率只有 64.9%）。幣安不記我們的 trade_id，重疊倉位仍只能近似
+    // ——見檔頭「已知限制」。
+    const consumed = new Map<number, number>();
 
     for (const t of rows) {
       const r = auditTradeExit({
@@ -248,7 +250,7 @@ async function main() {
         fills,
         consumed,
       });
-      r.consumedIds.forEach(id => consumed.add(id));
+      for (const [id, qty] of r.consumedDelta) consumed.set(id, (consumed.get(id) ?? 0) + qty);
 
       // 判語一律來自純函數，這裡只把它翻成人看得懂的一行。
       let note = VERDICT_NOTE[r.verdict];

@@ -49,8 +49,18 @@ export interface AuditOutcome {
   exitAvg: number | null;
   realPnlPct: number | null;
   realizedPnlUsdt: number | null;
-  /** 這次配對用掉的成交 id，呼叫端要記起來避免下一筆單重複使用。 */
-  consumedIds: number[];
+  /**
+   * 這次配對**額外用掉**的數量，`[成交 id, 數量]`。呼叫端要累加進 `consumed`
+   * 再傳給下一筆單。
+   *
+   * 2026-09-04：原本是 `consumedIds: number[]`（整筆標記已用）。那是錯的——
+   * 一張大額平倉成交可能只被這筆單用掉一部分，剩下的應該留給同 symbol 的
+   * 下一筆單。整筆標記會讓剩餘量永遠配不到，形成**系統性遺漏**。
+   *
+   * 實測影響：對帳只涵蓋 64.9% 的交易所已實現損益，缺口 −135 USDT，而且
+   * 逐幣看有符號相反的（SOL 交易所 +58.71、稽核 −64.57）。
+   */
+  consumedDelta: Array<[number, number]>;
 }
 
 /** 數量容差：stepSize 捨去會讓進出場數量有極小差異。 */
@@ -68,13 +78,19 @@ export interface AuditInput {
   dbPnlPercent: number | null;
   /** 這個 symbol 的全部成交，時間升序。 */
   fills: AuditFill[];
-  /** 已被同 symbol 前面的單消耗掉的成交 id。 */
-  consumed: ReadonlySet<number>;
+  /**
+   * 每筆成交**已經被同 symbol 前面的單用掉的數量**（`fillId → qty`）。
+   * 沒有 key 的代表全額可用。
+   *
+   * 用數量而不是「用過/沒用過」的布林集合：一張大額平倉成交常常橫跨多筆單，
+   * 整筆標記會讓剩餘量永遠配不到——見 AuditOutcome.consumedDelta 的說明。
+   */
+  consumed: ReadonlyMap<number, number>;
 }
 
 const EMPTY: Omit<AuditOutcome, 'verdict'> = {
   entryQty: null, entryAvg: null, closedQty: null, exitAvg: null,
-  realPnlPct: null, realizedPnlUsdt: null, consumedIds: [],
+  realPnlPct: null, realizedPnlUsdt: null, consumedDelta: [],
 };
 
 export function auditTradeExit(input: AuditInput): AuditOutcome {
@@ -94,39 +110,50 @@ export function auditTradeExit(input: AuditInput): AuditOutcome {
   const lastEntryTime = Math.max(...entryFills.map(f => f.time));
   const entrySide = entryFills[0].side;
   const isLong = entrySide === 'BUY';
-  const consumedIds = entryFills.map(f => f.id);
 
-  // 平倉：進場之後、反向、未被消耗，依時間順序湊到進場數量。
+  // 進場成交整筆歸這筆單——它們是用 orderId 精準比對到的，不會跟別的單共用。
+  const consumedDelta: Array<[number, number]> = entryFills.map(f => [f.id, parseFloat(f.qty)]);
+  const takenHere = new Map<number, number>(consumedDelta);
+
+  // 平倉：進場之後、反向、**還有剩餘量**的成交，依時間順序湊到進場數量。
   //
   // `f.time >= lastEntryTime` 用 >= 不是 >：同一毫秒內完成進出場（市價單
   // 立刻被止損掃掉）是真的會發生的，用 > 會把那種單誤判成 NO_CLOSE_FILL，
   // 而那正是最嚴重的誤判方向。
+  //
+  // 「剩餘量」而不是「用過沒」：一張大額平倉成交常橫跨多筆單，整筆標記會讓
+  // 剩下的量永遠配不到——那就是涵蓋率只有 64.9% 的原因。
   let remaining = entryQty;
   let exitNotional = 0, closedQty = 0, realizedPnl = 0;
   for (const f of fills) {
     if (remaining <= QTY_EPS) break;
     if (f.time < lastEntryTime) continue;
-    if (consumed.has(f.id) || consumedIds.includes(f.id)) continue;
     if (f.side === entrySide) continue;
 
     const fillQty = parseFloat(f.qty);
     if (!(fillQty > 0)) continue;
-    const take = Math.min(fillQty, remaining);
-    const ratio = take / fillQty;
+    const already = (consumed.get(f.id) ?? 0) + (takenHere.get(f.id) ?? 0);
+    const avail = fillQty - already;
+    if (avail <= QTY_EPS) continue;
+
+    const take = Math.min(avail, remaining);
+    // realizedPnl 按「這次拿走的比例」分攤，分母是**整筆成交量**而不是可用量
+    // ——幣安記的損益是整筆的，拿走 1/4 就分攤 1/4。
     exitNotional += take * parseFloat(f.price);
-    realizedPnl  += parseFloat(f.realizedPnl) * ratio;
+    realizedPnl  += parseFloat(f.realizedPnl) * (take / fillQty);
     closedQty    += take;
     remaining    -= take;
-    consumedIds.push(f.id);
+    takenHere.set(f.id, (takenHere.get(f.id) ?? 0) + take);
+    consumedDelta.push([f.id, take]);
   }
 
   if (closedQty <= QTY_EPS) {
-    return { verdict: 'NO_CLOSE_FILL', ...EMPTY, entryQty, entryAvg, closedQty: 0, consumedIds };
+    return { verdict: 'NO_CLOSE_FILL', ...EMPTY, entryQty, entryAvg, closedQty: 0, consumedDelta };
   }
 
   const exitAvg = exitNotional / closedQty;
   const realPnlPct = (exitAvg - entryAvg) / entryAvg * 100 * (isLong ? 1 : -1);
-  const base = { entryQty, entryAvg, closedQty, exitAvg, realPnlPct, realizedPnlUsdt: realizedPnl, consumedIds };
+  const base = { entryQty, entryAvg, closedQty, exitAvg, realPnlPct, realizedPnlUsdt: realizedPnl, consumedDelta };
 
   if (remaining > QTY_EPS) {
     return { verdict: 'PARTIAL_CLOSE', ...base };

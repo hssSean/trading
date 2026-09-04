@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS, TIME_STOP_COOLDOWN_MS,
-  type ClosedTradeForCooldown,
+  symbolsOnSignalCooldown, symbolsInSameCandle, SIGNAL_COOLDOWN_MS,
+  type ClosedTradeForCooldown, type RecentSignalRow,
 } from '../src/lib/tradeCooldown';
 
 // 這支守的是「剛被證偽的 setup 不要立刻重進」。8/23 Upstash 額度用盡後冷卻
@@ -88,6 +89,63 @@ describe('activeCooldowns — 不該觸發的情況', () => {
 
   it('空輸入回空集合', () => {
     expect(activeCooldowns([], T).size).toBe(0);
+  });
+});
+
+// 2026-09-04：這兩組補的是 route.ts 那兩道**只掛在 Redis 上**的關卡（6h 訊號
+// 冷卻、同 4h 蠟燭）。Redis 空窗期它們一起 fail-open，實測造成同一支幣 0–1 分鐘
+// 內反覆進出、全部同方向——純成本流失。
+describe('symbolsOnSignalCooldown — 6h 訊號冷卻（不分方向）', () => {
+  const sig = (o: Partial<RecentSignalRow>): RecentSignalRow =>
+    ({ symbol: 'BTCUSDT', direction: 'LONG', opened_at: T, ...o });
+
+  it('窗口內的 symbol 被鎖', () => {
+    expect(symbolsOnSignalCooldown([sig({ opened_at: T - 3600_000 })], T).has('BTCUSDT')).toBe(true);
+  });
+
+  // 不分方向是刻意的：這道防的是「同一支幣被反覆推薦」，不是對方向的判斷。
+  it('反方向也算同一個 symbol', () => {
+    expect(symbolsOnSignalCooldown([sig({ direction: 'SHORT', opened_at: T - 60_000 })], T)
+      .has('BTCUSDT')).toBe(true);
+  });
+
+  it('超過 6h 解除', () => {
+    expect(symbolsOnSignalCooldown([sig({ opened_at: T - SIGNAL_COOLDOWN_MS })], T).size).toBe(0);
+    expect(symbolsOnSignalCooldown([sig({ opened_at: T - SIGNAL_COOLDOWN_MS + 1 })], T).size).toBe(1);
+  });
+
+  // 跟 activeCooldowns 的「缺時間戳保守擋下」相反。opened_at 是必有欄位，
+  // 缺了是資料異常——把異常變成無限期封鎖某個 symbol 是更糟的失效模式。
+  it('缺 opened_at 跳過，不無限期封鎖', () => {
+    expect(symbolsOnSignalCooldown([sig({ opened_at: null })], T).size).toBe(0);
+  });
+
+  it('空輸入回空集合', () => {
+    expect(symbolsOnSignalCooldown([], T).size).toBe(0);
+  });
+});
+
+describe('symbolsInSameCandle — 同 4h 蠟燭（分方向）', () => {
+  const CANDLE = 4 * 3600_000;
+  const bucketStart = Math.floor(T / CANDLE) * CANDLE;
+  const sig = (o: Partial<RecentSignalRow>): RecentSignalRow =>
+    ({ symbol: 'BTCUSDT', direction: 'LONG', opened_at: bucketStart + 60_000, ...o });
+
+  it('同一根蠟燭內同方向被鎖', () => {
+    expect(symbolsInSameCandle([sig({})], T).has(cooldownKey('BTCUSDT', 'LONG'))).toBe(true);
+  });
+
+  it('反方向不鎖', () => {
+    expect(symbolsInSameCandle([sig({})], T).has(cooldownKey('BTCUSDT', 'SHORT'))).toBe(false);
+  });
+
+  // 用固定 4h 網格而不是「距今 4 小時內」。用錯會讓剛跨過整點的訊號被誤擋。
+  it('上一根蠟燭不算，即使時間差不到 4 小時', () => {
+    expect(symbolsInSameCandle([sig({ opened_at: bucketStart - 1 })], bucketStart + 1000).size).toBe(0);
+  });
+
+  it('缺 direction 跳過', () => {
+    expect(symbolsInSameCandle([sig({ direction: '' })], T).size).toBe(0);
   });
 });
 
