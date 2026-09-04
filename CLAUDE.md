@@ -104,8 +104,31 @@ npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料
 
 ## 工具規定
 
-- **graphify**：需要理解本專案架構、檔案關聯、跨檔呼叫關係時，先用 `/graphify .`（或 graphify 指令）建知識圖，不要單靠讀檔猜關聯。
-- **firecrawl MCP**：需要抓取外部網頁內容（文件、API 說明、第三方資料）時，優先用 firecrawl MCP 工具，不用裸 WebFetch 硬爬。需先在環境變數設定 `FIRECRAWL_API_KEY`（見 `.mcp.json`）。
+### 🔴 本專案的強制觸發（不是建議，是規定）
+
+下面每一條都對應**這個專案真的踩過的坑**。純目錄式的工具清單（見文末）不會讓
+工具被用到，只有綁定具體情境才會。
+
+| 情境 | 必用 | 為什麼 |
+|---|---|---|
+| 使用者說「壞了／怪怪的／沒反應」 | `npm run status` **先跑**，再談修法 | 這個專案發生過多次「靜默停擺一週」。2026-09-04 那次 `status` 一跑就看到孤兒部位，省掉整輪猜測 |
+| 任何 bug／非預期行為 | `superpowers:systematic-debugging` | 2026-08 有兩次「憑猜測改兩輪都沒中」，第三輪才實測。先量測再修是硬規定 |
+| 要說「修好了」之前 | `npx tsc --noEmit` → `npx vitest run` → `npx next build` 三個都跑 | 這輪修 UNI 孤兒時，第一版修正**引入了更糟的 bug**（撤掉真倉的保護單），是測試擋下來的 |
+| 要新增功能／重構／「要不要重做」 | `superpowers:brainstorming` | 2026-09-03「策略要不要重建」那次我直接跳到數據分析，跳過了發散階段 |
+| 動任何策略參數之前 | 讀 `docs/ANALYSIS-*` 最新那份 | 四個層面都測過了，很多「看起來該改」的已驗證無效 |
+| 宣稱某個統計結論 | 先看**樣本量、顯著性、涵蓋率**三個 | 這一個月抓到七個量測錯誤，每個在被抓到前都長得像結論 |
+| 要理解跨檔呼叫關係 | `/graphify .` 或 `claude-mem:smart-explore` | `route.ts` 超過 3500 行，整檔讀既慢又容易漏 |
+| 查「這個之前做過嗎」 | `claude-mem:mem-search` | 避免重跑已經做過的分析 |
+| 抓外部網頁／API 文件 | firecrawl MCP，不要裸 WebFetch | 需先設 `FIRECRAWL_API_KEY`（見 `.mcp.json`）**目前未設定，等同停用** |
+
+### ⚠ 已知未生效的工具（2026-09-05 實測）
+
+- **RTK**：`settings.json` 裡 hook 已設定，但 `rtk init --show` 回報
+  `[--] Hook: not found`，且每次 Bash 呼叫都印
+  `/!\ No hook installed`。**token 節省完全沒發生。**
+  修法：`rtk init -g --auto-patch`（會改全域 `~/.claude/settings.json`）。
+- **caveman statusline**：未設定，狀態列看不到目前壓縮等級。
+- **firecrawl**：`FIRECRAWL_API_KEY` 未設定，MCP 反覆連線/斷線但從未被呼叫成功。
 
 ---
 
