@@ -106,6 +106,17 @@ async function main() {
     console.log(`\n── 真倉的交易所保護單 ──`);
     const { BinanceFuturesClient, loadBinanceConfigFromEnv } = await import('../src/engine/binanceClient');
     const client = new BinanceFuturesClient(loadBinanceConfigFromEnv(true));
+    // 已經送出進場單但**還沒成交**的單，在交易所端沒有部位，當然也不會有
+    // 止損／止盈條件單——那是正常狀態，不是裸倉。
+    //
+    // 2026-09-05 實測誤報：XRP 掛單未成交，被印成「有倉位但沒有止損單，下檔
+    // 沒有任何保護」。**會喊狼來了的診斷工具比沒有工具更糟**——真的出事時
+    // 那行警告已經被當成雜訊了。所以先把有部位的 symbol 撈出來當閘門。
+    const posNow = new Map<string, number>();
+    for (const p of await client.getPositionRisk()) {
+      const amt = Math.abs(parseFloat(p.positionAmt));
+      if (amt > 0) posNow.set(p.symbol, amt);
+    }
     // 條件單要用 openAlgoOrders 查，getOpenOrders 查不到（2025-12 幣安遷移後
     // STOP_MARKET / TAKE_PROFIT_MARKET 都活在 algo 端點）。而且 account 級
     // 不帶 symbol 才查得到，帶了會是空——見 binanceClient.ts 的實測註解。
@@ -122,6 +133,14 @@ async function main() {
     }
 
     for (const o of liveOpen) {
+      const qtyNow = posNow.get(o.symbol) ?? 0;
+
+      // 沒部位＝掛單還沒成交，沒有保護單是正常的。不要印警告。
+      if (qtyNow <= 0) {
+        console.log(`  ⏳ ${o.symbol.replace('USDT', '').padEnd(6)} 掛單等待成交中（交易所端無部位，故無保護單）`);
+        continue;
+      }
+
       const mine = algos.filter(a => a.symbol === o.symbol);
       const sl = mine.filter(a => a.orderType.includes('STOP'));
       const tp = mine.filter(a => a.orderType.includes('TAKE_PROFIT'));
@@ -138,8 +157,7 @@ async function main() {
       else if (tp1Fired && tp.length === 0) note = '  （TP1 已觸發、50% 已平，條件單被消耗掉是正常的）';
       else if (!tpOk) {
         const step = steps.get(o.symbol);
-        const pos = await client.getPositionRisk(o.symbol);
-        const qty = Math.abs(parseFloat(pos.find(p => p.symbol === o.symbol)?.positionAmt ?? '0'));
+        const qty = qtyNow;
         const halfFloored = step ? Math.floor((qty * 0.5) / step) * step : null;
         note = `  ← TP1 條件單沒掛上（status=${o.status ?? '?'}），價格穿過 TP1 不會自動平 50%`
           + `\n       部位 ${qty} / stepSize ${step ?? '?'} → 一半取整後 ${halfFloored ?? '?'}`
