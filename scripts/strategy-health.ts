@@ -39,6 +39,7 @@ async function main() {
 
   const findings = (JSON.parse(readFileSync(reportPath, 'utf-8')).findings ?? []) as
     Array<{ realR: number | null; realizedPnlUsdt: number | null; symbol: string }>;
+  const auditedUsdt = findings.reduce((s, f) => s + (f.realizedPnlUsdt ?? 0), 0);
   const rs = findings.map(f => f.realR).filter((r): r is number => r != null && Number.isFinite(r));
   if (rs.length < 10) throw new Error(`樣本太少（${rs.length}）`);
 
@@ -118,6 +119,24 @@ async function main() {
     console.log(`  資金費率       ${pad(fmt(fund), 10)} USDT`);
     console.log(`  ────────────────────────────`);
     console.log(`  淨             ${pad(fmt(net), 10)} USDT`);
+
+    // ── 對帳涵蓋率 ──
+    //
+    // 這一行是整份報告最重要的把關。上面所有 R 統計都只建立在「對得上 DB 紀錄
+    // 的那些成交」上，但交易所的帳涵蓋**全部**活動——包含配對不到的、使用者
+    // 自己手動下的、以及 DB 紀錄有問題的那些。
+    //
+    // 兩者差距就是「這份分析看不到的部分」。涵蓋率低的話，每筆 -0.05R 這種
+    // 好看的數字可能只是**剛好看到比較好的那 2/3**，不能當成整體表現。
+    const coverage = pnl !== 0 ? auditedUsdt / pnl : 0;
+    console.log(`\n  對帳涵蓋率`);
+    console.log(`    已稽核的 ${findings.length} 筆合計 ${fmt(auditedUsdt)} USDT`);
+    console.log(`    交易所毛已實現       ${fmt(pnl)} USDT`);
+    console.log(`    涵蓋 ${fmt(coverage * 100, 1)}%，未涵蓋 ${fmt(pnl - auditedUsdt)} USDT`);
+    if (coverage < 0.85) {
+      console.log(`    ⚠ **涵蓋率不足。** 上面的 R 統計只看得到部分活動，`);
+      console.log(`       未涵蓋的部分可能系統性地更好或更差，headline 數字要打折。`);
+    }
 
     const costs = Math.abs(fee) + Math.abs(fund);
     if (net < 0) {
