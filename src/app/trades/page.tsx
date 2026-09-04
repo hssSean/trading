@@ -140,6 +140,15 @@ function isLossTrade(t: ClosedLike): boolean {
 type CloseModalState = {
   id: string; symbol: string; direction: 'LONG' | 'SHORT';
   entry: number; tp1: number; tp2: number; sl: number;
+  // 2026-09-04：這筆是不是交易所託管的真倉。**「手動記錄」只寫本地紀錄，
+  // 完全不碰幣安**（useStore.closeTrade 是純狀態變更）。對真倉按下去，
+  // DB 標記結束 → live-runner 看不到這筆 → 停止管理它 → 幣安上留下一個
+  // 沒人管的孤兒部位（實測：UNIUSDT 41 顆成交後 2 分鐘就被標成
+  // WIN_TP2/manual，而部位還開著、還有 2 張掛單）。
+  //
+  // 三態，undefined = 欄位讀不到。那種情況也要警告——不知道就不能當成
+  // 不是真倉，所以判斷式一律用 `!== false` 而不是 `=== true`。
+  executedOnExchange?: boolean;
 } | null;
 
 // 2026-08-07：浮盈/浮虧 chip 的即時計數自己訂閱 usePriceStore，不讓價格
@@ -653,6 +662,7 @@ const TradeRow = memo(function TradeRow({
                 onClick={() => setCloseModal({
                   id: trade.id, symbol: trade.symbol, direction: trade.direction,
                   entry: trade.entry, tp1: trade.tp1, tp2: trade.tp2, sl: trade.stopLoss,
+                  executedOnExchange: trade.executedOnExchange,
                 })}
                 className="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full border border-white/[0.08] text-text-s active:opacity-70"
               >
@@ -703,10 +713,8 @@ export default function TradesPage() {
   // LiveCountLabel，自己訂閱、自己重繪，不牽動這個頁面其他部分。
   const priceOf = useCallback((symbol: string) => usePriceStore.getState().prices[symbol]?.price ?? 0, []);
 
-  const [closeModal, setCloseModal] = useState<{
-    id: string; symbol: string; direction: 'LONG' | 'SHORT';
-    entry: number; tp1: number; tp2: number; sl: number;
-  } | null>(null);
+  // 用同一個 CloseModalState，不要在這裡另外寫一份會漂移的型別。
+  const [closeModal, setCloseModal] = useState<CloseModalState>(null);
   const [exitPrice,  setExitPrice]  = useState('');
   const [exitResult, setExitResult] = useState<TradeResult>('WIN_TP1');
   const [filter,     setFilter]     = useState<'ALL' | 'PENDING' | 'WAITING' | 'CLOSED' | 'PROFIT' | 'LOSS_LIVE'>('ALL');
@@ -1186,6 +1194,19 @@ export default function TradesPage() {
     // Warn if exit price deviates >50% from entry (likely typo)
     const dev = Math.abs(price - closeModal.entry) / closeModal.entry;
     if (dev > 0.5 && !window.confirm(`出場價 $${price} 距進場 $${fmtPrice(closeModal.entry)} 偏離 ${(dev * 100).toFixed(1)}%，確定嗎？`)) return;
+
+    // 真倉的最後一道攔截。closeTrade 是純本地狀態變更，不會送任何訂單到幣安
+    // ——對交易所託管的部位按下去，結果是「紀錄關了、部位還在、而且 live-runner
+    // 因為看不到這筆而停止管理它」。實測撞到：UNIUSDT 41 顆變成孤兒部位。
+    // `!== false` 而不是 `=== true`：欄位讀不到（undefined）時也要擋，
+    // 不知道就不能當成不是真倉。
+    if (closeModal.executedOnExchange !== false && !window.confirm(
+      `⚠ 這是交易所託管的真倉。\n\n`
+      + `在這裡「手動記錄」**只會更新 App 的紀錄，不會平掉幣安上的部位**。\n\n`
+      + `如果你還沒在幣安平倉，按下去會讓那個部位變成沒人管的孤兒`
+      + `（不移動止損、不掛 TP1、不時間止損）。\n\n`
+      + `請先到幣安平倉，再回來記錄。確定已經平掉了嗎？`,
+    )) return;
     // Apply corrected actual entry price BEFORE closing so PnL is accurate
     const parsedActualEntry = parseFloat(actualEntry);
     if (!isNaN(parsedActualEntry) && parsedActualEntry > 0 && parsedActualEntry !== closeModal.entry) {
@@ -1812,6 +1833,21 @@ export default function TradesPage() {
               )}
             </div>
             <p className="text-[#565E6B] text-xs mb-4">記錄後自動解除 LINE 推播鎖定</p>
+
+            {/* 真倉警告。這個標題叫「手動記錄」，而它確實只是記錄——但對交易所
+                託管的部位，使用者很容易讀成「平倉」。實測後果：UNIUSDT 41 顆
+                在幣安上還開著，App 卻已標成 WIN_TP2，live-runner 因此停止管理
+                它。所以警告要在按下去之前就看得到，不能只靠 confirm。 */}
+            {closeModal.executedOnExchange !== false && (
+              <div className="bg-[#2A1215] border border-[#F6465D]/40 rounded-xl px-3 py-2.5 mb-4">
+                <p className="text-[#F6465D] text-xs font-semibold mb-1">⚠ 這是交易所託管的真倉</p>
+                <p className="text-[#C9A2A6] text-[11px] leading-relaxed">
+                  這裡只更新 App 紀錄，<span className="font-semibold">不會平掉幣安上的部位</span>。
+                  還沒在幣安平倉就記錄的話，那個部位會失去自動管理（不移動止損、不掛 TP1、
+                  不時間止損）。<span className="font-semibold">請先在幣安平倉，再回來記錄。</span>
+                </p>
+              </div>
+            )}
 
             <p className="text-[#565E6B] text-xs mb-2">選擇結果（自動填入出場價）</p>
             <div className="grid grid-cols-2 gap-2 mb-4">
