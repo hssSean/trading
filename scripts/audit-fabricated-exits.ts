@@ -120,7 +120,13 @@ interface Finding {
   closedQty: number | null;
   /** 這筆單真正冒的風險（USDT）＝ 成交數量 × |進場價 − 止損價|。 */
   riskUsdt: number | null;
-  /** 真實 R 倍數 ＝ 已實現損益 ÷ 風險。專案一律用 R 衡量，不用原始 %。 */
+  /**
+   * 真實 R 倍數 ＝ **價格變動% ÷ 止損距離%**（用價格算，不用 realizedPnl）。
+   *
+   * 2026-09-04 從「已實現損益 ÷ 風險」改成價格基準：幣安的 realizedPnl 是對
+   * 倉位平均進場價算的，倉位重疊時無法還原「這筆單的損益」。見計算處的說明。
+   * 不含手續費與資金費率——成本在 strategy-health 獨立看。
+   */
   realR: number | null;
   note: string;
 }
@@ -276,15 +282,37 @@ async function main() {
           break;
       }
 
-      // R 倍數要用**真實成交量與真實進場均價**算風險，不能用 DB 的 entry：
-      // DB 記的是訊號價，真實成交可能滑價，而 R 的分母錯了整個 R 就錯了。
-      // 止損價只有 DB 有（那是我們的決定，不是交易所的事實）。
+      // R 倍數要用**真實進場均價**算風險，不能用 DB 的 entry：DB 記的是訊號價，
+      // 真實成交可能滑價，而 R 的分母錯了整個 R 就錯了。止損價只有 DB 有
+      // （那是我們的決定，不是交易所的事實）。
       const stopDist = t.stop_loss != null && r.entryAvg != null
         ? Math.abs(r.entryAvg - t.stop_loss) : null;
       const riskUsdt = stopDist != null && stopDist > 0 && r.entryQty != null
         ? stopDist * r.entryQty : null;
-      const realR = riskUsdt != null && riskUsdt > 0 && r.realizedPnlUsdt != null
-        ? r.realizedPnlUsdt / riskUsdt : null;
+
+      // ── R 用「價格」算，不用 realizedPnl ──
+      //
+      // 2026-09-04：原本是 `realizedPnlUsdt / riskUsdt`。那個在**倉位重疊時
+      // 原理上就不可能對**——幣安的 realizedPnl 是對「倉位平均進場價」算的，
+      // 不是對我們某一筆單算的。同一支幣開兩筆多單（價格不同）會在交易所端
+      // 淨額合併成一個倉位、一個平均進場價，平倉成交回報的損益是對那個平均價
+      // 算的，**根本不存在「這筆單的損益」可以還原**。
+      //
+      // 實測證據：修好 FIFO 的部分消耗 bug 之後，BTC/ARB/ZEC/DOGE 的缺口都
+      // 改善了，但 SOL/HYPE/ADA/ETH/BNB **一個字都沒變**（SOL 交易所 +58.71
+      // vs 稽核 -64.57）。而 SOL 正是那批 1 分鐘內反覆進出的幣之一——
+      // churn 與對帳失準是同一個根因的兩個症狀。
+      //
+      // 價格基準對這個問題免疫：`entryAvg` 是用 orderId 精準比對出來的、
+      // 完全可靠；`exitAvg` 雖然還是 FIFO，但**價格不會被倉位平均化**，
+      // 對配對誤差的敏感度遠低於淨額損益。
+      //
+      // 代價：價格基準不含手續費與資金費率。那是可接受的——衡量策略邊際本來
+      // 就該跟成本分開看，成本在 strategy-health 有獨立的一節。
+      const stopDistPct = stopDist != null && r.entryAvg != null && r.entryAvg > 0
+        ? stopDist / r.entryAvg * 100 : null;
+      const realR = stopDistPct != null && stopDistPct > 0 && r.realPnlPct != null
+        ? r.realPnlPct / stopDistPct : null;
 
       tp1Placed.set(t.id, t.exchange_tp1_algo_id != null);
       findings.push({
@@ -424,7 +452,7 @@ async function main() {
   };
 
   console.log(`\n${'='.repeat(76)}`);
-  console.log('真實 R 分布（已實現損益 ÷ 真實風險）');
+  console.log('真實 R 分布（價格變動% ÷ 止損距離%，不含手續費）');
   console.log('='.repeat(76));
 
   const show2 = (label: string, s: ReturnType<typeof rStats>) => {
