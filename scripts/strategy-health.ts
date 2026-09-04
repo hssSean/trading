@@ -136,6 +136,45 @@ async function main() {
     if (coverage < 0.85) {
       console.log(`    ⚠ **涵蓋率不足。** 上面的 R 統計只看得到部分活動，`);
       console.log(`       未涵蓋的部分可能系統性地更好或更差，headline 數字要打折。`);
+
+      // 缺口拆解到 symbol。三種成因的形狀不同，而它們的意義完全相反：
+      //
+      //   交易所有、稽核完全沒有   → 這個 symbol 的交易不在 DB 裡（多半是
+      //                              使用者手動下的），**不屬於策略表現**
+      //   兩邊都有但金額差很多     → FIFO 配對失敗，是**量測問題**
+      //   兩邊接近                 → 正常
+      //
+      // 分不清楚的話，「策略在虧」跟「我們量不準」會被混為一談。
+      const bySymIncome = new Map<string, number>();
+      for (const r of rows) {
+        if (r.incomeType !== 'REALIZED_PNL') continue;
+        const s = (r as { symbol?: string }).symbol ?? '(無)';
+        bySymIncome.set(s, (bySymIncome.get(s) ?? 0) + (parseFloat(r.income) || 0));
+      }
+      const bySymAudit = new Map<string, number>();
+      for (const f of findings) {
+        bySymAudit.set(f.symbol, (bySymAudit.get(f.symbol) ?? 0) + (f.realizedPnlUsdt ?? 0));
+      }
+
+      const gaps = Array.from(bySymIncome.entries())
+        .map(([sym, inc]) => ({ sym, inc, aud: bySymAudit.get(sym) ?? 0, seen: bySymAudit.has(sym) }))
+        .map(o => ({ ...o, gap: o.inc - o.aud }))
+        .filter(o => Math.abs(o.gap) >= 1)
+        .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap));
+
+      console.log(`\n    缺口拆解（|差| >= 1 USDT）`);
+      console.log(`      ${'symbol'.padEnd(12)}${pad('交易所', 10)}${pad('已稽核', 10)}${pad('差', 10)}  成因`);
+      for (const g of gaps.slice(0, 12)) {
+        const cause = !g.seen ? '整個 symbol 不在 DB → 手動交易'
+          : Math.abs(g.aud) < 0.01 ? '有紀錄但一筆都沒配對上 → 量測問題'
+          : 'FIFO 配對不完整 → 量測問題';
+        console.log(`      ${g.sym.replace('USDT', '').padEnd(12)}${pad(fmt(g.inc), 10)}`
+          + `${pad(fmt(g.aud), 10)}${pad(fmt(g.gap), 10)}  ${cause}`);
+      }
+      const manual = gaps.filter(g => !g.seen).reduce((s, g) => s + g.gap, 0);
+      const mismatch = gaps.filter(g => g.seen).reduce((s, g) => s + g.gap, 0);
+      console.log(`\n      不在 DB 的 symbol 合計   ${fmt(manual)} USDT  ← 不屬於策略表現`);
+      console.log(`      配對不完整合計           ${fmt(mismatch)} USDT  ← 量測問題`);
     }
 
     const costs = Math.abs(fee) + Math.abs(fund);
