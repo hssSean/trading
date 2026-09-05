@@ -119,16 +119,26 @@ npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料
 | 宣稱某個統計結論 | 先看**樣本量、顯著性、涵蓋率**三個 | 這一個月抓到七個量測錯誤，每個在被抓到前都長得像結論 |
 | 要理解跨檔呼叫關係 | `/graphify .` 或 `claude-mem:smart-explore` | `route.ts` 超過 3500 行，整檔讀既慢又容易漏 |
 | 查「這個之前做過嗎」 | `claude-mem:mem-search` | 避免重跑已經做過的分析 |
-| 抓外部網頁／API 文件 | firecrawl MCP，不要裸 WebFetch | 需先設 `FIRECRAWL_API_KEY`（見 `.mcp.json`）**目前未設定，等同停用** |
+| 抓外部網頁／API 文件 | `WebFetch`／`WebSearch` | firecrawl MCP 已於 2026-09-05 從 `.mcp.json` 移除（無 key，呼叫一律回 `Unauthorized: Invalid token`）。要復用：`.mcp.json` 加回 `firecrawl` server + 設 user 環境變數 `FIRECRAWL_API_KEY` |
 
-### ⚠ 已知未生效的工具（2026-09-05 實測）
+### ⚠ 外掛設定的坑（2026-09-05 全數修復，記錄供日後參考）
 
-- **RTK**：`settings.json` 裡 hook 已設定，但 `rtk init --show` 回報
-  `[--] Hook: not found`，且每次 Bash 呼叫都印
-  `/!\ No hook installed`。**token 節省完全沒發生。**
-  修法：`rtk init -g --auto-patch`（會改全域 `~/.claude/settings.json`）。
-- **caveman statusline**：未設定，狀態列看不到目前壓縮等級。
-- **firecrawl**：`FIRECRAWL_API_KEY` 未設定，MCP 反覆連線/斷線但從未被呼叫成功。
+- **RTK 一度被誤判成「完全沒生效」，其實一直在運作。** 當時 `rtk init --show`
+  回報 `[--] Hook: not found`，每次 Bash 呼叫也都印 `/!\ No hook installed`，
+  看起來像 hook 沒裝。實測 `rtk gain` 才發現：2512 筆指令、省下 10.1M token
+  （96%），hook 從頭到尾都在跑。
+  真正壞掉的是 **rtk 的自我偵測**——它拿 `rtk hook claude` 做字面字串比對，而
+  `settings.json` 當時寫的是絕對路徑 `"C:\...\rtk.exe" hook claude`，比對不中。
+  代價不是零：那行警告**被塞進每一次 Bash 輸出**，本身就在燒 token。
+  修法是把 hook 指令改成裸 `rtk hook claude`（三份 rtk 二進位檔 hash 相同，
+  PATH 解析到哪一份都一樣）。
+  ⚠️ **不要直接跑 `rtk init -g --auto-patch`**：rtk 認不得那筆絕對路徑 hook，
+  auto-patch 可能是「再追加一筆」而非取代，變成每次 Bash 跑兩次 rewrite。
+- **caveman statusline**：已設定。`settings.json` 的 `statusLine` 指向
+  `~/.claude/plugins/cache/caveman/caveman/<版本雜湊>/src/hooks/caveman-statusline.ps1`。
+  那段**版本雜湊會隨外掛更新改變**，狀態列變空白時先去該目錄看新的雜湊。
+- **教訓**：「工具沒生效」這種判斷要拿工具自己的用量統計去證實，不要只信它的
+  自我檢查——這次自我檢查說沒裝，用量統計說省了 10.1M。
 
 ---
 
