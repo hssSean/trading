@@ -24,6 +24,9 @@ env.txt
 *.env.txt
 # 對帳報告含 trade_id 與實際損益，不需要進版控。
 audit-fabricated-exits-*.json
+# graphify 的知識圖產物（HTML/JSON/報告）。是從原始碼衍生出來的快取，
+# 可以用 `/graphify . --update` 重建，不該進版控——而且體積不小。
+graphify-out/
 
 # debug
 npm-debug.log*
