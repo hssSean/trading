@@ -177,6 +177,20 @@ export interface RiskCheckInput {
   // 刻意的，理由見 dailyLossCap.ts 檔頭。
   dailyRealizedUsdt?: number | null;
   dailyLossCapUsdt?: number | null;
+  /**
+   * 「現在整體停止開新倉」的原因；`null`/`undefined` = 沒有停機。
+   *
+   * 2026-09-06：回撤停機原本**只存在於 route.ts（產生訊號那側）**，
+   * live-runner（實際下單那側）完全沒有。訊號在停機之前產生、停機之後才輪到
+   * live-runner 處理的話，那筆單照樣會被送出去——而排隊窗口實測可達三天
+   * （UNIUSDT `opened_at 09-01 07:34` / `filled_at 09-04 04:02`）。
+   *
+   * 系統已經判定「策略可能失效要停」，卻還在把先前排隊的單送出去。
+   * kill switch 早就做對了（live-runner 側 fail-closed 整輪跳過），這裡比照。
+   *
+   * 只擋新倉，既有部位不受影響——它們的止損還掛在交易所上。
+   */
+  haltedReason?: string | null;
 }
 
 // 2026-08-20：全局風險額度加總——**只算真的送到交易所的單**。
@@ -260,9 +274,15 @@ export function decideTradeAction(
 ): TradeAction {
   // 1. 還沒真的在交易所下過進場單。
   if (trade.exchangeEntryOrderId === null) {
-    // 日虧損上限最先擋——它是用「錢」衡量的最後一道防線，其餘上限都是 R 或
+    // 整體停機（回撤／熔斷）擋在最前面：它的語意是「現在不該開任何新倉」，
+    // 比任何單筆層級的檢查都優先。訊號可能在停機**之前**就產生了，所以這道
+    // 一定要在執行端再問一次，不能只靠產生端擋。
+    if (risk.haltedReason) {
+      return { kind: 'skip_entry', reason: risk.haltedReason };
+    }
+
+    // 日虧損上限次之——它是用「錢」衡量的最後一道防線，其餘上限都是 R 或
     // 百分比，而 R 的分母（止損距離）會隨波動浮動，R 上限不等於金額上限。
-    // 放在最前面是因為它一旦觸發，後面所有計算都沒有意義。
     const dailyCap = evaluateDailyLossCap({
       realizedUsdt: risk.dailyRealizedUsdt ?? null,
       capUsdt: risk.dailyLossCapUsdt,

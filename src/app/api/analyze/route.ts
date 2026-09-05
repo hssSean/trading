@@ -20,6 +20,7 @@ import {
   activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS,
   symbolsOnSignalCooldown, symbolsInSameCandle, SIGNAL_COOLDOWN_MS,
 } from '@/lib/tradeCooldown';
+import { evaluateDrawdownHalt, type DrawdownTradeRow } from '@/lib/drawdownHalt';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -1917,19 +1918,17 @@ async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; 
     const { data } = await q.order('closed_at', { ascending: true });
     if (!data || data.length === 0) return { halted: false };
 
-    const rows = data as { closed_at: number; pnl_percent?: number | null; entry?: number | null; stop_loss?: number | null; tier?: string | null }[];
-    const points: EquityPoint[] = [];
-    for (const t of rows) {
-      if (t.pnl_percent == null || !t.entry || !t.stop_loss) continue;
-      const stopPct = Math.abs(t.entry - t.stop_loss) / t.entry * 100;
-      if (stopPct <= 0) continue;
-      // 同 checkCircuitBreaker 的口徑：R 倍數 × tier 權重 = 帳戶衝擊
-      points.push({ closedAt: t.closed_at, accountR: (t.pnl_percent / stopPct) * (t.tier === 'B' ? 0.5 : 1.0) });
-    }
-    if (points.length === 0) return { halted: false };
+    // 2026-09-06：換算與判定搬到 src/lib/drawdownHalt.ts，跟 live-runner 共用
+    // 同一份實作。原本這裡有一份、live-runner 沒有——結果是「產生訊號那側
+    // 停機了、實際下單那側照樣送單」。兩份實作也遲早會漂移。
+    const dd = evaluateDrawdownHalt(
+      data as DrawdownTradeRow[],
+      limit,
+    );
+    if (dd.n === 0) return { halted: false };
 
-    const state = calcDrawdown(points);
-    if (state.drawdown >= limit) {
+    const state: DrawdownState = { peak: dd.peakR, current: dd.currentR, drawdown: dd.drawdownR };
+    if (dd.halted) {
       return {
         halted: true,
         reason: `權益回撤 ${state.drawdown.toFixed(2)}R（高點 ${state.peak.toFixed(2)}R → 目前 ${state.current.toFixed(2)}R），已達上限 ${limit}R — 暫停開新倉，請人工檢查策略是否失效；檢查完可用 DELETE /api/analyze?scope=drawdown 確認並從當下重新計算`,

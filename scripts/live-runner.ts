@@ -73,6 +73,7 @@ import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../sr
 import { calcSimpleAtr, TP1_PARTIAL_FRACTION, updateMfeMae } from '../src/lib/monitorMath';
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
 import { readDailyLossCapFromEnv, sumTradingIncome, utcDayStart } from '../src/lib/dailyLossCap';
+import { evaluateDrawdownHalt, readMaxDrawdownR } from '../src/lib/drawdownHalt';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
 
@@ -343,6 +344,7 @@ async function buildRiskInput(
   row: DbTradeRow,
   totalOpenRiskPct: number,
   daily: { realizedUsdt: number | null; capUsdt: number | null } = { realizedUsdt: null, capUsdt: null },
+  haltedReason: string | null = null,
 ): Promise<(RiskCheckInput & { leverage: number }) | null> {
   const balances = await binance.getBalance();
   const usdt = balances.find(b => b.asset === 'USDT');
@@ -380,6 +382,7 @@ async function buildRiskInput(
     },
     dailyRealizedUsdt: daily.realizedUsdt,
     dailyLossCapUsdt: daily.capUsdt,
+    haltedReason,
     leverage,
   };
 }
@@ -743,6 +746,39 @@ async function runCycle(
     }
   }
 
+  // 跨日權益回撤停機。2026-09-06 補：這道原本**只存在於 route.ts**（產生訊號
+  // 那側），這裡完全沒有。訊號在停機之前產生、停機之後才輪到這支處理的話，
+  // 那筆單照樣會被送出去——排隊窗口實測可達三天（UNIUSDT 09-01 掛、09-04 成交）。
+  //
+  // 從 Supabase 推導，不依賴 Redis，也不依賴 route.ts 有沒有在跑
+  // （見 src/lib/drawdownHalt.ts 檔頭）。要跟 route.ts 算出同一個答案，
+  // 就必須用同樣的基準：只看「回撤確認時間之後」平倉的單。
+  let haltedReason: string | null = null;
+  try {
+    const limitR = readMaxDrawdownR();
+    if (limitR > 0) {
+      const { data: prof } = await supabase.from('profiles')
+        .select('drawdown_ack_at').eq('id', userId).single();
+      const ackAt = Number((prof as { drawdown_ack_at?: number | null } | null)?.drawdown_ack_at ?? 0) || 0;
+
+      let q = supabase.from('trades').select('closed_at, pnl_percent, entry, stop_loss, tier')
+        .eq('user_id', userId).not('closed_at', 'is', null).not('result', 'is', null);
+      if (ackAt > 0) q = q.gt('closed_at', ackAt);
+      const { data: closedRows } = await q;
+
+      const dd = evaluateDrawdownHalt(closedRows ?? [], limitR);
+      if (dd.halted) {
+        haltedReason = dd.reason;
+        console.log(`[${nowStr()}] ⚠ ${dd.reason}（納入 ${dd.n} 筆）— 這輪不開新倉，既有部位照常管理`);
+      }
+    }
+  } catch (e) {
+    // 查詢失敗**不擋單**。這道關卡的意義是「策略可能失效，停下來讓人檢查」
+    // ——沒有資料就沒有失效的證據，因為查詢失敗就凍住系統是錯的方向。
+    // （日虧損上限刻意相反，那道是最後一道防線，見 dailyLossCap.ts。）
+    console.error(`[${nowStr()}] 回撤停機查詢失敗，這輪不套用：${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const client: TradeExecutorClient = {
     placeOrder: (params) => binance.placeOrder(params),
     cancelOrder: (symbol, orderId, isAlgoOrder) => binance.cancelOrder(symbol, orderId, isAlgoOrder),
@@ -849,7 +885,7 @@ async function runCycle(
         // 單排除掉了——這筆自己本來就不在 totalOpenRiskPct 裡，不能再減一次
         // （減了會少算，把上限放寬）。直接傳總和＝「其他已掛單/持倉的風險」。
         const built = await buildRiskInput(binance, row, totalOpenRiskPct,
-          { realizedUsdt: dailyRealizedUsdt, capUsdt: dailyLossCapUsdt });
+          { realizedUsdt: dailyRealizedUsdt, capUsdt: dailyLossCapUsdt }, haltedReason);
         if (!built) continue; // 抓不到分級資料，這輪跳過，見 buildRiskInput 說明
         risk = built;
       } else {

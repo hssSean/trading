@@ -38,6 +38,45 @@ function risk(overrides: Partial<RiskCheckInput> = {}): RiskCheckInput {
 // 日虧損上限（src/lib/dailyLossCap.ts）——唯一一道用「錢」而不是 R 衡量的
 // 關卡，也是唯一一道 fail-closed 的。這裡測的是它有沒有真的接在下單路徑上；
 // 門檻邏輯本身的測試在 tests/dailyLossCap.test.ts。
+// 2026-09-06：回撤停機原本只存在於 route.ts（產生訊號那側），live-runner
+// （實際下單那側）完全沒有。訊號在停機**之前**產生、停機**之後**才輪到
+// live-runner 處理的話，那筆單照樣會被送出去——排隊窗口實測可達三天。
+describe('decideTradeAction — 整體停機（回撤／熔斷）', () => {
+  it('停機中不下新單', () => {
+    const a = decideTradeAction(tradeRow(), snapshot(),
+      risk({ haltedReason: '權益回撤 13.00R 已達上限 12R — 暫停開新倉' }));
+    expect(a.kind).toBe('skip_entry');
+    if (a.kind !== 'skip_entry') return;
+    expect(a.reason).toContain('權益回撤');
+  });
+
+  it('沒停機時不影響既有行為', () => {
+    expect(decideTradeAction(tradeRow(), snapshot(), risk({ haltedReason: null })).kind).toBe('place_entry');
+    expect(decideTradeAction(tradeRow(), snapshot(), risk()).kind).toBe('place_entry');
+  });
+
+  // 停機的語意是「現在不該開任何新倉」，比單筆層級的檢查優先。
+  it('同時停機與超過日虧損時，回報停機原因', () => {
+    const a = decideTradeAction(tradeRow(), snapshot(), risk({
+      haltedReason: '權益回撤已達上限', dailyRealizedUsdt: -120, dailyLossCapUsdt: 80,
+    }));
+    expect(a.kind).toBe('skip_entry');
+    if (a.kind !== 'skip_entry') return;
+    expect(a.reason).toContain('權益回撤');
+  });
+
+  // **只擋新倉。** 既有部位的止損已經掛在交易所上，讓它照原計畫走比在停機
+  // 瞬間市價砍掉安全——跟日虧損上限的設計一致。
+  it('已經有部位時不受停機影響，照常管理', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01 }),
+      snapshot({ positionQty: 0.01, entryOrderStillOpen: false, currentStop: null }),
+      risk({ haltedReason: '權益回撤已達上限' }),
+    );
+    expect(a.kind).not.toBe('skip_entry');
+  });
+});
+
 describe('decideTradeAction — 日虧損上限', () => {
   it('沒設上限時不影響既有行為', () => {
     expect(decideTradeAction(tradeRow(), snapshot(), risk()).kind).toBe('place_entry');
