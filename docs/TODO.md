@@ -21,6 +21,38 @@
    ```
    跑完執行 `npx tsx scripts/apply-audit-marks.ts <報告.json> --apply`。
 4. **Vercel Fluid CPU 檢查**（見下方 8/30 那節）。
+5. **Supabase migration（TP2 條件單）** — 沒跑的話 TP2 功能停用，live-runner
+   每輪會印警告但不會壞（有兩段式 fallback）：
+   ```sql
+   ALTER TABLE trades ADD COLUMN IF NOT EXISTS exchange_tp2_algo_id BIGINT;
+   ```
+
+## 🔴 2026-09-06：策略 A 的 TP2 在真倉路徑從來沒被執行過（已修）
+
+使用者回報「打到最終 TP 卻沒有止盈，網站上寫超過多少，但雲端機器完全沒有
+那筆的 log」。
+
+兩條路徑對最終止盈的定義**不一致**：
+
+```
+DB 模擬（route.ts:949/993、walkTpSl）  觸及 TP2 → 平倉，result='WIN_TP2'
+live-runner（真倉）                    TP2 從不檢查，TP1 之後只有移動止損棘輪
+```
+
+`tp2` 在整個 `src/engine/` 只出現過一次（策略 B 的 close-reason 標籤），
+`BridgeTradeRow` 連這個欄位都沒有，`calcTrailingStopTarget` 也沒有 TP2 上限
+——它無限跟著價格跑。
+
+**「沒有 log」是關鍵線索但容易誤讀**：它不代表 live-runner 沒處理到那筆單，
+而是決策回傳 `hold`——live-runner 只在 `result.executed` 為 true 時才印，
+hold 完全靜默。
+
+修法比照 TP1：TP1 之後**預掛** TP2 條件單（`decideTp2OrderPlacement`），
+不用輪詢比價（15 秒一輪碰到插針式觸價又彈回就再也偵測不到，見
+`orderLifecycle.ts` 頂部）。數量用目前剩餘部位、`reduceOnly` 而非
+`closePosition`（止損已佔走該 symbol+方向唯一的額度，會撞 -4130）。
+
+`cleanupAfterTradeClosed` 也要一併撤 TP2，否則關單後留下孤兒條件單。
 
 ## 🔴 真錢之前必須補：完全沒有絕對金額的損失上限
 

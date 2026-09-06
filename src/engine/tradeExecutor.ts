@@ -26,6 +26,12 @@ export interface TradePersistence {
   setEntryOrderId(tradeId: string, orderId: number): Promise<void>;
   setStopAlgoId(tradeId: string, algoId: number): Promise<void>;
   setTp1AlgoId(tradeId: string, algoId: number): Promise<void>;
+  /**
+   * TP2 條件單的 algoId。寫入失敗只 log 不中斷（同其餘 setter）——但要注意
+   * 那會讓下一輪以為還沒掛，重送一次；`newClientOrderId` 是冪等的，幣安會
+   * 用 -4015 之類拒絕重複，不會真的變成兩張單。
+   */
+  setTp2AlgoId(tradeId: string, algoId: number): Promise<void>;
   // 2026-08-10：TP1 改成預掛條件單後，「TP1 真的發生了」不再是某個 action
   // 執行完當下就知道的事——是下一輪自我修復偵測到部位變小才發現。呼叫點
   // 搬到 live-runner 主迴圈（跟 waiting→active 那個自我修復同一種模式），
@@ -99,6 +105,14 @@ export async function executeTradeAction(
       const res = await client.placeOrder(action.order);
       await persist.setTp1AlgoId(tradeId, res.orderId);
       return { executed: true, note: `TP1 條件單已送出 algoId=${res.orderId}` };
+    }
+
+    // 2026-09-06：TP1 之後把剩餘部位的最終止盈掛上去。在此之前策略 A 的 TP2
+    // 在真倉路徑從來沒被執行過——只有移動止損，價格穿過 TP2 什麼都不會發生。
+    case 'place_tp2_order': {
+      const res = await client.placeOrder(action.order);
+      await persist.setTp2AlgoId(tradeId, res.orderId);
+      return { executed: true, note: `TP2 條件單已送出 algoId=${res.orderId}` };
     }
 
     case 'close_full_position': {

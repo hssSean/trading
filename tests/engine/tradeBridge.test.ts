@@ -41,6 +41,62 @@ function risk(overrides: Partial<RiskCheckInput> = {}): RiskCheckInput {
 // 2026-09-06：回撤停機原本只存在於 route.ts（產生訊號那側），live-runner
 // （實際下單那側）完全沒有。訊號在停機**之前**產生、停機**之後**才輪到
 // live-runner 處理的話，那筆單照樣會被送出去——排隊窗口實測可達三天。
+// 2026-09-06：**策略 A 的 TP2 在真倉路徑從來沒被執行過。**
+//
+//   DB 模擬（route.ts / walkTpSl）  觸及 TP2 → 平倉，result='WIN_TP2'
+//   live-runner（真倉）             TP2 從不檢查，TP1 之後只有移動止損棘輪
+//
+// `tp2` 在整個 src/engine/ 只出現過一次（策略 B 的 close-reason 標籤），
+// `BridgeTradeRow` 甚至沒有這個欄位。使用者實測回報「打到最終 TP 卻沒有止盈，
+// 而且雲端機器完全沒有那筆的 log」——沒有 log 是因為決策回傳 hold。
+describe('decideTradeAction — TP2 條件單（TP1 之後）', () => {
+  /** TP1 已發生：部位比進場量小。 */
+  const afterTp1 = (over: Partial<Parameters<typeof tradeRow>[0]> = {}) => tradeRow({
+    exchangeEntryOrderId: 111, exchangeStopAlgoId: 222, exchangeTp1AlgoId: 333,
+    entryQty: 0.01, tp2: 70000, ...over,
+  });
+  const snapAfterTp1 = () => snapshot({
+    positionQty: 0.005, entryOrderStillOpen: false, atr1h: 100,
+    currentStop: { algoId: 222, triggerPrice: 65000 },
+  });
+
+  it('TP1 之後補掛 TP2 條件單', () => {
+    const a = decideTradeAction(afterTp1(), snapAfterTp1(), risk());
+    expect(a.kind).toBe('place_tp2_order');
+    if (a.kind !== 'place_tp2_order') return;
+    expect(a.order.type).toBe('TAKE_PROFIT_MARKET');
+    expect(a.order.stopPrice).toBe(70000);
+    expect(a.order.reduceOnly).toBe(true);
+    // 數量是**目前剩餘部位**，不是進場量——TP1 已經吃掉一部分
+    expect(a.order.quantity).toBeCloseTo(0.005);
+    // 不能用 closePosition：止損單已佔走該 symbol+方向唯一的額度，會撞 -4130
+    expect(a.order.closePosition).toBeUndefined();
+  });
+
+  it('已經掛過就不重掛，讓移動止損接手', () => {
+    const a = decideTradeAction(afterTp1({ exchangeTp2AlgoId: 444 }), snapAfterTp1(), risk());
+    expect(a.kind).not.toBe('place_tp2_order');
+  });
+
+  // 沒有 tp2（舊資料、或還沒跑 migration）時要維持原行為，不能整筆卡住。
+  it('tp2 缺值時跳過，不影響移動止損', () => {
+    const a = decideTradeAction(afterTp1({ tp2: null }), snapAfterTp1(), risk());
+    expect(a.kind).not.toBe('place_tp2_order');
+  });
+
+  it('做空方向掛 BUY 單', () => {
+    const a = decideTradeAction(
+      afterTp1({ isLong: false, entry: 65000, stopLoss: 66000, tp1: 63000, tp2: 60000 }),
+      snapshot({ positionQty: 0.005, entryOrderStillOpen: false, atr1h: 100, currentStop: { algoId: 222, triggerPrice: 66000 } }),
+      risk(),
+    );
+    expect(a.kind).toBe('place_tp2_order');
+    if (a.kind !== 'place_tp2_order') return;
+    expect(a.order.side).toBe('BUY');
+    expect(a.order.stopPrice).toBe(60000);
+  });
+});
+
 describe('decideTradeAction — 整體停機（回撤／熔斷）', () => {
   it('停機中不下新單', () => {
     const a = decideTradeAction(tradeRow(), snapshot(),

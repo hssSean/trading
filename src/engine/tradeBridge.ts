@@ -10,7 +10,7 @@ import { PlaceOrderParams, UserTrade } from './binanceClient';
 import { SymbolFilters } from './precision';
 import {
   calcTrailingStopTarget, decideEntryOrder, decideFullClose,
-  decideTp1OrderPlacement, decideTrailingStopReplace,
+  decideTp1OrderPlacement, decideTp2OrderPlacement, decideTrailingStopReplace,
 } from './orderLifecycle';
 import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
 import { decideTimeStop, tfBarMinutes, TimeStopCloseReason, TimeStopTimeframe } from './timeStop';
@@ -125,6 +125,12 @@ export interface BridgeTradeRow {
   entry: number;
   stopLoss: number;
   tp1: number;
+  /**
+   * 最終止盈價。2026-09-06 新增到這個型別——在此之前 `tp2` **從來沒有進過
+   * 真倉決策路徑**，所以策略 A 的最終止盈實際上不存在（只有移動止損）。
+   * 選填讓還沒帶這個欄位的呼叫端維持原行為。
+   */
+  tp2?: number | null;
   // 策略B（均值回歸）沒有兩階段 TP——tp1/tp2 是同一個值（[tp1, tp1]，見
   // signals.ts generateMeanReversionSignals），觸價要整單了結，不是先平一半
   // 留一半給移動止損。策略A才有 TP1 部分平倉 + 移動止損那一整套。
@@ -143,6 +149,15 @@ export interface BridgeTradeRow {
   exchangeEntryOrderId: number | null;
   exchangeStopAlgoId: number | null;
   exchangeTp1AlgoId: number | null;
+  /**
+   * TP2 條件單的 algoId。`null` = 還沒掛。
+   *
+   * 2026-09-06 新增。在此之前**策略 A 的 TP2 在真倉路徑從來沒被執行過**——
+   * DB 模擬會在觸及 TP2 時平倉並記 WIN_TP2，真倉卻只有移動止損棘輪，價格
+   * 穿過 TP2 什麼都不會發生。選填（`?`）是為了讓還沒跑 migration 的環境
+   * 維持原行為而不是壞掉。
+   */
+  exchangeTp2AlgoId?: number | null;
 }
 
 export interface BridgeExchangeSnapshot {
@@ -228,6 +243,7 @@ export type TradeAction =
   | { kind: 'sync_closed_position'; avgExitPrice: number; realizedPnl: number; result: 'WIN_TP1' | 'LOSS' }
   | { kind: 'place_initial_stop'; order: PlaceOrderParams }
   | { kind: 'place_tp1_order'; order: PlaceOrderParams }
+  | { kind: 'place_tp2_order'; order: PlaceOrderParams }
   // 2026-08-12：closeReason 帶著「我們為什麼主動關這筆倉」的第一手事實
   // （時間止損/盤整停滯的哪一種），不是事後用出場價/損益猜的——執行層
   // 會把它先寫回 trades.close_reason，下一輪 sync_closed_position 對帳到
@@ -450,8 +466,30 @@ export function decideTradeAction(
     return holdOrTimeStop(trade, snapshot, false, '持有中，等待 TP1 條件單觸發');
   }
 
-  // 策略A：TP1 已經發生（部位比進場量小）→ 移動止損棘輪。沒有 ATR 資料就
-  // 不亂動，維持現狀。
+  // 策略A：TP1 已經發生（部位比進場量小）。
+  //
+  // 2026-09-06：先補掛 TP2 條件單。在此之前這裡直接跳到移動止損棘輪，
+  // **TP2 從來沒有被執行過**——DB 模擬會在觸及 TP2 時平倉記 WIN_TP2，真倉
+  // 只有移動止損，價格穿過 TP2 什麼都不會發生（使用者實測：「打到最終 TP
+  // 卻沒有止盈，而且雲端機器完全沒有那筆的 log」——沒有 log 是因為決策回
+  // 傳 hold，live-runner 只在 executed 為 true 時才印）。
+  //
+  // 排在移動止損之前：兩者不衝突（TP2 是 reduceOnly+quantity，移動止損是
+  // closePosition），但先把最終出場掛上去比較安全——移動止損每輪都可能改，
+  // 而 TP2 只需要掛一次。
+  if (trade.exchangeTp2AlgoId == null && trade.tp2 != null) {
+    const tp2Decision = decideTp2OrderPlacement({
+      tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
+      positionQty: snapshot.positionQty, tp2: trade.tp2, filters: snapshot.filters,
+    });
+    if (!tp2Decision.skip) {
+      return { kind: 'place_tp2_order', order: tp2Decision.order };
+    }
+    // skip 不 return——掛不上 TP2（部位太小之類）時仍然要讓移動止損接手，
+    // 不能因此整筆卡住不管理。
+  }
+
+  // 移動止損棘輪。沒有 ATR 資料就不亂動，維持現狀。
   if (snapshot.atr1h !== undefined && snapshot.atr1h > 0) {
     const target = calcTrailingStopTarget({
       isLong: trade.isLong, entry: trade.entry, tp1: trade.tp1, markPrice: snapshot.markPrice,

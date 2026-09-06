@@ -221,6 +221,75 @@ export function decideTp1OrderPlacement(input: Tp1OrderInput): Tp1OrderDecision 
   };
 }
 
+// ── TP2 conditional order（TP1 之後掛，把剩下的部位了結）────────────────────
+//
+// 2026-09-06：**策略 A 的 TP2 在真倉路徑從來沒被執行過。** 兩條路徑對「最終
+// 止盈」的定義不一致：
+//
+//   DB 模擬（route.ts / walkTpSl）  價格觸及 TP2 → 平倉，result='WIN_TP2'
+//   live-runner（真倉）             TP2 從不檢查，TP1 之後只有移動止損棘輪
+//
+// `tp2` 在整個 src/engine/ 只出現過一次，還只是策略 B 的 close-reason 標籤；
+// `calcTrailingStopTarget` 也沒有任何 TP2 上限，它無限跟著價格跑。
+//
+// 使用者實測回報：「打到最終 TP 卻沒有止盈，網站上寫超過多少，但雲端機器
+// 那筆完全沒有 log」。沒有 log 是因為決策回傳 `hold`——live-runner 只在
+// `result.executed` 為 true 時才印，hold 完全靜默。
+//
+// 修法比照 TP1：**預掛在交易所**，不要用輪詢比價。orderLifecycle 頂部那段
+// 說明講過為什麼——15 秒一輪的輪詢碰到插針式觸價又彈回就再也偵測不到。
+//
+// 數量用「目前剩餘部位」而不是進場量的一半：TP1 已經吃掉一部分，實際剩多少
+// 只有快照知道。closePosition 不能用（止損單已經佔走那個 symbol+方向唯一的
+// closePosition 額度，第二張會被 -4130 拒絕），所以跟 TP1 一樣走
+// quantity + reduceOnly。
+
+export interface Tp2OrderInput {
+  tradeId: string;
+  symbol: string;
+  isLong: boolean;
+  /** 目前交易所端的剩餘部位量（TP1 已經平掉一部分之後的）。 */
+  positionQty: number;
+  tp2: number;
+  filters: SymbolFilters;
+}
+
+export type Tp2OrderDecision =
+  | { skip: true; reason: string }
+  | { skip: false; order: PlaceOrderParams };
+
+export function decideTp2OrderPlacement(input: Tp2OrderInput): Tp2OrderDecision {
+  if (input.positionQty <= 0) {
+    return { skip: true, reason: 'positionQty <= 0 — 沒有可平的部位' };
+  }
+  if (!(input.tp2 > 0)) {
+    return { skip: true, reason: `tp2=${input.tp2} 無效，跳過 TP2 條件單` };
+  }
+
+  // Floor 同 TP1：平少一點是安全的，平多於持倉會被幣安以 -2022 拒絕。
+  const qty = roundToStepSize(input.positionQty, input.filters.stepSize);
+  if (qty <= 0) {
+    return {
+      skip: true,
+      reason: `剩餘部位 ${input.positionQty} 在 stepSize ${input.filters.stepSize} 下取整為 0，太小無法下 TP2 單`,
+    };
+  }
+
+  return {
+    skip: false,
+    order: {
+      symbol: input.symbol,
+      side: input.isLong ? 'SELL' : 'BUY',
+      type: 'TAKE_PROFIT_MARKET',
+      stopPrice: roundToTickSize(input.tp2, input.filters.tickSize),
+      quantity: qty,
+      reduceOnly: true,
+      // 冪等 ID，避免重試造成重複掛單（同 TP1）。
+      newClientOrderId: `${input.tradeId}-tp2order`,
+    },
+  };
+}
+
 // ── Full close ───────────────────────────────────────────────────────────────
 //
 // 策略B（均值回歸）沒有 TP1/TP2 兩階段——signals.ts 的

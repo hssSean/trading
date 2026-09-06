@@ -146,6 +146,7 @@ interface DbTradeRow {
   exchange_entry_order_id: number | null;
   exchange_stop_algo_id: number | null;
   exchange_tp1_algo_id: number | null;
+  exchange_tp2_algo_id?: number | null;
   mfe_price: number | null;
   mae_price: number | null;
   close_reason: string | null;
@@ -161,6 +162,7 @@ function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
     entry: row.entry,
     stopLoss: row.stop_loss,
     tp1: row.tp1,
+    tp2: row.tp2,
     strategy: row.strategy === 'B' ? 'B' : 'A',
     // 資料庫欄位是自由字串，時間止損只認得這五種——不認得的一律當 1h
     // （route.ts tfBarMinutes 的 default 分支同一個處理方式，不是另外發明的）。
@@ -171,6 +173,7 @@ function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
     exchangeEntryOrderId: row.exchange_entry_order_id,
     exchangeStopAlgoId: row.exchange_stop_algo_id,
     exchangeTp1AlgoId: row.exchange_tp1_algo_id,
+    exchangeTp2AlgoId: row.exchange_tp2_algo_id ?? null,
   };
 }
 
@@ -192,6 +195,18 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
     async setTp1AlgoId(tradeId, algoId) {
       const { error } = await supabase.from('trades').update({ exchange_tp1_algo_id: algoId }).eq('id', tradeId);
       logErr('setTp1AlgoId', error);
+    },
+    async setTp2AlgoId(tradeId, algoId) {
+      const { error } = await supabase.from('trades').update({ exchange_tp2_algo_id: algoId }).eq('id', tradeId);
+      // 42703/PGRST204 = 還沒跑 migration。講清楚要執行什麼，不要靜默——
+      // 欄位不存在會讓每一輪都重掛一次 TP2（幣安端靠 newClientOrderId 擋住
+      // 重複，不會變成兩張單，但 log 會一直洗）。
+      if (error && (error.code === '42703' || error.code === 'PGRST204')) {
+        console.error(`[${nowStr()}] ⚠ trades.exchange_tp2_algo_id 不存在，TP2 條件單無法記錄。`
+          + ` 請執行：ALTER TABLE trades ADD COLUMN IF NOT EXISTS exchange_tp2_algo_id BIGINT;`);
+      } else {
+        logErr('setTp2AlgoId', error);
+      }
     },
     async markTp1Hit(tradeId) {
       const { error } = await supabase.from('trades').update({ status: 'tp1_hit' }).eq('id', tradeId);
@@ -555,8 +570,11 @@ async function cleanupAfterTradeClosed(
   binance: BinanceFuturesClient, redis: Redis, row: DbTradeRow, cancelOrders: boolean, lossResult: boolean,
 ): Promise<void> {
   if (cancelOrders) {
-    for (const algoId of [row.exchange_stop_algo_id, row.exchange_tp1_algo_id]) {
-      if (algoId === null) continue;
+    // 2026-09-06：TP2 一併撤。漏掉的話關單後會留下一張沒有對應持倉的條件單
+    // ——那正是先前 XRPUSDT 孤兒 TAKE_PROFIT_MARKET 每 15 秒被重複回報一整天
+    // 的形狀，而且下次這個 symbol 再開倉時會撞到既有單。
+    for (const algoId of [row.exchange_stop_algo_id, row.exchange_tp1_algo_id, row.exchange_tp2_algo_id]) {
+      if (algoId == null) continue;
       try {
         await binance.cancelOrder(row.symbol, algoId, true);
       } catch (e) {
@@ -701,17 +719,32 @@ async function runCycle(
     console.error(`[${nowStr()}] 全帳戶對帳讀取失敗: ${String(e).slice(0, 150)}`);
   }
 
-  const { data: rows, error } = await supabase
-    .from('trades')
-    .select('id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price,close_reason')
-    .eq('user_id', userId)
-    .is('closed_at', null);
+  // 2026-09-06：`exchange_tp2_algo_id` 需要 migration。**直接放進 select 會讓
+  // 還沒跑 migration 的環境整個查詢失敗，live-runner 完全停擺**——這是真錢
+  // 路徑，不能為了一個新欄位冒這種風險。照專案既有的兩段式 fallback 慣例：
+  // 42703/PGRST204 就退回不含該欄位的查詢，功能降級但不中斷。
+  const BASE_COLS = 'id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,'
+    + 'suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,'
+    + 'exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price,close_reason';
 
+  const selectOpen = (cols: string) => supabase
+    .from('trades').select(cols).eq('user_id', userId).is('closed_at', null);
+
+  let res = await selectOpen(`${BASE_COLS},exchange_tp2_algo_id`);
+  if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204')) {
+    console.error(`[${nowStr()}] ⚠ trades.exchange_tp2_algo_id 不存在，TP2 條件單功能停用。`
+      + ` 請執行：ALTER TABLE trades ADD COLUMN IF NOT EXISTS exchange_tp2_algo_id BIGINT;`);
+    res = await selectOpen(BASE_COLS);
+  }
+
+  const { data: rows, error } = res;
   if (error) {
     console.error(`[${nowStr()}] 讀取 open trades 失敗: [${error.code}] ${error.message}`);
     return;
   }
-  const openTrades = (rows ?? []) as DbTradeRow[];
+  // 經過 unknown：兩段式 fallback 讓 supabase-js 推不出單一列型別（兩次查詢
+  // 的欄位集不同），這裡的 shape 由 DbTradeRow 保證，不是靠推導。
+  const openTrades = (rows ?? []) as unknown as DbTradeRow[];
   if (openTrades.length === 0) {
     console.log(`[${nowStr()}] OK，目前沒有開著的推薦單`);
     return;

@@ -33,6 +33,7 @@ class FakePersist implements TradePersistence {
   entryOrderIds: Array<{ tradeId: string; orderId: number }> = [];
   stopAlgoIds: Array<{ tradeId: string; algoId: number }> = [];
   tp1AlgoIds: Array<{ tradeId: string; algoId: number }> = [];
+  tp2AlgoIds: Array<{ tradeId: string; algoId: number }> = [];
   tp1HitCalls: string[] = [];
   finalizeCalls: Array<{ tradeId: string; result: unknown }> = [];
   neverFilledCalls: string[] = [];
@@ -43,6 +44,7 @@ class FakePersist implements TradePersistence {
   async setEntryOrderId(tradeId: string, orderId: number) { this.entryOrderIds.push({ tradeId, orderId }); }
   async setStopAlgoId(tradeId: string, algoId: number) { this.stopAlgoIds.push({ tradeId, algoId }); }
   async setTp1AlgoId(tradeId: string, algoId: number) { this.tp1AlgoIds.push({ tradeId, algoId }); }
+  async setTp2AlgoId(tradeId: string, algoId: number) { this.tp2AlgoIds.push({ tradeId, algoId }); }
   async markTp1Hit(tradeId: string) { this.tp1HitCalls.push(tradeId); }
   async markFilled(tradeId: string, filledAt: number) { this.filledCalls.push({ tradeId, filledAt }); }
   async finalizeClosed(tradeId: string, result: unknown) { this.finalizeCalls.push({ tradeId, result }); }
@@ -105,6 +107,25 @@ describe('executeTradeAction — place_tp1_order', () => {
 
     expect(client.placeOrderCalls).toEqual([tp1Order]);
     expect(persist.tp1AlgoIds).toEqual([{ tradeId: 'trade-1', algoId: 1000 }]);
+  });
+});
+
+// 2026-09-06：在此之前策略 A 的 TP2 在真倉路徑從來沒被執行過——只有移動止損，
+// 價格穿過 TP2 什麼都不會發生。使用者實測：「打到最終 TP 卻沒有止盈」。
+describe('executeTradeAction — place_tp2_order', () => {
+  it('places the TP2 condition order and persists the algoId', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    const tp2Order: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'TAKE_PROFIT_MARKET', stopPrice: 70000, quantity: 0.005, reduceOnly: true };
+    const action: TradeAction = { kind: 'place_tp2_order', order: tp2Order };
+
+    const r = await executeTradeAction(client, persist, 'trade-1', action);
+
+    expect(r.executed).toBe(true);
+    expect(client.placeOrderCalls).toEqual([tp2Order]);
+    expect(persist.tp2AlgoIds).toEqual([{ tradeId: 'trade-1', algoId: 1000 }]);
+    // 不可誤寫成 TP1——兩個欄位混用會讓下一輪以為 TP1 沒掛而重掛
+    expect(persist.tp1AlgoIds).toEqual([]);
   });
 });
 
