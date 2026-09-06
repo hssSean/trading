@@ -136,6 +136,11 @@ export function decideEntryOrder(input: EntryOrderInput): EntryOrderDecision {
 // quantity + reduceOnly 模式（quantity 是全部部位，不是一半），不再跟止損
 // 用 closePosition 互斥。
 //
+// 2026-09-06 後記：止損單自己也改用 quantity + reduceOnly 了（見
+// decideTrailingStopReplace 上方的 UNI 翻倉事故說明），所以 -4130 這個互斥
+// 問題在整條路徑上都不再存在。這段保留是因為它記錄了「為什麼策略B的 TP1
+// 曾經整整一段時間沒掛出去」，那個教訓還有效。
+//
 // reduceOnly 用量的取捨：closePosition=true 部位平掉時交易所會自動連帶
 // 取消該單；reduceOnly 的固定數量單不會，部位已經靠止損出場的話這張 TP1
 // 會變成孤兒單留在交易所——但這已經被 live-runner 的帳戶級對帳
@@ -169,10 +174,11 @@ export function decideTp1OrderPlacement(input: Tp1OrderInput): Tp1OrderDecision 
   const side = input.isLong ? 'SELL' : 'BUY';
 
   if (input.strategy === 'B') {
-    // 策略B沒有兩階段 TP，觸價即整單了結——但不能用 closePosition=true：
-    // 止損單已經佔用了這個 symbol+方向唯一允許的 closePosition 條件單額度，
-    // 第二張會被幣安以 -4130 拒絕（見上方模組註解）。改用 quantity（全部
-    // 部位）+ reduceOnly，跟策略A的部分平倉走同一種下單模式，只是數量是全部。
+    // 策略B沒有兩階段 TP，觸價即整單了結——用 quantity（全部部位）+
+    // reduceOnly，跟策略A的部分平倉走同一種下單模式，只是數量是全部。
+    // 原因有兩層：早期是 -4130 互斥（見上方模組註解），2026-09-06 之後更根本
+    // ——closePosition 的數量由交易所決定，而它算錯過（見
+    // decideTrailingStopReplace 上方的 UNI 翻倉事故）。
     const fullQty = roundToStepSize(input.positionQty, input.filters.stepSize);
     if (fullQty <= 0) {
       return {
@@ -240,8 +246,9 @@ export function decideTp1OrderPlacement(input: Tp1OrderInput): Tp1OrderDecision 
 // 說明講過為什麼——15 秒一輪的輪詢碰到插針式觸價又彈回就再也偵測不到。
 //
 // 數量用「目前剩餘部位」而不是進場量的一半：TP1 已經吃掉一部分，實際剩多少
-// 只有快照知道。closePosition 不能用（止損單已經佔走那個 symbol+方向唯一的
-// closePosition 額度，第二張會被 -4130 拒絕），所以跟 TP1 一樣走
+// 只有快照知道。不用 closePosition——早期理由是 -4130 互斥，2026-09-06 之後
+// 是整個專案的一致做法（closePosition 的數量由交易所決定，而它算錯過，見
+// decideTrailingStopReplace 上方的 UNI 翻倉事故），所以跟 TP1 一樣走
 // quantity + reduceOnly。
 
 export interface Tp2OrderInput {
@@ -386,12 +393,31 @@ export function calcTrailingStopTarget(input: TrailingStopTargetInput): number {
 // as the single most dangerous failure mode this whole system guards against).
 //
 // This function always sequences PLACE before CANCEL. Both orders briefly
-// coexist with closePosition=true — that's safe: whichever triggers first
-// flattens the position, and the other becomes a no-op stop with nothing to
-// close (the exchange returns an error for it, which the caller/watchdog should
-// recognize as expected, not an anomaly, once it fires against a flat position).
-// The alternative order (cancel-then-place) trades that harmless race for a real
-// naked-position window if the place call fails or is delayed — strictly worse.
+// coexist — that's safe: whichever triggers first flattens the position, and the
+// other becomes a reduceOnly order with nothing left to reduce (the exchange
+// rejects it, which the caller/watchdog should recognize as expected, not an
+// anomaly). The alternative order (cancel-then-place) trades that harmless race
+// for a real naked-position window if the place call fails or is delayed —
+// strictly worse.
+//
+// ── 為什麼數量自己算，不用 closePosition=true（2026-09-06）──────────────
+// 舊版送 `closePosition: true` 不帶 quantity，等於把「要平多少」交給交易所。
+// 幣安 testnet 對 UNIUSDT trade-1788511232519-z9tmu 連續四次算錯：
+//   09-01 部位 82 → 平 41      09-04 部位 31 → 平 10
+//   09-05 部位 21 → 平 20      09-06 部位  1 → **平 40**
+// 最後一次把多單翻成 -39 的空單，而且那 39 張沒有任何保護單（決策層看到
+// 方向不符只會停手，不會自己平掉）。證據：同一筆單另外 237 張未觸發的止損
+// 單記錄 quantity 都是 0，數量不是我們送的；同期 TP1/TP2 那條
+// quantity+reduceOnly 路徑一次都沒出錯（XRP 1496.9 全平、ZEC 精準平一半）。
+// 為什麼只有 UNI 中招沒有查出來——四個資料點湊不出規則，而且那是交易所端
+// 的計算，我們這邊量不到。所以改成不依賴它：數量自己算，reduceOnly 讓交易所
+// 只能減倉不能開倉，翻倉在原理上不可能發生。
+//
+// 副作用：closePosition=true 的單在部位平掉時交易所會自動連帶取消，
+// reduceOnly 的不會，會留下孤兒條件單——這跟 TP1/TP2 早就有的狀況一樣，
+// live-runner 的帳戶級對帳（getOpenAlgoOrders 全帳戶掃描）已經在收，
+// 不是新風險。順帶好處：不再佔用 symbol+方向唯一的 closePosition 額度，
+// -4130 那類互斥問題在這條路徑上消失。
 
 export interface CurrentStopOrder {
   orderId: number;
@@ -404,6 +430,7 @@ export interface TrailingStopReplaceInput {
   isLong: boolean;
   currentStopOrder: CurrentStopOrder | null; // null = no live protective order (shouldn't happen post-fill; caller/watchdog should treat this as position_without_stop)
   desiredStopPrice: number;                   // output of the existing (unchanged) trailing-stop math
+  positionQty: number;                        // 目前部位的絕對值（positionRisk 快照），止損單的數量
   filters: SymbolFilters;
 }
 
@@ -415,12 +442,23 @@ export type TrailingStopAction =
 export function decideTrailingStopReplace(input: TrailingStopReplaceInput): TrailingStopAction {
   const roundedTarget = roundToTickSize(input.desiredStopPrice, input.filters.tickSize);
 
+  // Floor（roundToStepSize 本身就是無條件捨去）：寧可少平一點點，也不要送出
+  // 比部位大的數量。reduceOnly 會再擋一層，但下單前先算對比較好對帳。
+  const qty = roundToStepSize(input.positionQty, input.filters.stepSize);
+  if (qty <= 0) {
+    return {
+      kind: 'none',
+      reason: `部位量 ${input.positionQty} 在 stepSize ${input.filters.stepSize} 下取整為 0，掛不出合法的止損單`,
+    };
+  }
+
   const place: PlaceOrderParams = {
     symbol: input.symbol,
     side: input.isLong ? 'SELL' : 'BUY',
     type: 'STOP_MARKET',
     stopPrice: roundedTarget,
-    closePosition: true,
+    quantity: qty,
+    reduceOnly: true,
     // Price-keyed, not time-based: two calls that land on the same target price
     // (e.g. the ratchet math re-runs on a cron cycle where nothing moved) must
     // collapse to the same ID and get rejected as a duplicate, not place a

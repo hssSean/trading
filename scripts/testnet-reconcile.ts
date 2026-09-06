@@ -179,11 +179,14 @@ async function main() {
     anomaliesNoStop,
   );
 
-  step('12. 補上止損單（STOP_MARKET, closePosition=true）');
+  // 2026-09-06：跟正式路徑一致改用 quantity + reduceOnly。closePosition 的
+  // 數量由交易所決定，而它算錯過（UNI 部位剩 1 張卻平了 40 張，直接翻成空單）
+  // ——見 src/engine/orderLifecycle.ts decideTrailingStopReplace 上方註解。
+  step('12. 補上止損單（STOP_MARKET, quantity + reduceOnly）');
   const entryPrice = parseFloat(pos?.entryPrice ?? '0');
   const stopPrice = roundToTickSize(entryPrice * 0.97, f.tickSize); // 3% 止損，僅供驗證流程用
   const stopOrder = await client.placeOrder({
-    symbol: SYMBOL, side: 'SELL', type: 'STOP_MARKET', stopPrice, closePosition: true,
+    symbol: SYMBOL, side: 'SELL', type: 'STOP_MARKET', stopPrice, quantity: openQty, reduceOnly: true,
     newClientOrderId: mkId('sl'),
   });
   check('止損單掛單成功', !!stopOrder.orderId, stopOrder);

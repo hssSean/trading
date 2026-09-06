@@ -448,7 +448,11 @@ describe('decideTradeAction — filled position, no stop yet (the naked-position
     expect(a.kind).toBe('place_initial_stop');
     if (a.kind !== 'place_initial_stop') return;
     expect(a.order.type).toBe('STOP_MARKET');
-    expect(a.order.closePosition).toBe(true);
+    // 2026-09-06 UNI 翻倉事故後改成自帶數量——closePosition 讓交易所決定平多少，
+    // 而它算錯過（部位 1 張平 40 張）。詳見 orderLifecycle.ts 該函數上方註解。
+    expect(a.order.quantity).toBe(0.01);
+    expect(a.order.reduceOnly).toBe(true);
+    expect(a.order.closePosition).toBeUndefined();
   });
 });
 

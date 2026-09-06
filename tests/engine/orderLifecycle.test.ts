@@ -216,6 +216,7 @@ function trailInput(overrides: Partial<TrailingStopReplaceInput> = {}): Trailing
     isLong: true,
     currentStopOrder: null,
     desiredStopPrice: 65100,
+    positionQty: 0.1,
     filters,
     ...overrides,
   };
@@ -231,7 +232,8 @@ describe('decideTrailingStopReplace', () => {
       side: 'SELL',
       type: 'STOP_MARKET',
       stopPrice: 65100,
-      closePosition: true,
+      quantity: 0.1,
+      reduceOnly: true,
     });
     // 2026-08-17：clientOrderId 的價格部分改成固定 6 碼雜湊（見 hashPrice
     // 註解），不再是原始價格字串——只斷言格式，不鎖死雜湊實作細節。
@@ -247,6 +249,7 @@ describe('decideTrailingStopReplace', () => {
       tradeId: 'trade-1786684938436-spsm2', // 真實撞到的 tradeId 格式，25 字元
       symbol: 'COTIUSDT',
       desiredStopPrice: 0.011066999999999999,
+      positionQty: 500, // 低價幣的部位張數本來就大；stepSize 1 之下 0.1 會被取整成 0
       filters: { stepSize: 1, tickSize: 0.0001, minNotional: 5 },
     }));
     expect(a.kind).toBe('initialize');
@@ -260,6 +263,41 @@ describe('decideTrailingStopReplace', () => {
     expect(a.kind).toBe('initialize');
     if (a.kind !== 'initialize') return;
     expect(a.place.side).toBe('BUY');
+  });
+
+  // 2026-09-06 實測事故（UNIUSDT trade-1788511232519-z9tmu）：止損單用
+  // closePosition=true 不帶 quantity，等於把「要平多少」的決定權交給交易所。
+  // 幣安 testnet 連續四次算錯——82→平41、31→平10、21→平20，最後一次部位
+  // 只剩 1 張卻平了 40 張，**把多單翻成 -39 的空單**，而且新開的那 39 張
+  // 沒有任何止損保護（algoId 1000000194071400 / actualQty=40，對照同一筆單
+  // 另外 237 張未觸發的止損單記錄都是 quantity=0，證明數量不是我們送的）。
+  // 對照組：同期 TP1/TP2 那條 quantity+reduceOnly 路徑一次都沒出錯。
+  // 結論：數量一律自己算，reduceOnly 讓交易所只能平不能開。
+  it('一律自己指定 quantity + reduceOnly，永遠不用 closePosition（2026-09-06 UNI 翻倉事故）', () => {
+    const a = decideTrailingStopReplace(trailInput({ positionQty: 39, filters: { stepSize: 1, tickSize: 0.001, minNotional: 5 } }));
+    expect(a.kind).toBe('initialize');
+    if (a.kind !== 'initialize') return;
+    expect(a.place.quantity).toBe(39);
+    expect(a.place.reduceOnly).toBe(true);
+    expect(a.place.closePosition).toBeUndefined();
+  });
+
+  it('quantity 照 stepSize 無條件捨去，不會下出比部位還大的單', () => {
+    const a = decideTrailingStopReplace(trailInput({
+      positionQty: 0.10999,
+      currentStopOrder: { orderId: 111, stopPrice: 64900 },
+      desiredStopPrice: 65200,
+    }));
+    expect(a.kind).toBe('replace');
+    if (a.kind !== 'replace') return;
+    expect(a.place.quantity).toBe(0.109);
+  });
+
+  it('部位取整後為 0 就不下單——寧可沒有止損單也不要下一張數量非法的單', () => {
+    const a = decideTrailingStopReplace(trailInput({
+      positionQty: 0.0005, // stepSize 0.001 之下取整為 0
+    }));
+    expect(a.kind).toBe('none');
   });
 
   it('replaces (place-before-cancel) when the new target is more favorable — LONG moves up', () => {

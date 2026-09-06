@@ -441,14 +441,18 @@ export function decideTradeAction(
   if (snapshot.currentStop === null) {
     const stopDecision = decideTrailingStopReplace({
       tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
-      currentStopOrder: null, desiredStopPrice: trade.stopLoss, filters: snapshot.filters,
+      currentStopOrder: null, desiredStopPrice: trade.stopLoss,
+      positionQty: snapshot.positionQty, filters: snapshot.filters,
     });
     if (stopDecision.kind === 'initialize') {
       return { kind: 'place_initial_stop', order: stopDecision.place };
     }
-    // currentStopOrder: null 只會產生 'initialize'，這個分支理論上不會走到——
-    // 留著是因為 TypeScript 不知道這件事，寧可回一個看得懂的 hold 也不要 unreachable throw。
-    return { kind: 'hold', reason: '補止損決策回傳非預期結果' };
+    // currentStopOrder: null 之下只可能是 'initialize' 或 'none'（部位小到
+    // stepSize 取整為 0，掛不出合法數量）。後者沒有動作可做，如實回報原因。
+    return {
+      kind: 'hold',
+      reason: stopDecision.kind === 'none' ? `補止損跳過：${stopDecision.reason}` : '補止損決策回傳非預期結果',
+    };
   }
 
   // 5. 有止損。TP1 是否已經發生——不再看條件單還在不在（消失可能是成交也
@@ -499,7 +503,8 @@ export function decideTradeAction(
       const breakevenDecision = decideTrailingStopReplace({
         tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
         currentStopOrder: { orderId: snapshot.currentStop.algoId, stopPrice: snapshot.currentStop.triggerPrice },
-        desiredStopPrice: trade.entry, filters: snapshot.filters,
+        desiredStopPrice: trade.entry,
+        positionQty: snapshot.positionQty, filters: snapshot.filters,
       });
       if (breakevenDecision.kind === 'replace') {
         return { kind: 'update_trailing_stop', place: breakevenDecision.place, cancelOrderId: breakevenDecision.cancelOrderId };
@@ -541,7 +546,8 @@ export function decideTradeAction(
     const stopDecision = decideTrailingStopReplace({
       tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
       currentStopOrder: { orderId: snapshot.currentStop.algoId, stopPrice: snapshot.currentStop.triggerPrice },
-      desiredStopPrice: target, filters: snapshot.filters,
+      desiredStopPrice: target,
+      positionQty: snapshot.positionQty, filters: snapshot.filters,
     });
     if (stopDecision.kind === 'replace') {
       return { kind: 'update_trailing_stop', place: stopDecision.place, cancelOrderId: stopDecision.cancelOrderId };
