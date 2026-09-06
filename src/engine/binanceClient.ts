@@ -197,6 +197,19 @@ export interface AlgoOrder {
   closePosition: boolean;
 }
 
+// GET /fapi/v1/allAlgoOrders 回傳的條件單**歷史**（含已觸發、已取消）。比
+// AlgoOrder 多的欄位只有觸發後才有值——`actualQty` 是交易所實際平掉的數量，
+// 跟我們掛單時的意圖可能不一致：2026-09-06 UNI 事故就是靠這個欄位抓到的
+// （closePosition 止損單的 actualQty=40，但觸發當下部位只有 1 張，直接翻倉）。
+// 對帳只能信 actualQty，不能信 quantity。
+export interface AlgoOrderHistory extends AlgoOrder {
+  actualOrderId?: string;
+  actualQty?: string;
+  actualPrice?: string;
+  createTime: number;
+  triggerTime?: number;
+}
+
 export class BinanceFuturesClient {
   private http: AxiosInstance;
   private secret: string;
@@ -336,6 +349,16 @@ export class BinanceFuturesClient {
   // 前先看那邊的教訓，不要重蹈覆轍傳 symbol 進來。
   async getOpenAlgoOrders(symbol?: string): Promise<AlgoOrder[]> {
     return this.signedRequest('GET', '/v1/openAlgoOrders', { symbol });
+  }
+
+  // 條件單歷史（含已觸發、已取消）。跟 getOpenAlgoOrders 不同，這個端點帶
+  // symbol 查是正常的——2026-09-06 實測 UNIUSDT 查得到 252 筆。對帳用：
+  // 只有這裡能拿到 actualQty（交易所實際平掉多少），openAlgoOrders 沒有。
+  async getAlgoOrderHistory(
+    symbol: string,
+    params: { startTime?: number; endTime?: number; limit?: number } = {},
+  ): Promise<AlgoOrderHistory[]> {
+    return this.signedRequest('GET', '/v1/allAlgoOrders', { symbol, ...params });
   }
 
   async getExchangeInfo(): Promise<{ symbols: unknown[] }> {

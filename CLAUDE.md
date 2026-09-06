@@ -56,6 +56,7 @@ curl -s "http://localhost:3000/api/analyze"   # 本機無 WEBHOOK_SECRET 時可�
 ```bash
 npm run status          # 系統活著嗎：最後訊號時間、持倉、保護單、回撤、心跳
 npm run audit-exits     # 拿幣安真實成交對帳 DB 的損益紀錄
+npm run audit-close-fills  # 止損止盈觸發後「真的平乾淨了嗎」（平過頭／沒平乾淨）
 npm run funnel-verdict  # 各風控濾網到底在保護還是在害（含悲觀覆蓋率把關）
 npx tsx scripts/drawdown-threshold.ts   # 用 bootstrap 訂回撤門檻
 npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料，預設試跑
@@ -67,6 +68,11 @@ npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料
 **`npm run status` 是排查任何「為什麼沒訊號／為什麼沒平倉」的第一步**——它會
 直接算出回撤、列出每筆真倉的止損止盈單，並分辨「TP1 已觸發」與「TP1 單根本
 沒掛上」。後者是 2026-08-23 那次「打到 TP1 卻沒出 50%」的形狀。
+
+**`npm run audit-close-fills` 補的是 status 看不到的那一面**：status 只看「現在」
+有沒有保護單，這支看「每一張觸發過的條件單有沒有真的把部位平乾淨」。2026-09-06
+的 UNI 翻倉事故（止損連續四次平錯數量、最後把多單翻成沒有保護的空單）在 status
+上完全看不出來，因為每一輪的當下狀態都很正常。
 
 ## 部署流程
 
