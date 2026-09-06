@@ -41,6 +41,68 @@ function risk(overrides: Partial<RiskCheckInput> = {}): RiskCheckInput {
 // 2026-09-06：回撤停機原本只存在於 route.ts（產生訊號那側），live-runner
 // （實際下單那側）完全沒有。訊號在停機**之前**產生、停機**之後**才輪到
 // live-runner 處理的話，那筆單照樣會被送出去——排隊窗口實測可達三天。
+// 2026-09-06 實測撞到：UNIUSDT 的 DB 紀錄是 LONG / entry 6.1575 / qty 31，
+// 幣安上卻是 -39 @ 7.088（空單）。程式照 DB 判定要掛 SELL 止損，但對空單而言
+// SELL 是加碼不是減倉，幣安以 -4509 拒絕——每 15 秒重試一次、永遠不會成功，
+// 而那個部位一張止損都沒有。
+//
+// 之所以偵測不到：live-runner 建快照時就 Math.abs() 把符號丟掉了，決策層
+// 根本沒有能力分辨多空。
+describe('decideTradeAction — 交易所方向與 DB 不符', () => {
+  const base = () => tradeRow({ exchangeEntryOrderId: 111, exchangeStopAlgoId: 222, entryQty: 31 });
+
+  it('DB 記 LONG、交易所是空單 → 停手不下任何單', () => {
+    const a = decideTradeAction(
+      base(),
+      snapshot({ positionQty: 39, positionQtySigned: -39, entryOrderStillOpen: false }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
+    if (a.kind !== 'hold') return;
+    expect(a.reason).toContain('方向不符');
+    expect(a.reason).toContain('-39');
+  });
+
+  it('DB 記 SHORT、交易所是多單 → 同樣停手', () => {
+    const a = decideTradeAction(
+      tradeRow({ isLong: false, entry: 7, stopLoss: 8, tp1: 6, exchangeEntryOrderId: 111, entryQty: 10 }),
+      snapshot({ positionQty: 10, positionQtySigned: 10, entryOrderStillOpen: false }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
+    if (a.kind !== 'hold') return;
+    expect(a.reason).toContain('方向不符');
+  });
+
+  it('方向一致時不影響既有行為', () => {
+    const a = decideTradeAction(
+      base(),
+      snapshot({ positionQty: 31, positionQtySigned: 31, entryOrderStillOpen: false, currentStop: null }),
+      risk(),
+    );
+    expect(a.kind).not.toBe('hold');
+  });
+
+  // 舊呼叫端不帶 positionQtySigned 就跳過這道檢查，維持原行為。
+  it('沒帶 positionQtySigned 時跳過檢查', () => {
+    const a = decideTradeAction(
+      base(),
+      snapshot({ positionQty: 39, entryOrderStillOpen: false, currentStop: null }),
+      risk(),
+    );
+    expect(a.kind).not.toBe('hold');
+  });
+
+  it('空倉（0）不觸發——那是還沒成交或已平倉，不是方向不符', () => {
+    const a = decideTradeAction(
+      base(),
+      snapshot({ positionQty: 0, positionQtySigned: 0, entryOrderStillOpen: true }),
+      risk(),
+    );
+    expect(a.kind).toBe('wait_for_fill');
+  });
+});
+
 // 2026-09-06：**策略 A 的 TP2 在真倉路徑從來沒被執行過。**
 //
 //   DB 模擬（route.ts / walkTpSl）  觸及 TP2 → 平倉，result='WIN_TP2'

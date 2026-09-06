@@ -293,7 +293,12 @@ async function buildSnapshot(
   ]);
   const openAlgoOrders = allAlgoOrders.filter(a => a.symbol === row.symbol);
 
-  const positionQty = positions[0] ? Math.abs(parseFloat(positions[0].positionAmt)) : 0;
+  // 2026-09-06：**保留符號**再另外算絕對值。原本這裡直接 Math.abs()，決策層
+  // 因此完全沒有能力分辨多空——UNIUSDT 的 DB 記 LONG、幣安實際是 -39 空單，
+  // 程式照 DB 掛 SELL 止損被幣安 -4509 拒絕，每 15 秒重試一次，而那個部位
+  // 一張止損都沒有。見 tradeBridge.ts 的 positionQtySigned。
+  const positionQtySigned = positions[0] ? parseFloat(positions[0].positionAmt) : 0;
+  const positionQty = Math.abs(positionQtySigned);
   const entryOrderStillOpen = row.exchange_entry_order_id !== null
     && openOrders.some(o => o.orderId === row.exchange_entry_order_id);
 
@@ -351,7 +356,7 @@ async function buildSnapshot(
     }
   }
 
-  return { positionQty, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h, now: Date.now() };
+  return { positionQty, positionQtySigned, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h, now: Date.now() };
 }
 
 async function buildRiskInput(
@@ -926,6 +931,18 @@ async function runCycle(
         // 那個分支（exchangeEntryOrderId !== null 代表已經下過進場單），
         // 1 只是型別要求的佔位值。
         risk = { positionUSDT: 0, totalOpenRiskPct: 0, thisTradeRiskPct: 0, liquidation: { isolatedMarginUSDT: 0, maintMarginRatio: 0, maintAmount: 0 }, leverage: 1 };
+      }
+
+      // 方向不符是「我們對這個部位的認知是錯的」，嚴重度等同裸倉——但
+      // decideTradeAction 對它回傳 hold，而 hold 在下面是**完全靜默**的
+      // （只有 result.executed 為 true 才印）。這種等級的異常不能靠沉默，
+      // 所以在這裡明確印出來。
+      if (snapshot.positionQtySigned != null && snapshot.positionQtySigned !== 0
+          && (snapshot.positionQtySigned > 0) !== trade.isLong) {
+        console.error(`[${nowStr()}] ⚠⚠ ${row.symbol}（${row.id}）方向不符：`
+          + `DB 記 ${row.direction}（entry ${row.entry}、qty ${row.entry_qty ?? '?'}），`
+          + `交易所實際部位 ${snapshot.positionQtySigned} @ ${snapshot.markPrice}。`
+          + ` 已停止對這筆下任何單，需要人工確認——那個部位目前沒有自動化在保護它。`);
       }
 
       const action = decideTradeAction(trade, snapshot, risk);

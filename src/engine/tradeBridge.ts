@@ -162,6 +162,23 @@ export interface BridgeTradeRow {
 
 export interface BridgeExchangeSnapshot {
   positionQty: number;          // absolute value, 0 = flat
+  /**
+   * 帶正負號的部位量（正 = 多、負 = 空）。用來驗證「交易所實際的方向」跟
+   * 這筆 trade 的 `isLong` 是否一致。
+   *
+   * 2026-09-06 新增。在此之前 live-runner 在建快照時就 `Math.abs()` 把符號
+   * 丟掉了（`live-runner.ts:296`），**所以決策層從頭到尾沒有能力分辨多空**
+   * ——它無條件相信 DB 的 `direction`。
+   *
+   * 實測後果：UNIUSDT 的 DB 紀錄是 `LONG / entry 6.1575 / qty 31`，幣安上
+   * 卻是 `-39 @ 7.088`（空單）。程式照 DB 判定要掛 SELL 止損，但對空單而言
+   * SELL 是加碼不是減倉，幣安以 `-4509 Time in Force (TIF) GTE can only be
+   * used with open positions` 拒絕——**每 15 秒重試一次，永遠不會成功，而那
+   * 個部位一張止損都沒有**。
+   *
+   * 選填：舊呼叫端不帶就跳過這道檢查，維持原行為。
+   */
+  positionQtySigned?: number;
   entryOrderStillOpen: boolean; // LIMIT 進場單還掛著（未成交也未取消）
   currentStop: { algoId: number; triggerPrice: number } | null;
   markPrice: number;
@@ -288,6 +305,32 @@ export function decideTradeAction(
   snapshot: BridgeExchangeSnapshot,
   risk: RiskCheckInput,
 ): TradeAction {
+  // 0. 交易所實際的方向跟這筆 trade 的方向不一致 —— 什麼都不要做。
+  //
+  // 2026-09-06 實測撞到：UNIUSDT 的 DB 紀錄是 `LONG / entry 6.1575 / qty 31`，
+  // 幣安上卻是 `-39 @ 7.088`（空單）。程式照 DB 判定要掛 SELL 止損，但對空單
+  // 而言 SELL 是加碼不是減倉，幣安以 `-4509 Time in Force (TIF) GTE can only
+  // be used with open positions` 拒絕——每 15 秒重試一次、永遠不會成功，而那
+  // 個部位**一張止損都沒有**。
+  //
+  // 為什麼之前偵測不到：live-runner 建快照時就 `Math.abs()` 把符號丟掉了，
+  // 決策層根本沒有能力分辨多空，只能無條件相信 DB。
+  //
+  // **刻意只停手、不自動平倉。** 方向不符代表我們對這個部位的認知是錯的，
+  // 在認知錯誤的狀態下送市價單是更危險的動作（可能平掉不該平的、或反向開倉）。
+  // 這種狀況需要人看一眼，所以回 hold 並在理由裡把兩邊的數字都講出來。
+  if (snapshot.positionQtySigned != null && snapshot.positionQtySigned !== 0) {
+    const exchangeIsLong = snapshot.positionQtySigned > 0;
+    if (exchangeIsLong !== trade.isLong) {
+      return {
+        kind: 'hold',
+        reason: `⚠ 方向不符：DB 記 ${trade.isLong ? 'LONG' : 'SHORT'}（entry ${trade.entry}、`
+          + `qty ${trade.entryQty ?? '?'}），交易所實際部位 ${snapshot.positionQtySigned}。`
+          + ` 停止對這筆下任何單——在認知錯誤的狀態下送單會更危險。需要人工確認。`,
+      };
+    }
+  }
+
   // 1. 還沒真的在交易所下過進場單。
   if (trade.exchangeEntryOrderId === null) {
     // 整體停機（回撤／熔斷）擋在最前面：它的語意是「現在不該開任何新倉」，
