@@ -51,10 +51,10 @@ function risk(overrides: Partial<RiskCheckInput> = {}): RiskCheckInput {
 describe('decideTradeAction — 交易所方向與 DB 不符', () => {
   const base = () => tradeRow({ exchangeEntryOrderId: 111, exchangeStopAlgoId: 222, entryQty: 31 });
 
-  it('DB 記 LONG、交易所是空單 → 停手不下任何單', () => {
+  it('DB 記 LONG、交易所是空單，但那個部位有保護單 → 只停手，不碰它', () => {
     const a = decideTradeAction(
       base(),
-      snapshot({ positionQty: 39, positionQtySigned: -39, entryOrderStillOpen: false }),
+      snapshot({ positionQty: 39, positionQtySigned: -39, entryOrderStillOpen: false, protectiveOrderCount: 1 }),
       risk(),
     );
     expect(a.kind).toBe('hold');
@@ -63,15 +63,80 @@ describe('decideTradeAction — 交易所方向與 DB 不符', () => {
     expect(a.reason).toContain('-39');
   });
 
-  it('DB 記 SHORT、交易所是多單 → 同樣停手', () => {
+  it('DB 記 SHORT、交易所是多單，有保護單 → 同樣只停手', () => {
     const a = decideTradeAction(
       tradeRow({ isLong: false, entry: 7, stopLoss: 8, tp1: 6, exchangeEntryOrderId: 111, entryQty: 10 }),
-      snapshot({ positionQty: 10, positionQtySigned: 10, entryOrderStillOpen: false }),
+      snapshot({ positionQty: 10, positionQtySigned: 10, entryOrderStillOpen: false, protectiveOrderCount: 2 }),
       risk(),
     );
     expect(a.kind).toBe('hold');
     if (a.kind !== 'hold') return;
     expect(a.reason).toContain('方向不符');
+  });
+
+  // 2026-09-06 事故的完整形狀：UNI 的止損平過頭把多單翻成 -39 的空單，決策層
+  // 認出方向不符後停手——**然後那個部位就沒人管了，裸奔十小時才靠人工發現**。
+  // 停手是對的（在認知錯誤的狀態下亂下單更危險），但「停手」不該等於「放著」。
+  //
+  // 判準刻意收窄成「反向部位 + 交易所端一張保護單都沒有」：這個帳戶的使用者
+  // 會用手機 App 手動下單（UNI 那批 ios_* clientOrderId），手動開的倉如果自己
+  // 掛了止損就不該被系統平掉。沒有任何保護單的反向部位才是真的沒人管。
+  it('反向部位 + 零保護單 → 自動平掉（reduceOnly，方向與交易所部位相反）', () => {
+    const a = decideTradeAction(
+      base(),
+      snapshot({
+        positionQty: 39, positionQtySigned: -39, entryOrderStillOpen: false,
+        protectiveOrderCount: 0,
+        filters: { stepSize: 1, tickSize: 0.001, minNotional: 5 },
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('flatten_unmanaged_position');
+    if (a.kind !== 'flatten_unmanaged_position') return;
+    // 交易所是空單 → 平它要用 BUY，跟 DB 的 isLong=true 推出來的 SELL 相反。
+    // 這裡如果照 DB 方向送單就是加碼，正是 -4509 那個 bug 的形狀。
+    expect(a.order.side).toBe('BUY');
+    expect(a.order.type).toBe('MARKET');
+    expect(a.order.quantity).toBe(39);
+    expect(a.order.reduceOnly).toBe(true);
+    expect(a.reason).toContain('沒有任何保護單');
+  });
+
+  it('反向部位是多單 + 零保護單 → 用 SELL 平掉', () => {
+    const a = decideTradeAction(
+      tradeRow({ isLong: false, entry: 7, stopLoss: 8, tp1: 6, exchangeEntryOrderId: 111, entryQty: 10 }),
+      snapshot({
+        positionQty: 10, positionQtySigned: 10, entryOrderStillOpen: false,
+        protectiveOrderCount: 0,
+        filters: { stepSize: 1, tickSize: 0.001, minNotional: 5 },
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('flatten_unmanaged_position');
+    if (a.kind !== 'flatten_unmanaged_position') return;
+    expect(a.order.side).toBe('SELL');
+    expect(a.order.quantity).toBe(10);
+  });
+
+  it('沒帶 protectiveOrderCount 的舊呼叫端 → 維持只停手（不會突然開始自動平倉）', () => {
+    const a = decideTradeAction(
+      base(),
+      snapshot({ positionQty: 39, positionQtySigned: -39, entryOrderStillOpen: false }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
+  });
+
+  it('反向部位小到 stepSize 取整為 0 → 停手，不送數量非法的單', () => {
+    const a = decideTradeAction(
+      base(),
+      snapshot({
+        positionQty: 0.0005, positionQtySigned: -0.0005, entryOrderStillOpen: false,
+        protectiveOrderCount: 0,
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('hold');
   });
 
   it('方向一致時不影響既有行為', () => {

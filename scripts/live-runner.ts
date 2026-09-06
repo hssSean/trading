@@ -356,7 +356,12 @@ async function buildSnapshot(
     }
   }
 
-  return { positionQty, positionQtySigned, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h, now: Date.now() };
+  // 這個 symbol 上所有還掛著的條件單張數（止損＋止盈，含使用者手動掛的）。
+  // 只給「方向不符」那道判斷用：0 代表那個部位真的沒有人在管，才會自動平掉。
+  // 見 tradeBridge.ts 的 protectiveOrderCount。
+  const protectiveOrderCount = openAlgoOrders.length;
+
+  return { positionQty, positionQtySigned, protectiveOrderCount, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h, now: Date.now() };
 }
 
 async function buildRiskInput(
@@ -464,6 +469,19 @@ async function notifyIfNeeded(
       title: `推薦單失效 ${sym}`,
       body: `${dir} 未進場，掛單已取消（非持倉）`,
       tag: `cancel-${row.id}`,
+    });
+    return;
+  }
+
+  // 2026-09-06：方向不符且零保護單的部位被系統自動平掉。這則一定要推播——
+  // 上一次同樣的狀況只印在 EC2 的 log 裡，那個裸倉掛了十小時才被人發現。
+  // 文案刻意講「交易所實際部位」而不是 DB 的方向：DB 那筆本來就是錯的。
+  if (action.kind === 'flatten_unmanaged_position') {
+    await sendWebPushToUser(userId, {
+      title: `⚠ ${sym} 部位方向不符，已強制平倉`,
+      body: `交易所實際部位與紀錄相反且沒有任何止損保護，系統已市價平掉`
+        + `（${action.order.side} ${action.order.quantity}）。請人工確認這個部位怎麼來的。`,
+      tag: `unmanaged-${row.id}`,
     });
     return;
   }
@@ -933,16 +951,19 @@ async function runCycle(
         risk = { positionUSDT: 0, totalOpenRiskPct: 0, thisTradeRiskPct: 0, liquidation: { isolatedMarginUSDT: 0, maintMarginRatio: 0, maintAmount: 0 }, leverage: 1 };
       }
 
-      // 方向不符是「我們對這個部位的認知是錯的」，嚴重度等同裸倉——但
-      // decideTradeAction 對它回傳 hold，而 hold 在下面是**完全靜默**的
+      // 方向不符是「我們對這個部位的認知是錯的」，嚴重度等同裸倉——決策層
+      // 對「有保護單」的情況回傳 hold，而 hold 在下面是**完全靜默**的
       // （只有 result.executed 為 true 才印）。這種等級的異常不能靠沉默，
-      // 所以在這裡明確印出來。
+      // 所以在這裡明確印出來。零保護單那條會走 flatten_unmanaged_position，
+      // 下面的 executed 分支會印，但這裡先印一行說明為什麼要動它。
       if (snapshot.positionQtySigned != null && snapshot.positionQtySigned !== 0
           && (snapshot.positionQtySigned > 0) !== trade.isLong) {
         console.error(`[${nowStr()}] ⚠⚠ ${row.symbol}（${row.id}）方向不符：`
           + `DB 記 ${row.direction}（entry ${row.entry}、qty ${row.entry_qty ?? '?'}），`
           + `交易所實際部位 ${snapshot.positionQtySigned} @ ${snapshot.markPrice}。`
-          + ` 已停止對這筆下任何單，需要人工確認——那個部位目前沒有自動化在保護它。`);
+          + (snapshot.protectiveOrderCount === 0
+            ? ` 那個部位沒有任何保護單——自動市價平掉。`
+            : ` 交易所端還有 ${snapshot.protectiveOrderCount} 張保護單，不去碰它；需要人工確認。`));
       }
 
       const action = decideTradeAction(trade, snapshot, risk);

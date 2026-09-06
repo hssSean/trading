@@ -125,6 +125,20 @@ export async function executeTradeAction(
       return { executed: true, note: '整單平倉已送出（下一輪會對帳確認最終結果）' };
     }
 
+    // 2026-09-06：方向不符且完全沒有保護單的部位，市價平掉。
+    //
+    // 這是唯一一個「對著我們自己不認得的部位」下單的分支，所以**刻意不寫任何
+    // DB 狀態**——那筆 trade 的紀錄跟交易所的實際部位本來就對不上，在這裡猜
+    // 一個結果寫進去只會製造更多髒資料。平掉之後部位歸零，下一輪
+    // decideTradeAction 會走 sync_closed_position，用真實成交紀錄對帳。
+    case 'flatten_unmanaged_position': {
+      const res = await client.placeOrder(action.order);
+      return {
+        executed: true,
+        note: `方向不符的無保護部位已市價平掉 orderId=${res.orderId}（${action.order.side} ${action.order.quantity}）`,
+      };
+    }
+
     case 'update_trailing_stop': {
       // 2026-08-18 實測撞到（COTIUSDT 連續數小時卡在 -4130）：原本是
       // place-before-cancel（先掛新單成功才撤舊單，避免無保護窗口），但這個

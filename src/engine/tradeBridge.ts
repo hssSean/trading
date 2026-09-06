@@ -7,7 +7,7 @@
 // 動作決定。
 
 import { PlaceOrderParams, UserTrade } from './binanceClient';
-import { SymbolFilters } from './precision';
+import { roundToStepSize, SymbolFilters } from './precision';
 import {
   calcTrailingStopTarget, decideEntryOrder, decideFullClose,
   decideTp1OrderPlacement, decideTp2OrderPlacement, decideTrailingStopReplace,
@@ -179,6 +179,16 @@ export interface BridgeExchangeSnapshot {
    * 選填：舊呼叫端不帶就跳過這道檢查，維持原行為。
    */
   positionQtySigned?: number;
+  /**
+   * 交易所端這個 symbol 目前掛著的條件單張數（止損 + 止盈，不分是誰掛的）。
+   *
+   * 只有「方向不符」那道判斷用得到：`0` 代表那個部位沒有任何自動化在保護它，
+   * 才會觸發自動平倉。使用者手動掛的止損也算在內——手動開的倉如果自己有
+   * 保護，系統不該去平它。
+   *
+   * 選填：不帶就是「不知道」，維持只停手不平倉的保守行為。
+   */
+  protectiveOrderCount?: number;
   entryOrderStillOpen: boolean; // LIMIT 進場單還掛著（未成交也未取消）
   currentStop: { algoId: number; triggerPrice: number } | null;
   markPrice: number;
@@ -269,6 +279,14 @@ export type TradeAction =
   | { kind: 'close_full_position'; order: PlaceOrderParams; closeReason: TimeStopCloseReason }
   | { kind: 'update_trailing_stop'; place: PlaceOrderParams; cancelOrderId?: number }
   | { kind: 'entry_never_filled'; reason: string }
+  /**
+   * 交易所上有一個「方向跟 DB 相反、而且完全沒有保護單」的部位——把它市價平掉。
+   *
+   * 2026-09-06 事故的補救動作，形狀見 decideTradeAction 第 0 步的註解。
+   * 這是唯一一個「對著我們自己不認得的部位」下單的動作，所以下單參數刻意
+   * 只用快照裡交易所自己回報的數字（方向、數量），完全不參考 DB。
+   */
+  | { kind: 'flatten_unmanaged_position'; order: PlaceOrderParams; reason: string }
   | { kind: 'hold'; reason: string };
 
 // 任何「本來要 hold」的情況，先檢查一次時間止損（盤整停滯／到期自動平倉）
@@ -316,16 +334,55 @@ export function decideTradeAction(
   // 為什麼之前偵測不到：live-runner 建快照時就 `Math.abs()` 把符號丟掉了，
   // 決策層根本沒有能力分辨多空，只能無條件相信 DB。
   //
-  // **刻意只停手、不自動平倉。** 方向不符代表我們對這個部位的認知是錯的，
-  // 在認知錯誤的狀態下送市價單是更危險的動作（可能平掉不該平的、或反向開倉）。
-  // 這種狀況需要人看一眼，所以回 hold 並在理由裡把兩邊的數字都講出來。
+  // **不照 DB 的方向繼續下單**——那是原本的 bug。但「停手」不等於「放著」：
+  //
+  // 2026-09-06 第一版只回 hold，結果那個 -39 的空單裸奔了十個小時，直到人工
+  // 發現才平掉。停手的理由（在認知錯誤的狀態下送市價單更危險，可能平掉不該
+  // 平的）只對「還有人在管那個部位」的情況成立。
+  //
+  // 所以判準收窄成兩個條件同時成立才自動平倉：
+  //   (a) 交易所部位方向與 DB 相反，且
+  //   (b) 交易所端**一張保護單都沒有**（protectiveOrderCount === 0）
+  //
+  // (b) 是為了保護使用者的手動交易：這個帳戶的使用者會用手機 App 直接下單
+  // （UNI 那批 `ios_*` clientOrderId 就是），手動開的倉如果自己掛了止損，
+  // 系統不該把它平掉。沒有任何保護單的反向部位才是真的沒人管。
+  //
+  // 平倉單用 `reduceOnly` + 「與交易所實際部位相反」的方向——不是 DB 的方向。
+  // 照 DB 方向送就是加碼，那正是 -4509 那個 bug 的形狀。reduceOnly 讓它在
+  // 原理上只能減倉，不可能反向開倉。
+  //
+  // 沒帶 protectiveOrderCount 的呼叫端（舊版、其他測試）維持只停手——這種
+  // 等級的動作不該因為少傳一個欄位就默默啟用。
   if (snapshot.positionQtySigned != null && snapshot.positionQtySigned !== 0) {
     const exchangeIsLong = snapshot.positionQtySigned > 0;
     if (exchangeIsLong !== trade.isLong) {
+      const detail = `DB 記 ${trade.isLong ? 'LONG' : 'SHORT'}（entry ${trade.entry}、`
+        + `qty ${trade.entryQty ?? '?'}），交易所實際部位 ${snapshot.positionQtySigned}`;
+      const flattenQty = roundToStepSize(Math.abs(snapshot.positionQtySigned), snapshot.filters.stepSize);
+
+      if (snapshot.protectiveOrderCount === 0 && flattenQty > 0) {
+        return {
+          kind: 'flatten_unmanaged_position',
+          order: {
+            symbol: trade.symbol,
+            side: exchangeIsLong ? 'SELL' : 'BUY',
+            type: 'MARKET',
+            quantity: flattenQty,
+            reduceOnly: true,
+            newClientOrderId: `${trade.id}-unmanaged`,
+          },
+          reason: `⚠ 方向不符且沒有任何保護單：${detail}。`
+            + ` 那個部位沒有人在管，自動市價平掉（reduceOnly ${flattenQty} 張）。`,
+        };
+      }
+
       return {
         kind: 'hold',
-        reason: `⚠ 方向不符：DB 記 ${trade.isLong ? 'LONG' : 'SHORT'}（entry ${trade.entry}、`
-          + `qty ${trade.entryQty ?? '?'}），交易所實際部位 ${snapshot.positionQtySigned}。`
+        reason: `⚠ 方向不符：${detail}。`
+          + (snapshot.protectiveOrderCount === 0
+            ? ` 部位量在 stepSize ${snapshot.filters.stepSize} 下取整為 0，連平倉單都送不出去。`
+            : ` 交易所端還有 ${snapshot.protectiveOrderCount ?? '未知數量的'} 張保護單，不去碰它。`)
           + ` 停止對這筆下任何單——在認知錯誤的狀態下送單會更危險。需要人工確認。`,
       };
     }
