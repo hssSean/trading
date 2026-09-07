@@ -25,11 +25,18 @@ export function tierRiskMultiplier(symbol: string, tier: string | null | undefin
 }
 
 export interface PositionPlan {
-  riskUSDT: number;      // max loss when SL is hit
+  /**
+   * 止損打到時的最大虧損。**名目被上限夾過時這個數字會低於設定的風險%**
+   * （見 calcPositionPlan 的名目上限說明）——夾了倉位卻照報原本的風險金額
+   * 就是謊報風險，推播上的「止損虧 XU」會是錯的。
+   */
+  riskUSDT: number;
   positionUSDT: number;  // notional position size
   marginUSDT: number;    // 本金 to allocate
   leverage: number;      // 槓桿, 1 decimal
   belowMinNotional: boolean; // notional under Binance's ~5 USDT futures minimum
+  /** 名目撞到上限被縮小過 → riskUSDT 低於 accountSize × riskPct */
+  notionalCapped: boolean;
 }
 
 export function calcPositionPlan(
@@ -43,14 +50,48 @@ export function calcPositionPlan(
   const stopDist = Math.abs(entry - stopLoss) / entry;
   if (stopDist <= 0) return null;
 
-  const riskUSDT     = accountSize * riskPct / 100;
-  const positionUSDT = riskUSDT / stopDist;
+  const requestedRisk = accountSize * riskPct / 100;
+  const rawNotional   = requestedRisk / stopDist;
 
   const marginBudget = accountSize * 0.2; // per-trade margin target: 20% of account
+
+  // ── 名目上限（2026-09-07）────────────────────────────────────────────
+  //
+  // 舊版只夾槓桿、不夾名目：
+  //
+  //     leverage   = min(max(notional / marginBudget, 1), maxLev)
+  //     marginUSDT = notional / leverage      ← 用夾過的槓桿反推本金
+  //
+  // 名目超過 marginBudget × maxLev 時，這段不是縮小倉位，而是**放大本金**。
+  // 於是「每筆本金約佔帳戶 20%」這個設計意圖在止損距離 ≤ 0.5% 時就失效了。
+  // 實測（帳戶 4,847U、風險 1%、maxLev 10）：
+  //
+  //     止損 0.500%  名目  9,694U  本金   969U  佔 20.0%   ← 設計意圖
+  //     止損 0.250%  名目 19,388U  本金 1,939U  佔 40.0%
+  //     止損 0.103%  名目 47,059U  本金 4,706U  佔 97.1%   ← 單筆吃掉整個帳戶
+  //
+  // 而既有的風控一道都攔不到：所有上限都是 R 或百分比，名目 47,059U 的部位
+  // 「就是 1R 風險」，沒有違反任何一條；checkLiquidationSafety 檢查的是
+  // 「止損比強平先觸發」，槓桿 10 倍時強平距離約 10%，止損 0.103% 確實先到
+  // ——**那道檢查會判定通過**。
+  //
+  // 這件事跟策略參數無關：不改任何訊號的進出場位置、不改 R 倍數，只改
+  // 「這一筆願意押多少錢」。詳見 docs/ANALYSIS-2026-09-07-止損距離下限.md §5。
+  //
+  // 副作用是刻意的：止損距離小到要用 97% 帳戶保證金才湊得出「1% 風險」時，
+  // 正確答案是少押一點，不是照押。所以 riskUSDT 會低於設定值，且用
+  // notionalCapped 標示出來，不讓它靜默發生。
+  const maxNotional    = marginBudget * maxLev;
+  const notionalCapped = rawNotional > maxNotional;
+  const positionUSDT   = notionalCapped ? maxNotional : rawNotional;
+
   let leverage = positionUSDT / marginBudget;
   leverage = Math.min(Math.max(leverage, 1), maxLev);
   leverage = Math.round(leverage * 10) / 10;
   const marginUSDT = positionUSDT / leverage;
+
+  // 夾過之後真正會賠掉的錢，不是原本要求的風險%。
+  const riskUSDT = positionUSDT * stopDist;
 
   return {
     riskUSDT:     Math.round(riskUSDT * 100) / 100,
@@ -58,13 +99,18 @@ export function calcPositionPlan(
     marginUSDT:   Math.round(marginUSDT * 10) / 10,
     leverage,
     belowMinNotional: positionUSDT < 5,
+    notionalCapped,
   };
 }
 
 // Compact zh-TW one-liner for notifications: 倉位 13.3U（本金 4U ×3.3倍）
+//
+// 名目被夾過時一定要講——推播後面接的是「止損虧 XU」，那個數字已經是縮小
+// 後的實際風險，不標示的話看起來就只是「風險%算錯了」。
 export function formatPlanLine(plan: PositionPlan): string {
   const base = `倉位 ${plan.positionUSDT}U（本金 ${plan.marginUSDT}U ×${plan.leverage}倍）`;
-  return plan.belowMinNotional ? `${base}⚠低於交易所最低5U` : base;
+  if (plan.belowMinNotional) return `${base}⚠低於交易所最低5U`;
+  return plan.notionalCapped ? `${base}⚠止損太近，倉位已縮至上限` : base;
 }
 
 // 2026-08-08：從 api/analyze/route.ts 搬過來，讓 DB 模擬版（route.ts）跟

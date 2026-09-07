@@ -127,6 +127,13 @@ export function SignalCard({ signal, onClick, compact }: Props) {
           {plan.belowMinNotional && (
             <p className="text-[#E6AF5A] text-[10px] mt-1.5">低於交易所最低下單額 5U</p>
           )}
+          {/* 名目撞到上限被縮小過。不講的話「止損虧損」那格會比設定的風險%小，
+              看起來像算錯了——實際上是止損太近，照押會吃掉整個帳戶的保證金。 */}
+          {plan.notionalCapped && !plan.belowMinNotional && (
+            <p className="text-[#E6AF5A] text-[10px] mt-1.5">
+              止損距離僅 {slPct.toFixed(2)}%，倉位已縮至上限（本金約帳戶 20%），實際風險低於 {effRisk}%
+            </p>
+          )}
         </div>
       )}
 

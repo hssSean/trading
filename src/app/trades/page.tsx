@@ -524,6 +524,13 @@ const TradeRow = memo(function TradeRow({
             {plan.belowMinNotional && (
               <p className="text-[#E6AF5A] text-[10px] mt-1.5">低於交易所最低下單額 5U</p>
             )}
+            {/* 跟 SignalCard 同一段提示：名目撞到上限被縮小過，「止損虧損」
+                那格因此低於設定的風險%，不講會看起來像算錯了。 */}
+            {plan.notionalCapped && !plan.belowMinNotional && (
+              <p className="text-[#E6AF5A] text-[10px] mt-1.5">
+                止損距離僅 {slPct.toFixed(2)}%，倉位已縮至上限（本金約帳戶 20%），實際風險低於 {effRisk}%
+              </p>
+            )}
           </div>
         );
       })()}

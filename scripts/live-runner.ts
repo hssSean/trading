@@ -384,6 +384,16 @@ async function buildRiskInput(
   // ——leverage 帶出去讓呼叫端在真的送出第一張進場單前呼叫 setLeverage 對齊。
   const leverage = plan?.leverage ?? 1;
 
+  // 倉位被名目上限縮小過就講出來。不印的話這件事完全靜默——使用者只會看到
+  // 「倉位怎麼比推播寫的小」，而推播的數字是 route.ts 用同一個函式算的，
+  // 兩邊會一致，更難察覺。止損距離一併印，那是唯一會觸發上限的原因。
+  if (plan?.notionalCapped) {
+    const slPct = Math.abs(row.entry - row.stop_loss) / row.entry * 100;
+    console.log(`[${nowStr()}] ${row.symbol} 止損距離只有 ${slPct.toFixed(3)}%，`
+      + `名目撞到上限被縮小到 ${positionUSDT}U（本金 ${marginUSDT}U ≈ 帳戶 20%）。`
+      + `實際風險 ${plan.riskUSDT}U，低於設定的 ${riskPct}%。`);
+  }
+
   const bracketsRes = await binance.getLeverageBrackets(row.symbol);
   const brackets: MarginBracket[] = bracketsRes[0]?.brackets ?? [];
   if (brackets.length === 0) {
