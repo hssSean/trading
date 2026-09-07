@@ -11,7 +11,7 @@ import { tmpdir } from 'os';
 //      而這個載入器專門用來處理 service role key 和交易所 secret。
 
 let dir: string;
-const KEYS = ['TEST_A', 'TEST_B', 'TEST_QUOTED', 'TEST_EXPORT', 'TEST_EQ_IN_VALUE'];
+const KEYS = ['TEST_A', 'TEST_B', 'TEST_QUOTED', 'TEST_EXPORT', 'TEST_EQ_IN_VALUE', 'TEST_PS'];
 
 function writeEnv(content: string): string {
   const p = join(dir, '.env.test');
@@ -44,6 +44,22 @@ describe('loadEnvFile — 解析', () => {
   it('容忍 export 前綴（從 shell 設定複製過來的常見寫法）', () => {
     loadEnvFile(writeEnv('export TEST_EXPORT=abc\n'));
     expect(process.env.TEST_EXPORT).toBe('abc');
+  });
+
+  // 2026-09-07 迴歸：使用者的 env.txt 同時混了 bash 與 PowerShell 兩種寫法
+  // （各自從啟動指令貼過來）。不認 `$env:` 的話 key 會變成字面
+  // `$env:TEST_PS`，真正的 TEST_PS 從沒被設，工具卻報「缺 TEST_PS」。
+  it('容忍 $env: 前綴（從 PowerShell 設定複製過來的寫法）', () => {
+    const r = loadEnvFile(writeEnv('$env:TEST_PS = "ps-value"\n'));
+    expect(process.env.TEST_PS).toBe('ps-value');
+    expect(r.applied).toEqual(['TEST_PS']);
+    expect(r.ignored).toEqual([]);
+  });
+
+  it('不合法的變數名不寫進 process.env，而是列進 ignored', () => {
+    const r = loadEnvFile(writeEnv('not a key=x\n'));
+    expect(r.applied).toEqual([]);
+    expect(r.ignored).toEqual(['not a key']);
   });
 
   // JWT 和 base64 金鑰裡有 = 是常態，只能切第一個。

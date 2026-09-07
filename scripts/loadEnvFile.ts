@@ -35,7 +35,12 @@ export interface LoadEnvResult {
   applied: string[];
   /** 檔案裡有、但 shell 已經設了所以跳過的變數名。 */
   skipped: string[];
+  /** 看起來像設定卻不是合法變數名的行（只留 `=` 左邊，不含值）。 */
+  ignored: string[];
 }
+
+/** 合法的環境變數名。不符的一律不寫進 process.env，改列進 `ignored` 講出來。 */
+const VALID_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * 預設讀 `.env.local`，可用 `ENV_FILE` 環境變數指定別的路徑：
@@ -49,7 +54,7 @@ export interface LoadEnvResult {
 export function loadEnvFile(fileName = process.env.ENV_FILE || '.env.local'): LoadEnvResult {
   const path = resolve(process.cwd(), fileName);
   if (!existsSync(path)) {
-    return { path, found: false, applied: [], skipped: [] };
+    return { path, found: false, applied: [], skipped: [], ignored: [] };
   }
 
   // 明確 utf-8：Windows 預設 CP950 會把非 ASCII 值讀成亂碼，而金鑰讀錯只會
@@ -57,6 +62,7 @@ export function loadEnvFile(fileName = process.env.ENV_FILE || '.env.local'): Lo
   const text = readFileSync(path, 'utf-8');
   const applied: string[] = [];
   const skipped: string[] = [];
+  const ignored: string[] = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -65,8 +71,15 @@ export function loadEnvFile(fileName = process.env.ENV_FILE || '.env.local'): Lo
     const eq = line.indexOf('=');
     if (eq <= 0) continue;
 
-    const key = line.slice(0, eq).trim().replace(/^export\s+/, '');
+    // `export FOO=` 是 bash 複製過來的寫法，`$env:FOO =` 是 PowerShell 的。
+    // 兩種都會出現在同一個檔案裡——使用者是從各自的啟動指令貼過來的。
+    // 2026-09-07 之前不認 PowerShell 那種，key 被存成字面 `$env:FOO`，
+    // 真正的 FOO 從沒被設，工具卻報「缺 FOO」，看起來像金鑰沒填。
+    const key = line.slice(0, eq).trim()
+      .replace(/^export\s+/, '')
+      .replace(/^\$env:/i, '');
     if (!key) continue;
+    if (!VALID_KEY.test(key)) { ignored.push(key); continue; }
 
     let value = line.slice(eq + 1).trim();
     // 去掉整段包住的引號。刻意只脫一層、不處理內部逸出。
@@ -83,7 +96,7 @@ export function loadEnvFile(fileName = process.env.ENV_FILE || '.env.local'): Lo
     applied.push(key);
   }
 
-  return { path, found: true, applied, skipped };
+  return { path, found: true, applied, skipped, ignored };
 }
 
 /** 印出載入結果。**只印變數名，永遠不印值。** */
@@ -95,4 +108,8 @@ export function reportEnvLoad(r: LoadEnvResult): void {
   console.log(`已載入 ${r.path}：${r.applied.length} 個變數`
     + (r.skipped.length > 0 ? `（${r.skipped.length} 個已由 shell 設定，維持原值）` : ''));
   if (r.applied.length > 0) console.log(`  ${r.applied.join(', ')}`);
+  // 大聲講出來：靜默忽略正是「我以為它讀到了但其實沒有」的來源。
+  if (r.ignored.length > 0) {
+    console.log(`  ⚠ ${r.ignored.length} 行的變數名不合法，已忽略：${r.ignored.join(', ')}`);
+  }
 }

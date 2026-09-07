@@ -66,6 +66,22 @@ async function main() {
   console.log(`回撤停機確認時間        ${ack === undefined ? '⚠ 欄位不存在（migration 未跑）' : ago(ack as number)}`);
   console.log(`live-runner 心跳        ${hb === undefined ? '⚠ 欄位不存在（migration 未跑）' : ago(hb as number)}`);
 
+  // ── trades 那邊的 migration（2026-09-07 補）────────────────────────────
+  //
+  // profiles 的兩個欄位上面已經檢查了，trades 的沒有——而漏掉的後果更難察覺：
+  // insert 對缺欄位有兩段式 fallback（剝掉欄位重送），所以**寫入不會失敗，
+  // 只是那個功能靜默地不存在**。`exchange_tp2_algo_id` 沒跑的話策略A的 TP2
+  // 條件單根本掛不上去，而 TP2 正是 2026-09-06 才修好的東西——修了程式碼卻
+  // 沒跑 migration，等於沒修。
+  const cols: Array<[string, string]> = [
+    ['exchange_tp2_algo_id', 'TP2 條件單（沒有的話策略A的最終止盈不會掛上）'],
+    ['audit_verdict', '對帳標記（apply-audit-marks.ts 需要）'],
+  ];
+  for (const [col, why] of cols) {
+    const { error } = await db.from('trades').select(col).limit(1);
+    console.log(`trades.${col.padEnd(22)} ${error ? `⚠ 不存在（migration 未跑）— ${why}` : '✅'}`);
+  }
+
   // 心跳「從未」不代表 live-runner 死了——舊版只寫 Redis，而 Redis 掛掉時
   // 那筆寫入會失敗。真正該問的是「那些真倉現在有保護單嗎」，那個只有交易所
   // 答得出來，而且是唯讀查詢。有倉沒止損 = 有錢在冒險而且沒人看著。
@@ -163,8 +179,24 @@ async function main() {
           + `\n       部位 ${qty} / stepSize ${step ?? '?'} → 一半取整後 ${halfFloored ?? '?'}`
           + (halfFloored === 0 ? '　**這就是原因：取整後為 0 所以被跳過**' : '');
       }
+      // ── 形狀，不只張數（2026-09-07 補）──────────────────────────────
+      //
+      // 舊版只數張數，所以 `closePosition=true` 的止損單掛在那裡也照樣印
+      // 「止損 1 張 ✅」——而那正是 2026-09-06 UNI 翻倉的成因：closePosition
+      // 把「要平多少」交給交易所決定，幣安 testnet 連續四次算錯，最後把
+      // 剩 1 張的多單平成 -39 的空單（見 orderLifecycle.ts 的事故說明）。
+      //
+      // 程式碼已全面改成 quantity + reduceOnly，但**已經掛在交易所上的舊單
+      // 不會自己變形狀**，要等它被觸發或被取代。所以「修好了」跟「現在掛著
+      // 的單是安全的」是兩件事，status 必須分得出來。
+      const staleSl = sl.filter(a => a.closePosition);
+      const shapeNote = staleSl.length > 0
+        ? `\n       🔴 其中 ${staleSl.length} 張止損是舊形狀（closePosition=true，數量由交易所決定）。`
+          + `\n          這是 2026-09-06 UNI 翻倉的形狀。修復只對「之後新掛的單」生效，`
+          + `\n          這張要等它觸發或被移動止損取代才會換成 quantity+reduceOnly。`
+        : '';
       console.log(`  ${flag} ${o.symbol.replace('USDT', '').padEnd(6)} `
-        + `止損 ${sl.length} 張 / 止盈 ${tp.length} 張${note}`);
+        + `止損 ${sl.length} 張 / 止盈 ${tp.length} 張${note}${shapeNote}`);
     }
   }
 
