@@ -256,6 +256,24 @@ export function buildSignalLevels(i: SignalLevelInputs): SignalLevels {
              : srPrice !== null ? Math.min(srPrice * 0.995, entry - slBuffer)
              : entry - slBuffer;
     const risk = Math.max(entry - sl, 1e-6);
+    // ⚠ 下面這個 tpClampPrice（最近阻力）夾持**目前對 1h/4h/1d 完全無作用**。
+    // 呼叫端傳的 minRr 是 MIN_RR_SWING = 2.0，跟 swing 的 tp1Max 同一個數字，
+    // 於是上限等於地板：
+    //
+    //     tp1 = max(min(阻力, entry+2R), entry+2R) ≡ entry + 2R
+    //
+    // 而 isIntradayTF() 只認 5m/15m，系統 98% 的單是 1h（397/406）——換句話說
+    // 這段讀起來像「我們用結構位管 TP」，實際上結構位從沒影響過 TP1。只有
+    // 5m/15m 有活的窗口（1.2R 地板 vs 1.5R 上限）。
+    //
+    // 2026-09-07 測過「該不該讓它活過來」，答案是不用：置換檢定 n=85，觸及率
+    // ／停滯率／相關性三個指標 p = 0.74／0.20／0.14 全不顯著，觸及率真實值還
+    // 低於隨機——阻力位測不出資訊量，夾到阻力等同「把 TP1 挪到 ~1.16R」，
+    // 而固定倍數的 TP1 拉近已於 2026-09-03 測完（n=705，t=2.13 不過門檻）。
+    // 詳見 docs/ANALYSIS-2026-09-07B-阻力位資訊量.md。
+    //
+    // 刻意保留而不刪除：哪天 tp1Max 或 MIN_RR_SWING 其中一個改了，夾持就會
+    // 自己活過來，那時要記得它從來沒被驗證過有效。
     const tp1Max = intraday ? entry + risk * 1.5 : entry + risk * 2.0;
     const tp1Raw = tpClampPrice !== null ? Math.min(tpClampPrice, tp1Max) : tp1Max;
     const tp1    = Math.max(tp1Raw, entry + risk * minRr);
@@ -270,6 +288,7 @@ export function buildSignalLevels(i: SignalLevelInputs): SignalLevels {
            : srPrice !== null ? Math.max(srPrice * 1.005, entry + slBuffer)
            : entry + slBuffer;
   const risk = Math.max(sl - entry, 1e-6);
+  // SHORT 鏡像，同樣的死碼——說明見上面 LONG 分支的 tp1Max 註解。
   const tp1Max = intraday ? entry - risk * 1.5 : entry - risk * 2.0;
   const tp1Raw = tpClampPrice !== null ? Math.max(tpClampPrice, tp1Max) : tp1Max;
   const tp1    = Math.min(tp1Raw, entry - risk * minRr);
