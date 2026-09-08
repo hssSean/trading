@@ -51,11 +51,27 @@ function decimalsOf(step: number): number {
 
 // Rounds DOWN to the nearest multiple of stepSize. Always floors (never rounds up)
 // because a quantity rounded up could exceed the risk budget the caller computed.
+//
+// 2026-09-08：`Math.floor(qty / stepSize)` 單獨用會削掉一整格。`16.24 / 0.01`
+// 在二進位浮點下是 1623.9999999999998，floor 之後變 1623 → 16.23。這不是邊
+// 緣情況：1..1000 之間 step 0.01 有 9.1%、step 0.001 有 12.9% 的合法數量會中。
+//
+// 代價不是「少賣一格」而已——平倉單少平一格會留下灰塵部位，部位永遠不歸零：
+// SOLUSDT trade-1788765628400-wb2hq 進場 16.24、保本止損平掉 16.23，剩下的
+// 0.01 讓 live-runner 判定「部位變小了 = TP1 發生」，推播了假的 TP1 通知，
+// 那 0.01 又帶著原始止損跑了 13 小時，最後把一筆保本出場記成完整 −1R 的 LOSS。
+//
+// 修法是在 floor 之前補一個相對容差：只有當 qty 已經落在下一格的 1e-9 格以內
+// （＝浮點雜訊，不是真的差一格）才會被推上去。真的介於兩格之間仍然往下取——
+// 這裡絕不能改成 Math.round，往上取就是「平掉比部位還多的量」，那正是
+// 2026-09-06 UNI 翻倉事故的形狀。
+const STEP_EPSILON = 1e-9;
+
 export function roundToStepSize(qty: number, stepSize: number): number {
   if (stepSize <= 0) return qty;
   const decimals = decimalsOf(stepSize);
-  const floored = Math.floor(qty / stepSize) * stepSize;
-  return parseFloat(floored.toFixed(decimals));
+  const units = Math.floor(qty / stepSize + STEP_EPSILON);
+  return parseFloat((units * stepSize).toFixed(decimals));
 }
 
 // Rounds to the NEAREST multiple of tickSize (price can round either direction —

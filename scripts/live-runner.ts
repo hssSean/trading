@@ -64,7 +64,7 @@ import { reconcilePositionsAndOrders } from '../src/engine/watchdog';
 import { findMarginBracket } from '../src/engine/liquidation';
 import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
 import {
-  decideTradeAction, deriveLiveCloseReason, calcTotalOpenRisk,
+  decideTradeAction, deriveLiveCloseReason, calcTotalOpenRisk, didTp1PartialFill,
   BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
 } from '../src/engine/tradeBridge';
 import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
@@ -900,12 +900,17 @@ async function runCycle(
         row.entry_qty = entryQty;
       }
 
-      // 自我修復：部位比 entry_qty 小（TP1 真的發生了）但 DB 還沒標記——
-      // 跟上面 waiting→active 同一種模式，不依賴「我們自己主動下單」這個
-      // 時機點，只要事實跟記錄不一致就修正。
+      // 自我修復：TP1 的部分停利真的發生了但 DB 還沒標記——跟上面
+      // waiting→active 同一種模式，不依賴「我們自己主動下單」這個時機點，
+      // 只要事實跟記錄不一致就修正。
+      //
+      // 判準跟 decideTradeAction 共用同一個 didTp1PartialFill（2026-09-08）：
+      // 這兩處各寫一份 `< entry_qty * 0.99` 的時候，任何「部位只是變小」的
+      // 原因都會同時觸發假的 tp1_hit 標記與假的 TP1 推播——使用者收到「TP1
+      // 已達標」而價格離 TP1 還有 1R，就是這麼來的。
       if (
-        row.entry_qty !== null && snapshot.positionQty > 0
-        && snapshot.positionQty < row.entry_qty * 0.99 && row.status !== 'tp1_hit'
+        snapshot.positionQty > 0 && row.status !== 'tp1_hit'
+        && didTp1PartialFill(row.entry_qty, snapshot.positionQty)
       ) {
         await persist.markTp1Hit(row.id);
         row.status = 'tp1_hit';

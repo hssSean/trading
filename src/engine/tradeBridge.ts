@@ -15,7 +15,7 @@ import {
 import { checkLiquidationSafety, LiquidationPriceInput } from './liquidation';
 import { decideTimeStop, tfBarMinutes, TimeStopCloseReason, TimeStopTimeframe } from './timeStop';
 import { MAX_TOTAL_RISK_PCT } from '@/lib/position';
-import { CloseReason } from '@/lib/monitorMath';
+import { CloseReason, TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
 import { evaluateDailyLossCap } from '@/lib/dailyLossCap';
 
 // 2026-08-11：實測撞到——SOLUSDT 掛單等了 15 小時 28 分還沒成交，Redis
@@ -289,6 +289,39 @@ export type TradeAction =
   | { kind: 'flatten_unmanaged_position'; order: PlaceOrderParams; reason: string }
   | { kind: 'hold'; reason: string };
 
+// 「TP1 的部分停利到底發生了沒有」——不看條件單還在不在（消失可能是成交，
+// 也可能是被拒絕/取消），而是比較目前部位與進場當時的部位。
+//
+// 上界 99%：留給滑價與取整的雜訊，沒真的變小就不算數。
+//
+// 下界 25%（＝期望殘量 50% 的一半）是 2026-09-08 補的。原本只有上界，於是
+// 「部位變小」被無條件當成 TP1，而部位變小的原因不只 TP1：
+//
+//   SOLUSDT trade-1788765628400-wb2hq — 保本止損觸發時 16.24 張只平掉 16.23
+//   （roundToStepSize 的浮點誤差，已在 precision.ts 修掉），剩 0.01 張灰塵。
+//   那 0.06% 的殘渣讓系統判定「TP1 發生了」：DB 標成 tp1_hit、推播一則假的
+//   「TP1 已達標」（該筆價格最高只到 +1.07R，TP1 在 2R）、卡片顯示「建議把
+//   止損移到成本」，那 0.01 張再帶著止損跑了 13 小時，最後把一筆保本出場
+//   記成完整 −1R 的 LOSS。
+//
+// 同樣形狀的還有：使用者用手機 App 手動平掉一部分（這個帳戶的 `ios_*`
+// clientOrderId）、ADL、部分強平。這些都不該把系統推進「TP1 後只剩棘輪
+// 保護、不再減倉」的狀態機。
+//
+// 為什麼下界不設更高（例如 40%）：TP1 平的是「當下部位」的 50%，成交價與
+// stepSize 取整都會讓殘量偏離 50% 幾個百分點，門檻貼太近會反過來把真的
+// TP1 判成沒發生——那會讓系統重新掛一次 TP1 條件單，再平一次 50%，部位
+// 剩 25%。25% 離兩邊都夠遠。
+//
+// entryQty 是 null（舊資料，或還沒記過基準量）時保守回 false，不猜。
+export const TP1_REMNANT_MIN_RATIO = (1 - TP1_PARTIAL_FRACTION) / 2;
+
+export function didTp1PartialFill(entryQty: number | null, positionQty: number): boolean {
+  if (entryQty === null || entryQty <= 0) return false;
+  if (positionQty >= entryQty * 0.99) return false;
+  return positionQty >= entryQty * TP1_REMNANT_MIN_RATIO;
+}
+
 // 任何「本來要 hold」的情況，先檢查一次時間止損（盤整停滯／到期自動平倉）
 // 才真的 hold——route.ts 這兩個機制是全局的，不分策略 A/B、不分是否已過
 // TP1（isTp1Hit 只影響 decideTimeStop 內部走哪個分支），見 timeStop.ts。
@@ -512,12 +545,8 @@ export function decideTradeAction(
     };
   }
 
-  // 5. 有止損。TP1 是否已經發生——不再看條件單還在不在（消失可能是成交也
-  // 可能是被拒絕/取消），而是比較目前部位跟進場當時的部位：真的變小了才算
-  // 數。entryQty 是 null（理論上不會發生在這個檢查點——有止損代表一定成交
-  // 過，live-runner 的自我修復會在確認成交當下順便記錄這個基準值）時保守
-  // 視為「還沒發生」，不亂判斷。
-  const tp1Happened = trade.entryQty !== null && snapshot.positionQty < trade.entryQty * 0.99;
+  // 5. 有止損。TP1 是否已經發生——判準見 didTp1PartialFill。
+  const tp1Happened = didTp1PartialFill(trade.entryQty, snapshot.positionQty);
 
   if (trade.strategy === 'B') {
     // 策略B沒有兩階段 TP，交給預掛的 TAKE_PROFIT_MARKET（quantity=全部部位+

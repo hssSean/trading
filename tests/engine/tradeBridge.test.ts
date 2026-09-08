@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  decideTradeAction, summarizeClosingTrades, deriveLiveCloseReason,
+  decideTradeAction, summarizeClosingTrades, deriveLiveCloseReason, didTp1PartialFill,
   BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput,
 } from '../../src/engine/tradeBridge';
 import { UserTrade } from '../../src/engine/binanceClient';
@@ -654,6 +654,79 @@ describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)
       risk(),
     );
     expect(a.kind).toBe('hold');
+  });
+});
+
+// 2026-09-08 真倉事故（SOLUSDT trade-1788765628400-wb2hq）：保本止損觸發、
+// 16.24 張只平掉 16.23（roundToStepSize 的浮點誤差，已在 precision.ts 修掉），
+// 剩下 0.01 張灰塵。「部位比進場量小 = TP1 發生了」這條推論把 0.06% 的殘渣
+// 判定成 TP1：DB 標成 tp1_hit、推播一則「TP1 已達標」（價格最高只到 +1.07R，
+// 離 TP1 的 2R 還很遠），卡片顯示「TP1 已達標，建議把止損移到成本」，然後
+// 那 0.01 張帶著止損又跑了 13 小時。
+//
+// 判準補上下界：TP1 只平掉 TP1_PARTIAL_FRACTION（50%），真的發生過的話部位
+// 應該還剩約一半。剩不到期望值的一半（25%）代表把部位吃掉的不是 TP1——灰塵
+// 殘留、手動平倉（這個帳戶的使用者會用手機 App 直接下單）、ADL、部分強平都
+// 長這樣。
+describe('didTp1PartialFill — 部位變小不等於 TP1 發生', () => {
+  it('剩下約一半 → 是 TP1', () => {
+    expect(didTp1PartialFill(16.24, 8.12)).toBe(true);
+  });
+
+  it('部位沒變小 → 不是 TP1', () => {
+    expect(didTp1PartialFill(16.24, 16.24)).toBe(false);
+  });
+
+  it('只被浮點誤差差掉一點點（> 99%）→ 不是 TP1', () => {
+    expect(didTp1PartialFill(16.24, 16.23)).toBe(false);
+  });
+
+  it('只剩 0.06% 的灰塵 → 不是 TP1，是部位已經被平掉了', () => {
+    expect(didTp1PartialFill(16.24, 0.01)).toBe(false);
+  });
+
+  it('剛好在 25% 界線上 → 仍算 TP1（不因為滑價/取整少個幾格就翻判）', () => {
+    expect(didTp1PartialFill(16, 4)).toBe(true);
+    expect(didTp1PartialFill(16, 3.9)).toBe(false);
+  });
+
+  it('entryQty 未知或非正 → 保守判「還沒發生」，不亂猜', () => {
+    expect(didTp1PartialFill(null, 8)).toBe(false);
+    expect(didTp1PartialFill(0, 8)).toBe(false);
+  });
+});
+
+describe('decideTradeAction — 灰塵殘留不得被當成 TP1', () => {
+  // 同一組輸入，差別只在 entryQty：殘量 50% 走 TP1 後的 ATR 棘輪（止損跟到
+  // markPrice − 2×atr = 67000），殘量 0.06% 只能走 TP1 前的保本（止損最多
+  // 移到進場價 65000）。用止損落點區分，比 kind 更能指出走的是哪條路。
+  const dustSnapshot = () => snapshot({
+    positionQty: 0.01,
+    currentStop: { algoId: 222, triggerPrice: 64000 },
+    markPrice: 68000,
+    atr1h: 500,
+  });
+
+  it('部位只剩 0.06% 時不走 TP1 後的棘輪，只走 TP1 前的保本', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 16.24, exchangeTp1AlgoId: 333 }),
+      dustSnapshot(),
+      risk(),
+    );
+    expect(a.kind).toBe('update_trailing_stop');
+    if (a.kind !== 'update_trailing_stop') return;
+    expect(a.place.stopPrice).toBe(65000); // 進場價，不是 67000
+  });
+
+  it('對照組：殘量剛好一半時仍然走 TP1 後的棘輪', () => {
+    const a = decideTradeAction(
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.02, exchangeTp1AlgoId: 333 }),
+      dustSnapshot(),
+      risk(),
+    );
+    expect(a.kind).toBe('update_trailing_stop');
+    if (a.kind !== 'update_trailing_stop') return;
+    expect(a.place.stopPrice).toBe(67000);
   });
 });
 

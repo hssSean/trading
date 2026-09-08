@@ -236,9 +236,14 @@ const TradeRow = memo(function TradeRow({
       : (trade.stopLoss - livePx) / livePx * 100;
     nearSL = distSL < 1.5;
   }
-  // Distance to TP2 for trades watching for TP2 upgrade
+  // Distance to TP2 for trades watching for TP2 upgrade.
+  // 2026-09-08：條件從 isWatchingTp2 放寬到「任何 TP1 已達標的單」——真倉的
+  // TP1 標記（live-runner markTp1Hit）只寫 status，不寫 result，所以那條路徑
+  // 走的是 isPending && isTp1Hit 而不是 isWatchingTp2，底下那個框拿不到
+  // distTP2，只好拿 distTP1 湊，標籤卻寫「距TP2」——顯示的數字是到 TP1 的
+  // 距離，講的是 TP2。
   let distTP2 = 0;
-  if (isWatchingTp2 && livePx > 0) {
+  if ((isWatchingTp2 || isTp1Hit) && livePx > 0) {
     distTP2 = trade.direction === 'LONG'
       ? (trade.tp2 - livePx) / livePx * 100
       : (livePx - trade.tp2) / livePx * 100;
@@ -402,7 +407,7 @@ const TradeRow = memo(function TradeRow({
             <div className="border border-up/25 rounded-[10px] p-2 text-center">
               <div className="text-up text-[10px]">TP1 已達標</div>
               <div className="text-up text-[12px] num mt-0.5">
-                {distTP1 > 0 ? `距TP2 還差 ${distTP1.toFixed(2)}%` : `已超過 TP2 ${Math.abs(distTP1).toFixed(2)}%`}
+                {distTP2 > 0 ? `距TP2 還差 ${distTP2.toFixed(2)}%` : `已超過 TP2 ${Math.abs(distTP2).toFixed(2)}%`}
               </div>
             </div>
           ) : (
