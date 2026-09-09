@@ -37,6 +37,14 @@ export interface TradePersistence {
   // 搬到 live-runner 主迴圈（跟 waiting→active 那個自我修復同一種模式），
   // 不在這個檔案裡了，介面留著給那邊用。
   markTp1Hit(tradeId: string): Promise<void>;
+  /**
+   * 把誤標的 `tp1_hit` 改回 `active`（2026-09-09）。
+   *
+   * 只在「TP1 條件單此刻還掛在交易所上」時呼叫——還掛著就代表它沒成交，
+   * 這是已知的標錯，不是猜測。反向推論（不見了＝成交了）不成立，所以這個
+   * 方法沒有對應的「自動改成 tp1_hit」用途，那條路走 markTp1Hit。
+   */
+  markActive(tradeId: string): Promise<void>;
   finalizeClosed(tradeId: string, result: { result: 'WIN_TP1' | 'LOSS'; exitPrice: number; realizedPnl: number }): Promise<void>;
   // 進場單消失但查無任何成交紀錄——從未真的開過倉，沒有損益可對帳，跟
   // finalizeClosed（曾經開倉、現在要記最終結果）是不同語意，分開一個方法。

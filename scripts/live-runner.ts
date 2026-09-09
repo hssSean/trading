@@ -174,6 +174,8 @@ function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
     exchangeStopAlgoId: row.exchange_stop_algo_id,
     exchangeTp1AlgoId: row.exchange_tp1_algo_id,
     exchangeTp2AlgoId: row.exchange_tp2_algo_id ?? null,
+    // 「價格到底有沒有到過 TP1」的證據，給 didTp1PartialFill 用（2026-09-09）。
+    mfePrice: row.mfe_price,
   };
 }
 
@@ -211,6 +213,13 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
     async markTp1Hit(tradeId) {
       const { error } = await supabase.from('trades').update({ status: 'tp1_hit' }).eq('id', tradeId);
       logErr('markTp1Hit', error);
+    },
+    async markActive(tradeId) {
+      // 只回滾 status。result/exit_price 不動——真倉的 TP1 標記本來就只寫
+      // status（見 markTp1Hit），沒有別的欄位被那個誤判污染。
+      const { error } = await supabase.from('trades')
+        .update({ status: 'active' }).eq('id', tradeId).eq('status', 'tp1_hit');
+      logErr('markActive', error);
     },
     async finalizeClosed(tradeId, result) {
       // pnl_percent 維持跟 DB 模擬版同一個計算基礎（價格百分比，不是保證金
@@ -309,6 +318,13 @@ async function buildSnapshot(
     ? { algoId: stopOrder.algoId, triggerPrice: parseFloat(stopOrder.triggerPrice) }
     : null;
 
+  // TP1 條件單還掛著 ⇒ 它一定還沒成交（2026-09-09，見 tradeBridge.ts
+  // didTp1PartialFill）。跟 currentStop 讀同一份 openAlgoOrders，沒有額外
+  // API 呼叫。exchange_tp1_algo_id 是 null（從沒掛過）時也回 false——沒掛過
+  // 的單同樣不可能成交，讓判斷退回「要有價格證據」那條路。
+  const tp1OrderStillOpen = row.exchange_tp1_algo_id !== null
+    && openAlgoOrders.some(a => a.algoId === row.exchange_tp1_algo_id);
+
   // ATR 只有「策略A + 已經過 TP1」需要（移動止損棘輪）——其他情況不用多打
   //一次 K 線請求。
   let atr1h: number | undefined;
@@ -361,7 +377,7 @@ async function buildSnapshot(
   // 見 tradeBridge.ts 的 protectiveOrderCount。
   const protectiveOrderCount = openAlgoOrders.length;
 
-  return { positionQty, positionQtySigned, protectiveOrderCount, entryOrderStillOpen, currentStop, markPrice, filters, recentTrades, atr1h, now: Date.now() };
+  return { positionQty, positionQtySigned, protectiveOrderCount, entryOrderStillOpen, currentStop, tp1OrderStillOpen, markPrice, filters, recentTrades, atr1h, now: Date.now() };
 }
 
 async function buildRiskInput(
@@ -908,13 +924,42 @@ async function runCycle(
       // 這兩處各寫一份 `< entry_qty * 0.99` 的時候，任何「部位只是變小」的
       // 原因都會同時觸發假的 tp1_hit 標記與假的 TP1 推播——使用者收到「TP1
       // 已達標」而價格離 TP1 還有 1R，就是這麼來的。
+      //
+      // 2026-09-09：策略B（tp1 === tp2，觸價整單了結）根本沒有「部分停利」
+      // 這個狀態，卻跟策略A共用這段自我修復——XRPUSDT trade-1788884429051
+      // 就是這樣被標成 tp1_hit 的（策略B、價格離 TP1 還有 6.6R）。
+      // decideTradeAction 對策略B是硬寫 isTp1Hit=false 的，這裡補齊。
       if (
         snapshot.positionQty > 0 && row.status !== 'tp1_hit'
-        && didTp1PartialFill(row.entry_qty, snapshot.positionQty)
+        && (row.strategy ?? 'A') !== 'B'
+        && didTp1PartialFill({
+          entryQty: row.entry_qty, positionQty: snapshot.positionQty,
+          tp1OrderStillOpen: snapshot.tp1OrderStillOpen,
+          mfePrice: row.mfe_price, markPrice: snapshot.markPrice,
+          tp1: row.tp1, isLong: row.direction === 'LONG',
+        })
       ) {
         await persist.markTp1Hit(row.id);
         row.status = 'tp1_hit';
         await notifyTp1Hit(userId, row);
+      }
+
+      // 反向自我修復（2026-09-09）：DB 說 tp1_hit，但那張 TP1 條件單此刻還
+      // 掛在交易所上——**還掛著就代表它沒成交**，這個方向的推論是嚴謹的，
+      // 所以這是「已知標錯」而不是「猜它標錯」，可以直接改回 active。
+      //
+      // 沒有這段的話，上面判準修好也只防未來：已經被標髒的單不會自己好，
+      // 卡片會一直顯示「TP1 已達標，建議把止損移到成本」直到那筆平倉。
+      // UNIUSDT trade-1788833416973-drr88 就卡在這個狀態（TP1 掛在 7.372，
+      // 價格最高只到 7.196）。
+      if (
+        snapshot.positionQty > 0 && row.status === 'tp1_hit'
+        && snapshot.tp1OrderStillOpen === true
+      ) {
+        await persist.markActive(row.id);
+        console.log(`[${nowStr()}] ${row.symbol}（${row.id}）DB 標成 tp1_hit，`
+          + `但 TP1 條件單還掛在交易所上（沒成交）——改回 active。`);
+        row.status = 'active';
       }
 
       // MFE/MAE（2026-08-12）：真倉監控從來沒記過——DB 模擬版（route.ts）

@@ -22,6 +22,9 @@ function tradeRow(overrides: Partial<BridgeTradeRow> = {}): BridgeTradeRow {
 function snapshot(overrides: Partial<BridgeExchangeSnapshot> = {}): BridgeExchangeSnapshot {
   return {
     positionQty: 0, entryOrderStillOpen: false, currentStop: null,
+    // 預設「TP1 條件單已不在掛單簿上」——TP1 判定的其他證據（價格、數量）
+    // 才是各測試想區分的變因。還掛著的情境由個別測試自己覆寫。
+    tp1OrderStillOpen: false,
     markPrice: 65000, filters, now: 0,
     ...overrides,
   };
@@ -177,10 +180,10 @@ describe('decideTradeAction — 交易所方向與 DB 不符', () => {
 // `BridgeTradeRow` 甚至沒有這個欄位。使用者實測回報「打到最終 TP 卻沒有止盈，
 // 而且雲端機器完全沒有那筆的 log」——沒有 log 是因為決策回傳 hold。
 describe('decideTradeAction — TP2 條件單（TP1 之後）', () => {
-  /** TP1 已發生：部位比進場量小。 */
+  /** TP1 已發生：部位比進場量小，而且價格確實到過 TP1（mfePrice）。 */
   const afterTp1 = (over: Partial<Parameters<typeof tradeRow>[0]> = {}) => tradeRow({
     exchangeEntryOrderId: 111, exchangeStopAlgoId: 222, exchangeTp1AlgoId: 333,
-    entryQty: 0.01, tp2: 70000, ...over,
+    entryQty: 0.01, tp2: 70000, mfePrice: 67500, ...over,
   });
   const snapAfterTp1 = () => snapshot({
     positionQty: 0.005, entryOrderStillOpen: false, atr1h: 100,
@@ -213,7 +216,7 @@ describe('decideTradeAction — TP2 條件單（TP1 之後）', () => {
 
   it('做空方向掛 BUY 單', () => {
     const a = decideTradeAction(
-      afterTp1({ isLong: false, entry: 65000, stopLoss: 66000, tp1: 63000, tp2: 60000 }),
+      afterTp1({ isLong: false, entry: 65000, stopLoss: 66000, tp1: 63000, tp2: 60000, mfePrice: 62500 }),
       snapshot({ positionQty: 0.005, entryOrderStillOpen: false, atr1h: 100, currentStop: { algoId: 222, triggerPrice: 66000 } }),
       risk(),
     );
@@ -669,30 +672,82 @@ describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)
 // 殘留、手動平倉（這個帳戶的使用者會用手機 App 直接下單）、ADL、部分強平都
 // 長這樣。
 describe('didTp1PartialFill — 部位變小不等於 TP1 發生', () => {
+  // 價格證據齊備（多單、TP1=67000、已經摸到 67500）、TP1 條件單已不在掛單簿上，
+  // 這組測試只變動數量，維持原本那層判準的覆蓋。
+  const ev = (entryQty: number | null, positionQty: number) => ({
+    entryQty, positionQty, tp1OrderStillOpen: false,
+    mfePrice: 67500, markPrice: 66000, tp1: 67000, isLong: true,
+  });
+
   it('剩下約一半 → 是 TP1', () => {
-    expect(didTp1PartialFill(16.24, 8.12)).toBe(true);
+    expect(didTp1PartialFill(ev(16.24, 8.12))).toBe(true);
   });
 
   it('部位沒變小 → 不是 TP1', () => {
-    expect(didTp1PartialFill(16.24, 16.24)).toBe(false);
+    expect(didTp1PartialFill(ev(16.24, 16.24))).toBe(false);
   });
 
   it('只被浮點誤差差掉一點點（> 99%）→ 不是 TP1', () => {
-    expect(didTp1PartialFill(16.24, 16.23)).toBe(false);
+    expect(didTp1PartialFill(ev(16.24, 16.23))).toBe(false);
   });
 
   it('只剩 0.06% 的灰塵 → 不是 TP1，是部位已經被平掉了', () => {
-    expect(didTp1PartialFill(16.24, 0.01)).toBe(false);
+    expect(didTp1PartialFill(ev(16.24, 0.01))).toBe(false);
   });
 
   it('剛好在 25% 界線上 → 仍算 TP1（不因為滑價/取整少個幾格就翻判）', () => {
-    expect(didTp1PartialFill(16, 4)).toBe(true);
-    expect(didTp1PartialFill(16, 3.9)).toBe(false);
+    expect(didTp1PartialFill(ev(16, 4))).toBe(true);
+    expect(didTp1PartialFill(ev(16, 3.9))).toBe(false);
   });
 
   it('entryQty 未知或非正 → 保守判「還沒發生」，不亂猜', () => {
-    expect(didTp1PartialFill(null, 8)).toBe(false);
-    expect(didTp1PartialFill(0, 8)).toBe(false);
+    expect(didTp1PartialFill(ev(null, 8))).toBe(false);
+    expect(didTp1PartialFill(ev(0, 8))).toBe(false);
+  });
+});
+
+// 2026-09-09 真倉事故（UNIUSDT trade-1788833416973-drr88）：進場 75 張，時間
+// 止損的整單平倉只平掉 34 張，剩 41 張。價格當時最高 7.196、TP1 在 7.3724
+// （+1.12R vs 2R，**從沒碰過**），但 41/75 = 54.7% 落在 25%~99% 正中間，只看
+// 數量的判準判 true → 假的 tp1_hit、假的「🎯 TP1 達標」推播、卡片顯示
+// 「建議把止損移到成本」。2026-09-08 補的 25% 下界擋不到這種形狀。
+describe('didTp1PartialFill — 數量對得上，但 TP1 根本沒成交', () => {
+  // UNIUSDT 的真實數字
+  const uni = (over: Partial<Parameters<typeof didTp1PartialFill>[0]> = {}) => ({
+    entryQty: 75, positionQty: 41,
+    tp1OrderStillOpen: false,
+    mfePrice: 7.196, markPrice: 6.79,
+    tp1: 7.37242857142857, isLong: true,
+    ...over,
+  });
+
+  it('價格從沒到過 TP1 → 不是 TP1（就算殘量剛好像 TP1 平了一半）', () => {
+    expect(didTp1PartialFill(uni())).toBe(false);
+  });
+
+  it('TP1 條件單還掛在交易所上 → 一定沒成交，數量再像也不算', () => {
+    expect(didTp1PartialFill(uni({ mfePrice: 7.5, tp1OrderStillOpen: true }))).toBe(false);
+  });
+
+  it('條件單不見了 + 價格確實到過 TP1 + 殘量約一半 → 才算 TP1', () => {
+    expect(didTp1PartialFill(uni({ mfePrice: 7.5 }))).toBe(true);
+  });
+
+  it('MFE 還沒更新到本輪，用本輪標記價補（真的剛觸發那一刻不會漏判）', () => {
+    expect(didTp1PartialFill(uni({ mfePrice: 7.1, markPrice: 7.4 }))).toBe(true);
+  });
+
+  it('證據缺席（不知道條件單在不在）→ 一律不算，不猜', () => {
+    expect(didTp1PartialFill(uni({ mfePrice: 7.5, tp1OrderStillOpen: undefined }))).toBe(false);
+  });
+
+  it('空單：價格要往下到過 TP1 才算', () => {
+    const xrp = {
+      entryQty: 109.9, positionQty: 60, tp1OrderStillOpen: false,
+      mfePrice: 1.4248, markPrice: 1.43, tp1: 1.39878, isLong: false,
+    };
+    expect(didTp1PartialFill(xrp)).toBe(false);
+    expect(didTp1PartialFill({ ...xrp, mfePrice: 1.39 })).toBe(true);
   });
 });
 
@@ -828,9 +883,9 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
 
   it('fires expiry_post_tp1 (24h age limit reached after TP1 already happened)', () => {
     const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111, filledAt: 0, exchangeTp1AlgoId: 333, entryQty: 0.01 }),
+      tradeRow({ exchangeEntryOrderId: 111, filledAt: 0, exchangeTp1AlgoId: 333, entryQty: 0.01, mfePrice: 67500 }),
       snapshot({
-        positionQty: 0.005, // < entryQty * 0.99 → TP1 已發生
+        positionQty: 0.005, // < entryQty * 0.99 且價格到過 TP1 → TP1 已發生
         currentStop: { algoId: 222, triggerPrice: 66000 },
         markPrice: 66500,
         now: 25 * 3600_000,

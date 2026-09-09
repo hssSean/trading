@@ -158,6 +158,16 @@ export interface BridgeTradeRow {
    * 維持原行為而不是壞掉。
    */
   exchangeTp2AlgoId?: number | null;
+  /**
+   * 這筆存續期間看過的最有利價格（MFE，多單是最高價、空單是最低價）。
+   * `null` = 還沒量測過。
+   *
+   * 2026-09-09 新增，給 `didTp1PartialFill` 當「價格到底有沒有到過 TP1」的
+   * 證據——**沒到過 TP1 的價格，TP1 條件單就不可能成交**。這是必要條件，
+   * 不是啟發式判斷。live-runner 每輪都在更新 `mfe_price`（單調不回頭），
+   * 這裡只是把它接進決策層。
+   */
+  mfePrice?: number | null;
 }
 
 export interface BridgeExchangeSnapshot {
@@ -203,6 +213,17 @@ export interface BridgeExchangeSnapshot {
   // 1小時 ATR(14期)，只有策略A的移動止損判斷需要。<= 0 或未提供都視為
   // 「還沒有 ATR 資料」，不會亂算——見 calcTrailingStopTarget。
   atr1h?: number;
+  /**
+   * 這筆的 TP1 條件單此刻還掛在交易所上（`openAlgoOrders` 裡找得到
+   * `exchangeTp1AlgoId`）。
+   *
+   * 2026-09-09 新增，給 `didTp1PartialFill` 用。**還掛著 = 一定沒成交**，
+   * 這個方向的推論是嚴謹的；反過來「不見了 = 成交了」才是不嚴謹的那一半
+   * （可能是被拒絕/取消），所以不見時仍然要靠其他證據。
+   *
+   * 選填：不帶就是「不知道」，退回舊行為（不擋）。
+   */
+  tp1OrderStillOpen?: boolean;
 }
 
 export interface RiskCheckInput {
@@ -314,12 +335,62 @@ export type TradeAction =
 // 剩 25%。25% 離兩邊都夠遠。
 //
 // entryQty 是 null（舊資料，或還沒記過基準量）時保守回 false，不猜。
+//
+// ── 2026-09-09：光看數量永遠不夠，要有「TP1 真的成交了」的證據 ──────────────
+//
+// 上面那組上下界擋掉了灰塵（<25%），但擋不掉「部位剛好少了一半左右、而原因
+// 不是 TP1」——那正是這個判準最容易誤判、後果也最嚴重的區間：
+//
+//   UNIUSDT trade-1788833416973-drr88 — 進場 75 張，時間止損（time_stop_stall）
+//   的整單平倉只平掉 34 張，剩 41 張（54.7%）。價格當時最高只到 7.196，TP1 在
+//   7.3724（+1.12R vs 2R）——**從來沒碰過**。但 41/75 落在 25%~99% 正中間，
+//   數量判準判 true：DB 標成 tp1_hit、推播一則假的「🎯 TP1 達標」、卡片顯示
+//   「TP1 已達標，建議把止損移到成本」。
+//
+// 數量只能說「部位變小了」，說不出「為什麼變小」。所以再要求兩個**必要條件**，
+// 兩個都是「不成立就一定不是 TP1」的方向，不是加權猜測：
+//
+//   1. tp1OrderStillOpen — TP1 條件單此刻還掛在交易所上 ⇒ 它一定還沒成交。
+//      注意這裡只用**單向**推論：「還掛著 = 沒成交」嚴謹，「不見了 = 成交了」
+//      不嚴謹（可能被拒絕/取消），所以不見時不當成證據，還要看第 2 條。
+//      這就是 2026-08-10 把判準從「看條件單在不在」改成「比部位大小」時
+//      放棄的那半個資訊——當時連同能用的那一半一起丟掉了。
+//
+//   2. reachedTp1 — 價格（MFE，單調不回頭）到過 TP1。沒到過 TP1 的價格，
+//      掛在 TP1 的條件單不可能觸發。
+//
+// 證據缺席（undefined）時一律當「不成立」，跟 entryQty=null 同一個方向：
+// 寧可漏判 TP1（後果是少了移動止損棘輪），也不要捏造 TP1（後果是假推播、
+// 假紀錄，而且會把這筆單推進「只剩棘輪保護、不再減倉」的狀態機）。
 export const TP1_REMNANT_MIN_RATIO = (1 - TP1_PARTIAL_FRACTION) / 2;
 
-export function didTp1PartialFill(entryQty: number | null, positionQty: number): boolean {
-  if (entryQty === null || entryQty <= 0) return false;
-  if (positionQty >= entryQty * 0.99) return false;
-  return positionQty >= entryQty * TP1_REMNANT_MIN_RATIO;
+export interface Tp1FillEvidence {
+  entryQty: number | null;
+  positionQty: number;
+  /** TP1 條件單還掛在交易所上。undefined = 不知道，一律當「沒有證據」。 */
+  tp1OrderStillOpen?: boolean;
+  /** 這筆看過的最有利價（MFE）。undefined/null = 還沒量測過。 */
+  mfePrice?: number | null;
+  /** 這一輪的標記價——MFE 還沒被這輪更新到，這裡自己併進去。 */
+  markPrice: number;
+  tp1: number;
+  isLong: boolean;
+}
+
+/** 價格到過 TP1 了嗎（多單看最高、空單看最低，MFE 與本輪標記價取較有利者）。 */
+export function priceReachedTp1(ev: Pick<Tp1FillEvidence, 'mfePrice' | 'markPrice' | 'tp1' | 'isLong'>): boolean {
+  const best = ev.isLong
+    ? Math.max(ev.mfePrice ?? -Infinity, ev.markPrice)
+    : Math.min(ev.mfePrice ?? Infinity, ev.markPrice);
+  return ev.isLong ? best >= ev.tp1 : best <= ev.tp1;
+}
+
+export function didTp1PartialFill(ev: Tp1FillEvidence): boolean {
+  if (ev.tp1OrderStillOpen !== false) return false;   // 還掛著、或不知道 → 沒成交
+  if (!priceReachedTp1(ev)) return false;             // 價格沒到過 TP1 → 不可能觸發
+  if (ev.entryQty === null || ev.entryQty <= 0) return false;
+  if (ev.positionQty >= ev.entryQty * 0.99) return false;
+  return ev.positionQty >= ev.entryQty * TP1_REMNANT_MIN_RATIO;
 }
 
 // 任何「本來要 hold」的情況，先檢查一次時間止損（盤整停滯／到期自動平倉）
@@ -546,7 +617,12 @@ export function decideTradeAction(
   }
 
   // 5. 有止損。TP1 是否已經發生——判準見 didTp1PartialFill。
-  const tp1Happened = didTp1PartialFill(trade.entryQty, snapshot.positionQty);
+  const tp1Happened = didTp1PartialFill({
+    entryQty: trade.entryQty, positionQty: snapshot.positionQty,
+    tp1OrderStillOpen: snapshot.tp1OrderStillOpen,
+    mfePrice: trade.mfePrice, markPrice: snapshot.markPrice,
+    tp1: trade.tp1, isLong: trade.isLong,
+  });
 
   if (trade.strategy === 'B') {
     // 策略B沒有兩階段 TP，交給預掛的 TAKE_PROFIT_MARKET（quantity=全部部位+

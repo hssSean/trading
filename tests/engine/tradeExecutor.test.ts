@@ -35,6 +35,7 @@ class FakePersist implements TradePersistence {
   tp1AlgoIds: Array<{ tradeId: string; algoId: number }> = [];
   tp2AlgoIds: Array<{ tradeId: string; algoId: number }> = [];
   tp1HitCalls: string[] = [];
+  markActiveCalls: string[] = [];
   finalizeCalls: Array<{ tradeId: string; result: unknown }> = [];
   neverFilledCalls: string[] = [];
   filledCalls: Array<{ tradeId: string; filledAt: number }> = [];
@@ -46,6 +47,7 @@ class FakePersist implements TradePersistence {
   async setTp1AlgoId(tradeId: string, algoId: number) { this.tp1AlgoIds.push({ tradeId, algoId }); }
   async setTp2AlgoId(tradeId: string, algoId: number) { this.tp2AlgoIds.push({ tradeId, algoId }); }
   async markTp1Hit(tradeId: string) { this.tp1HitCalls.push(tradeId); }
+  async markActive(tradeId: string) { this.markActiveCalls.push(tradeId); }
   async markFilled(tradeId: string, filledAt: number) { this.filledCalls.push({ tradeId, filledAt }); }
   async finalizeClosed(tradeId: string, result: unknown) { this.finalizeCalls.push({ tradeId, result }); }
   async markEntryNeverFilled(tradeId: string) { this.neverFilledCalls.push(tradeId); }
