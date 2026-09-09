@@ -313,7 +313,14 @@ async function buildSnapshot(
   // 因此完全沒有能力分辨多空——UNIUSDT 的 DB 記 LONG、幣安實際是 -39 空單，
   // 程式照 DB 掛 SELL 止損被幣安 -4509 拒絕，每 15 秒重試一次，而那個部位
   // 一張止損都沒有。見 tradeBridge.ts 的 positionQtySigned。
-  const positionQtySigned = positions[0] ? parseFloat(positions[0].positionAmt) : 0;
+  //
+  // 2026-09-09：明確用 `.symbol` 比對，不再靠 `positions[0]` 的順序。這個
+  // 專案已經有兩個「幣安端點的 symbol 篩選不可信」的前例（上面那段的
+  // getOpenAlgoOrders、getUserTrades 的時間窗），而拿錯 symbol 的部位量會
+  // 直接變成止損單和平倉單的數量。實測這個端點目前是好的（帶 symbol 回 1
+  // 列、不帶回全帳戶 736 列），所以這是防禦不是修 bug。
+  const pos = positions.find(p => p.symbol === row.symbol);
+  const positionQtySigned = pos ? parseFloat(pos.positionAmt) : 0;
   const positionQty = Math.abs(positionQtySigned);
   const entryOrderStillOpen = row.exchange_entry_order_id !== null
     && openOrders.some(o => o.orderId === row.exchange_entry_order_id);
@@ -871,6 +878,12 @@ async function runCycle(
   const client: TradeExecutorClient = {
     placeOrder: (params) => binance.placeOrder(params),
     cancelOrder: (symbol, orderId, isAlgoOrder) => binance.cancelOrder(symbol, orderId, isAlgoOrder),
+    // 整單平倉後驗證部位歸零用的即時查詢（見 tradeExecutor.ts 該分支）。
+    // 明確比對 `.symbol` 不靠回傳順序，理由同 buildSnapshot。
+    getPositionQty: async (symbol) => {
+      const p = (await binance.getPositionRisk(symbol)).find(x => x.symbol === symbol);
+      return p ? parseFloat(p.positionAmt) : 0;
+    },
   };
 
   // exchangeInfo 是全市場共用的靜態精度資料，同一輪所有 trade 共用一份，
@@ -1110,6 +1123,24 @@ async function runCycle(
 
       if (result.executed) {
         console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
+
+        // 整單平倉沒把部位平乾淨——這是「靜默停擺」等級的事故，不能只留一行
+        // log 就算了。2026-09-08 UNIUSDT 少平的 41 張沒有任何東西發現，那個
+        // 殘留部位帶著錯誤數量的止損單裸奔 20 小時（每次觸發都被幣安以
+        // `Reduce only reject` 打回），下游還把它誤判成 TP1 部分停利。
+        // console.error + 推播兩條路都走，因為使用者不會盯著終端機。
+        if (result.closeVerification && !result.closeVerification.flat) {
+          const v = result.closeVerification;
+          console.error(`[${nowStr()}] ⚠⚠ ${row.symbol}（${row.id}）整單平倉沒平乾淨：`
+            + `補送 ${v.extraOrders} 張之後交易所端還留著 ${v.remaining}。`
+            + `這個殘留部位不在系統的管理範圍內，需要人工到幣安確認。`);
+          await sendWebPushToUser(userId, {
+            title: `⚠️ 平倉沒平乾淨 ${row.symbol.replace('USDT', '/USDT')}`,
+            body: `交易所端還留著 ${v.remaining} 的部位（已補送 ${v.extraOrders} 張仍未平掉），請到幣安手動確認`,
+            tag: `residual-${row.id}`,
+          });
+        }
+
         await notifyIfNeeded(userId, row, action, snapshot.currentStop?.triggerPrice ?? null);
         // 這筆 trade 生命週期正式結束——見 cleanupAfterTradeClosed 頂部
         // 說明：撤殘留條件單 + 解 Redis symbol 鎖，避免使用者實測撞到的

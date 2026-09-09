@@ -18,14 +18,29 @@ class FakeClient implements TradeExecutorClient {
   async placeOrder(params: PlaceOrderParams) {
     this.placeOrderCalls.push(params);
     this.callSequence.push('place');
+    if (this.positionAfterPlace.length > 0) this.positionQty = this.positionAfterPlace.shift() as number;
     return { orderId: this.nextOrderId++, clientOrderId: params.newClientOrderId ?? '', status: 'NEW' };
   }
   /** 撤單回應的 executedQty——部分成交的限價單被撤掉後這裡會 > 0。 */
   cancelExecutedQty = '0';
+  /** 撤單要不要丟例外（模擬條件單早就不存在／幣安拒絕）。 */
+  cancelThrows = false;
   async cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean) {
     this.cancelOrderCalls.push({ symbol, orderId, isAlgoOrder });
     this.callSequence.push('cancel');
+    if (this.cancelThrows) throw new Error(`cancel failed for ${orderId}`);
     return { orderId, status: 'CANCELED', executedQty: this.cancelExecutedQty };
+  }
+
+  /** 交易所端的部位（帶正負號）。預設 0 = 平倉單一次就平乾淨。 */
+  positionQty = 0;
+  /** 每次 placeOrder 之後部位變成什麼——用來模擬「平不乾淨」。 */
+  positionAfterPlace: number[] = [];
+  getPositionQtyCalls: string[] = [];
+  async getPositionQty(symbol: string) {
+    this.getPositionQtyCalls.push(symbol);
+    this.callSequence.push('getPosition');
+    return this.positionQty;
   }
 }
 
@@ -131,28 +146,136 @@ describe('executeTradeAction — place_tp2_order', () => {
   });
 });
 
+// 2026-09-09：這一組全部是 UNIUSDT trade-1788833416973-drr88 的迴歸測試。
+// 部位 75，時間止損送出 reduceOnly MARKET 平倉單——**送出的數量是 75，幣安
+// 只平了 34**，剩下 41 張沒有人知道。詳見 tradeExecutor.ts close_full_position
+// 的長註解。
+const fullClose = (over: Partial<Extract<TradeAction, { kind: 'close_full_position' }>> = {}) => ({
+  kind: 'close_full_position' as const,
+  order: { symbol: 'UNIUSDT', side: 'SELL', type: 'MARKET', quantity: 75, reduceOnly: true,
+    newClientOrderId: 'trade-1-fullclose' } as PlaceOrderParams,
+  closeReason: 'time_stop_stall' as TimeStopCloseReason,
+  cancelAlgoIds: [] as number[],
+  stepSize: 1,
+  ...over,
+});
+
 describe('executeTradeAction — close_full_position', () => {
   it('places the closing order but does NOT write a final result (next cycle reconciles)', async () => {
     const client = new FakeClient();
     const persist = new FakePersist();
-    const closeOrder: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.01, reduceOnly: true };
-    const action: TradeAction = { kind: 'close_full_position', order: closeOrder, closeReason: 'time_stop_stall' };
+    const action: TradeAction = fullClose();
 
     await executeTradeAction(client, persist, 'trade-1', action);
 
-    expect(client.placeOrderCalls).toEqual([closeOrder]);
+    expect(client.placeOrderCalls).toEqual([action.order]);
     expect(persist.finalizeCalls).toEqual([]); // 刻意不寫，交給下一輪 sync_closed_position
   });
 
   it('records why we forced the close, so sync_closed_position can use it instead of guessing later', async () => {
     const client = new FakeClient();
     const persist = new FakePersist();
-    const closeOrder: PlaceOrderParams = { symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.01, reduceOnly: true };
-    const action: TradeAction = { kind: 'close_full_position', order: closeOrder, closeReason: 'time_stop_expiry_post_tp1' };
 
-    await executeTradeAction(client, persist, 'trade-1', action);
+    await executeTradeAction(client, persist, 'trade-1', fullClose({ closeReason: 'time_stop_expiry_post_tp1' }));
 
     expect(persist.forceCloseReasonCalls).toEqual([{ tradeId: 'trade-1', reason: 'time_stop_expiry_post_tp1' }]);
+  });
+
+  it('撤掉保護性條件單之後才送平倉單——reduceOnly 條件單會佔用可平額度', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+
+    await executeTradeAction(client, persist, 'trade-1', fullClose({ cancelAlgoIds: [111, 222, 333] }));
+
+    expect(client.cancelOrderCalls).toEqual([
+      { symbol: 'UNIUSDT', orderId: 111, isAlgoOrder: true },
+      { symbol: 'UNIUSDT', orderId: 222, isAlgoOrder: true },
+      { symbol: 'UNIUSDT', orderId: 333, isAlgoOrder: true },
+    ]);
+    expect(client.callSequence).toEqual(['cancel', 'cancel', 'cancel', 'place', 'getPosition']);
+  });
+
+  it('撤條件單失敗不能擋住平倉——平倉比撤單重要', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    client.cancelThrows = true;
+
+    const res = await executeTradeAction(client, persist, 'trade-1', fullClose({ cancelAlgoIds: [111] }));
+
+    expect(res.executed).toBe(true);
+    expect(client.placeOrderCalls).toHaveLength(1);
+  });
+
+  it('平倉後驗證部位歸零', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+
+    const res = await executeTradeAction(client, persist, 'trade-1', fullClose());
+
+    expect(client.getPositionQtyCalls).toEqual(['UNIUSDT']);
+    expect(res.closeVerification).toEqual({ flat: true, remaining: 0, extraOrders: 0 });
+  });
+
+  it('沒平乾淨就補送——UNI 送 75 只平掉 34，剩下的 41 要自己補平', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    // 第一張單之後剩 41，補送那張才真的歸零
+    client.positionAfterPlace = [41, 0];
+
+    const res = await executeTradeAction(client, persist, 'trade-1', fullClose());
+
+    expect(client.placeOrderCalls).toHaveLength(2);
+    expect(client.placeOrderCalls[1]).toMatchObject({
+      symbol: 'UNIUSDT', side: 'SELL', type: 'MARKET', quantity: 41, reduceOnly: true,
+      newClientOrderId: 'trade-1-fullclose-r1', // 冪等 ID 不能重複，否則幣安 -4015
+    });
+    expect(res.closeVerification).toEqual({ flat: true, remaining: 0, extraOrders: 1 });
+  });
+
+  it('空單的殘留部位是負數，補單要用絕對值', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    client.positionAfterPlace = [-41, 0];
+
+    await executeTradeAction(client, persist, 'trade-1', fullClose({
+      order: { symbol: 'UNIUSDT', side: 'BUY', type: 'MARKET', quantity: 75, reduceOnly: true },
+    }));
+
+    expect(client.placeOrderCalls[1]).toMatchObject({ side: 'BUY', quantity: 41 });
+  });
+
+  it('補三次還是平不掉就放棄並大聲回報，不會無限重試', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    client.positionQty = 41; // 怎麼送都平不掉
+
+    const res = await executeTradeAction(client, persist, 'trade-1', fullClose());
+
+    expect(client.placeOrderCalls).toHaveLength(1 + 3);
+    expect(res.closeVerification).toEqual({ flat: false, remaining: 41, extraOrders: 3 });
+    expect(res.note).toContain('⚠');
+  });
+
+  it('殘留量小於一格就補不掉——不送註定被拒的單，直接回報', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    client.positionAfterPlace = [0.4];
+
+    const res = await executeTradeAction(client, persist, 'trade-1', fullClose({ stepSize: 1 }));
+
+    expect(client.placeOrderCalls).toHaveLength(1); // 沒有補單
+    expect(res.closeVerification).toEqual({ flat: false, remaining: 0.4, extraOrders: 0 });
+    expect(res.note).toContain('⚠');
+  });
+
+  it('平倉原因照樣寫回 DB，即使沒平乾淨', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    client.positionQty = 41;
+
+    await executeTradeAction(client, persist, 'trade-1', fullClose());
+
+    expect(persist.forceCloseReasonCalls).toEqual([{ tradeId: 'trade-1', reason: 'time_stop_stall' }]);
   });
 });
 

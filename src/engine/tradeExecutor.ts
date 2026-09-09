@@ -9,6 +9,7 @@
 import { PlaceOrderParams } from './binanceClient';
 import { TradeAction } from './tradeBridge';
 import { TimeStopCloseReason } from './timeStop';
+import { roundToStepSize } from './precision';
 
 export interface TradeExecutorClient {
   placeOrder(params: PlaceOrderParams): Promise<{ orderId: number; clientOrderId: string; status: string }>;
@@ -17,6 +18,15 @@ export interface TradeExecutorClient {
   // 成功」誤讀成「從沒開過倉」。選填是為了不強迫既有測試替身全部改寫。
   cancelOrder(symbol: string, orderId: number, isAlgoOrder?: boolean):
     Promise<{ orderId: number; status: string; executedQty?: string }>;
+  /**
+   * 交易所此刻的真實部位，**帶正負號**（正 = 多、負 = 空），0 = 空手。
+   *
+   * 2026-09-09 新增。刻意是必要方法而不是選填：它唯一的用途是驗證整單平倉
+   * 有沒有真的把部位平乾淨，而一個「測試替身沒實作就自動跳過」的安全驗證
+   * 等於沒有驗證——UNI 那次留下 41 張殘留部位，代價是 20 小時沒有有效止損，
+   * 加上下游把殘留誤判成 TP1 部分停利。
+   */
+  getPositionQty(symbol: string): Promise<number>;
 }
 
 // 每個方法對應一種要寫回 Supabase trades 表的變化。呼叫端（live-runner）
@@ -81,6 +91,62 @@ export interface ExecutionResult {
    * 比原本的 bug 更糟。
    */
   stillOpen?: boolean;
+  /**
+   * 整單平倉的「部位真的歸零了嗎」驗證結果（只有 close_full_position 會有）。
+   *
+   * `flat: false` 代表交易所端還留著部位而我們已經放棄補平——呼叫端必須
+   * 大聲告警，不能只當成一行 log。見 close_full_position 分支的說明。
+   *
+   * `remaining` 帶正負號（正 = 還留著多單、負 = 還留著空單），方向本身是
+   * 診斷資訊；`flat: true` 時固定為 0。
+   */
+  closeVerification?: { flat: boolean; remaining: number; extraOrders: number };
+}
+
+/**
+ * 整單平倉之後，最多再補送幾張單把殘留部位掃乾淨。
+ *
+ * 3 次是「夠救得回正常情況，又不會在真的壞掉時無限重試」的折衷：這支每 15
+ * 秒跑一輪，補不完下一輪還會再來，這裡的上限只是不要在同一輪裡卡死。
+ */
+const MAX_RECLOSE_ATTEMPTS = 3;
+
+/**
+ * 送出平倉單之後，反覆確認部位歸零；沒歸零就用同方向的 reduceOnly MARKET
+ * 單補平剩下的量。
+ *
+ * 每一張補單都用不同的 `newClientOrderId`（`-fullclose-r1`、`-r2`…）——原本
+ * 那個 `-fullclose` 是刻意設計的冪等 ID，重複送會被幣安以 -4015 擋掉，補單
+ * 要能真的送出去就必須換 ID。
+ *
+ * 殘留量在 stepSize 之下時**不送單**：那種數量一定會被幣安以精度規則拒絕，
+ * 送出去只是把一個「有殘留」的問題換成一串錯誤 log。直接回報讓人處理。
+ */
+async function closeUntilFlat(
+  client: TradeExecutorClient,
+  tradeId: string,
+  action: Extract<TradeAction, { kind: 'close_full_position' }>,
+): Promise<{ flat: boolean; remaining: number; extraOrders: number }> {
+  let extraOrders = 0;
+  for (let attempt = 1; attempt <= MAX_RECLOSE_ATTEMPTS + 1; attempt++) {
+    const signed = await client.getPositionQty(action.order.symbol);
+    const remaining = Math.abs(signed);
+    if (remaining === 0) return { flat: true, remaining: 0, extraOrders };
+    if (attempt > MAX_RECLOSE_ATTEMPTS) return { flat: false, remaining: signed, extraOrders };
+
+    const qty = roundToStepSize(remaining, action.stepSize);
+    if (qty <= 0) return { flat: false, remaining: signed, extraOrders };
+
+    await client.placeOrder({
+      ...action.order,
+      quantity: qty,
+      newClientOrderId: `${tradeId}-fullclose-r${attempt}`,
+    });
+    extraOrders++;
+  }
+  // 迴圈一定會從裡面 return（最後一圈 attempt > MAX 時就回傳了），這行只是
+  // 讓型別檢查滿意。
+  return { flat: false, remaining: 0, extraOrders };
 }
 
 export async function executeTradeAction(
@@ -123,14 +189,64 @@ export async function executeTradeAction(
       return { executed: true, note: `TP2 條件單已送出 algoId=${res.orderId}` };
     }
 
+    // ── 整單平倉 ─────────────────────────────────────────────────────────
+    //
+    // 2026-09-09 之前這裡只有一行 `placeOrder`，**沒有任何人確認部位真的歸零**。
+    // UNIUSDT trade-1788833416973-drr88 因此留下 41 張殘留部位：部位 75 張，
+    // 送出的 quantity 是 75（不是我們算錯——時間止損的 `time_stop_stall` 只在
+    // `!tp1Happened` 時可達，而 `didTp1PartialFill(entryQty=75, positionQty)`
+    // 若拿到 34 會落在 25%~99% 區間、判成 TP1 已發生，那條分支根本不會執行；
+    // 所以送出當下 `positionQty` 必然 ≥ 74.25），幣安卻只成交 34 張。
+    //
+    // 兩層修正：
+    //   1. 先撤保護性條件單再平倉——它們是 quantity+reduceOnly，會佔用帳戶的
+    //      可平額度（見 TradeAction.cancelAlgoIds 的證據）。
+    //   2. 平完自己回頭查部位，沒歸零就補送，補不掉就大聲回報。
+    //      第 2 層跟第 1 層的因果假設無關：不管交易所為什麼少平，「送了平倉單
+    //      之後部位還在」都是必須被發現的事實。
+    //
+    // 殘留部位的下游代價（都實際發生過）：殘渣被 didTp1PartialFill 判成 TP1
+    // 部分停利（假的 tp1_hit + 假推播）、止損單數量跟著錯而被幣安一路
+    // `Reduce only reject`（那 41 張裸奔 20 小時）、最後把出場記成完整 −1R。
     case 'close_full_position': {
+      // 撤單失敗不擋平倉：條件單可能早就不存在（已觸發/已取消），而且就算
+      // 真的撤不掉，平倉本身還是要送出去試——下面的驗證會抓到結果。
+      for (const algoId of action.cancelAlgoIds) {
+        try {
+          await client.cancelOrder(action.order.symbol, algoId, true);
+        } catch {
+          /* 撤不掉就算了，平倉優先 */
+        }
+      }
+
       await client.placeOrder(action.order);
       // 不在這裡寫最終結果——MARKET 單的 ACK 回應不保證帶精確成交價，下一輪
       // decideTradeAction 會偵測到 positionQty=0，走 sync_closed_position
       // 那條用真實 getUserTrades 資料的路徑，比這裡猜測更可靠。但「為什麼
       // 關」這個事實現在就確定了，先記下來，等對帳那一刻直接採用。
+      //
+      // 沒平乾淨也照寫：關單原因是我們自己剛做的決定，跟平乾淨與否無關。
       await persist.markForceCloseReason(tradeId, action.closeReason);
-      return { executed: true, note: '整單平倉已送出（下一輪會對帳確認最終結果）' };
+
+      const verification = await closeUntilFlat(client, tradeId, action);
+      if (verification.flat) {
+        return {
+          executed: true,
+          note: '整單平倉已送出，部位已確認歸零'
+            + (verification.extraOrders > 0
+              ? `（第一張單沒平乾淨，補送 ${verification.extraOrders} 張才平完）`
+              : '')
+            + '（下一輪會對帳確認最終結果）',
+          closeVerification: verification,
+        };
+      }
+      return {
+        executed: true,
+        note: `⚠⚠ 整單平倉沒平乾淨——已補送 ${verification.extraOrders} 張，`
+          + `交易所端還留著 ${verification.remaining} 的部位。`
+          + `那個殘留部位的止損數量會跟著錯，需要人工確認。`,
+        closeVerification: verification,
+      };
     }
 
     // 2026-09-06：方向不符且完全沒有保護單的部位，市價平掉。

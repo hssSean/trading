@@ -297,7 +297,30 @@ export type TradeAction =
   // 會把它先寫回 trades.close_reason，下一輪 sync_closed_position 對帳到
   // 真正關倉時直接採用，不用重新推斷。跟下面 sync_closed_position 註解
   // 說的「不猜」原則一致：這裡不是猜，是記錄我們自己剛做的決定。
-  | { kind: 'close_full_position'; order: PlaceOrderParams; closeReason: TimeStopCloseReason }
+  | {
+      kind: 'close_full_position';
+      order: PlaceOrderParams;
+      closeReason: TimeStopCloseReason;
+      /**
+       * 送出平倉單**之前**要先撤掉的保護性條件單（止損／TP1／TP2 的 algoId）。
+       *
+       * 2026-09-09：UNIUSDT trade-1788833416973-drr88——部位 75 張，時間止損
+       * 送出的 reduceOnly MARKET 平倉單 quantity 就是 75（`positionQty` 沒
+       * 算錯，推導見 tradeExecutor.ts 該分支），幣安卻只成交 34 張、`origQty`
+       * 也記成 34，剩下 41 張沒有任何東西知道。送出當下掛著兩張 2026-09-06
+       * 改成 `quantity + reduceOnly` 型式的條件單（TP1 37 張 + 止損 75 張），
+       * 而 reduceOnly 單會佔用帳戶的「可平額度」——同一個部位後來每一張止損
+       * 觸發時都被幣安以 `rejectReason: "Reduce only reject"` 打回，證明這個
+       * 額度制存在而且會咬人。
+       *
+       * `closePosition=true` 的舊式條件單不佔額度，所以 09-06 之前這條路徑
+       * 從沒出過事：08-25~09-08 共 9 張整單平倉單，數量對不上的只有 UNI 這
+       * 一張，而它也是唯一一張「送出時還有 quantity+reduceOnly 條件單掛著」的。
+       */
+      cancelAlgoIds: number[];
+      /** 殘留部位補平時的數量取整基準（同 `snapshot.filters.stepSize`）。 */
+      stepSize: number;
+    }
   | { kind: 'update_trailing_stop'; place: PlaceOrderParams; cancelOrderId?: number }
   | { kind: 'entry_never_filled'; reason: string }
   /**
@@ -415,7 +438,20 @@ function holdOrTimeStop(
         tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong, positionQty: snapshot.positionQty,
       });
       if (!closeDecision.skip) {
-        return { kind: 'close_full_position', order: closeDecision.order, closeReason: timeStop.closeReason };
+        return {
+          kind: 'close_full_position',
+          order: closeDecision.order,
+          closeReason: timeStop.closeReason,
+          // 這筆單自己掛出去的保護性條件單。它們是 reduceOnly，會佔用可平
+          // 額度，平倉單送出前要先撤掉（見 TradeAction.cancelAlgoIds）。
+          // 反正這筆單正要結束，這些條件單留著也只會變成孤兒。
+          cancelAlgoIds: [
+            snapshot.currentStop?.algoId,
+            trade.exchangeTp1AlgoId,
+            trade.exchangeTp2AlgoId,
+          ].filter((id, i, all): id is number => typeof id === 'number' && all.indexOf(id) === i),
+          stepSize: snapshot.filters.stepSize,
+        };
       }
     }
   }

@@ -897,6 +897,49 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
     if (a.kind !== 'close_full_position') return;
     expect(a.closeReason).toBe('time_stop_expiry_post_tp1');
   });
+
+  // 2026-09-09：UNIUSDT trade-1788833416973-drr88 — 部位 75，送出的平倉單
+  // quantity 就是 75，幣安只平了 34。當時 TP1(37) 與止損(75) 兩張
+  // quantity+reduceOnly 條件單都還掛著，把「可平額度」佔走了。平倉前要先把
+  // 它們撤掉。
+  it('平倉單要帶上「先撤哪些條件單」——止損/TP1/TP2 的 algoId 都要', () => {
+    const a = decideTradeAction(
+      tradeRow({
+        exchangeEntryOrderId: 111, filledAt: 0, entryQty: 0.01,
+        exchangeTp1AlgoId: 333, exchangeTp2AlgoId: 444,
+      }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+        markPrice: 65100,
+        now: 8.5 * 3600_000,
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('close_full_position');
+    if (a.kind !== 'close_full_position') return;
+    expect(a.cancelAlgoIds.sort()).toEqual([222, 333, 444]);
+    expect(a.stepSize).toBe(snapshot({}).filters.stepSize);
+  });
+
+  it('沒掛過的條件單不放進撤單清單（TP2=null），重複的 algoId 也只出現一次', () => {
+    const a = decideTradeAction(
+      tradeRow({
+        exchangeEntryOrderId: 111, filledAt: 0, entryQty: 0.01,
+        exchangeTp1AlgoId: 222, exchangeTp2AlgoId: null, // 跟 currentStop 同號
+      }),
+      snapshot({
+        positionQty: 0.01,
+        currentStop: { algoId: 222, triggerPrice: 64000 },
+        markPrice: 65100,
+        now: 8.5 * 3600_000,
+      }),
+      risk(),
+    );
+    expect(a.kind).toBe('close_full_position');
+    if (a.kind !== 'close_full_position') return;
+    expect(a.cancelAlgoIds).toEqual([222]);
+  });
 });
 
 describe('deriveLiveCloseReason', () => {
