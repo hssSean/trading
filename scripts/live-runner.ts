@@ -68,6 +68,9 @@ import {
   BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
 } from '../src/engine/tradeBridge';
 import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
+import {
+  evaluateNakedPosition, NakedPositionState,
+} from '../src/engine/nakedPositionWatchdog';
 import { TimeStopCloseReason } from '../src/engine/timeStop';
 import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
 import { calcSimpleAtr, TP1_PARTIAL_FRACTION, updateMfeMae } from '../src/lib/monitorMath';
@@ -153,6 +156,10 @@ interface DbTradeRow {
 }
 
 const VALID_TIMEFRAMES = new Set(['5m', '15m', '1h', '4h', '1d']);
+
+// 裸倉看門狗的狀態（每筆 trade 一份），存在記憶體、重啟歸零——理由見
+// src/engine/nakedPositionWatchdog.ts。
+const nakedState = new Map<string, NakedPositionState>();
 
 function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
   return {
@@ -882,6 +889,32 @@ async function runCycle(
       const snapshot = await buildSnapshot(binance, row, filters);
       const trade = toBridgeTradeRow(row);
       const persist = makePersistence(supabase, row);
+
+      // 裸倉看門狗（2026-09-09）。決策層本來就會在沒止損時補掛，但「補掛失敗」
+      // 這件事以前完全沒有出口：UNIUSDT trade-1788833416973-drr88 的止損單被
+      // 幣安以 "Reduce only reject" 連續拒絕 15 小時，每 15 秒重掛一次，log 上
+      // 看起來跟正常補掛一模一樣，使用者手機也沒有任何提示，價格早就穿過止損
+      // 價 0.27% 卻沒出場。這段不參與決策，只負責讓「一直補不上」發得出聲音。
+      {
+        const verdict = evaluateNakedPosition({
+          positionQty: snapshot.positionQty,
+          hasStop: snapshot.currentStop !== null,
+          now: snapshot.now,
+          state: nakedState.get(row.id) ?? { nakedSince: null, lastAlertAt: null },
+        });
+        nakedState.set(row.id, verdict.state);
+        if (verdict.alert) {
+          const mins = Math.round(verdict.nakedForMs / 60_000);
+          const sym = row.symbol.replace('USDT', '/USDT');
+          console.error(`[${nowStr()}] 🔴 ${row.symbol}（${row.id}）有 ${snapshot.positionQty} 張部位，`
+            + `但交易所上找不到止損單，已經 ${mins} 分鐘——補掛一直沒成功，需要人工確認。`);
+          await sendWebPushToUser(userId, {
+            title: `🔴 ${sym} 沒有止損`,
+            body: `${snapshot.positionQty} 張部位已裸奔 ${mins} 分鐘，系統補掛止損一直失敗，請人工確認`,
+            tag: `naked-${row.id}`,
+          });
+        }
+      }
 
       // 自我修復：真的有部位（交易所端確認）但 DB 的 status 還停在
       // 'waiting'，同步一次。不是只靠 place_initial_stop 那一次性時機——
