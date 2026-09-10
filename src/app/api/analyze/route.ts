@@ -16,6 +16,7 @@ import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib
 import { shadowChanged, snapshot } from '@/lib/shadowWrite';
 import { unavailableSymbols, SYMBOL_UNAVAILABLE_REASON, SYMBOL_UNAVAILABLE_COOLDOWN_MS } from '@/lib/symbolAvailability';
 import { decideLiveRunnerHandoff } from '@/lib/liveRunnerHandoff';
+import { ScanTiming } from '@/lib/scanTiming';
 import {
   activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS,
   symbolsOnSignalCooldown, symbolsInSameCandle, SIGNAL_COOLDOWN_MS,
@@ -2234,14 +2235,36 @@ export async function GET(req: NextRequest) {
 
   // ── Scan run-lock: serialize the whole scan+insert so a double-fired cron
   // (retry / misconfigured schedule) can't run two concurrent scans that each
-  // insert the same symbol — the root cause of duplicate open trades. NX+70s
-  // (> maxDuration 60s) auto-expires even if the function is killed; the normal
-  // 5-min cadence is unaffected. Skipped when Redis isn't wired (single-runner).
+  // insert the same symbol — the root cause of duplicate open trades.
+  // NX + TTL（> maxDuration 60s）保證函式被砍掉時鎖也會自己過期。
+  // Skipped when Redis isn't wired (single-runner).
+  //
+  // ⚠ 這個 TTL 不只是「防重入」，它是**實際的掃描節流器**——這件事在
+  // 2026-08-31 查 CPU 超標時才發現，原本的註解（「the normal 5-min cadence
+  // is unaffected」）是錯的：外部 cron 是每 60 秒打一次，不是 5 分鐘。
+  //
+  //   TTL 70：t=0 取得鎖→掃描，t=60 鎖還在→skip，t=120 過期→掃描
+  //           ⇒ 實際節奏 120 秒
+  //   TTL 240：t=0 掃描，t=60/120/180 skip，t=240 過期→掃描
+  //           ⇒ 實際節奏 240 秒，CPU ×0.5
+  //
+  // 2026-09-10 改 70 → 240。理由是算術：Fluid Active CPU 8/31 實測 108%
+  // （唯一超標項目），而 1h 訊號每根 K 線被重掃 30 次（120 秒節奏）本來就是
+  // 白工——signalCache 會在 K 線沒變時直接回傳，但**抓 K 線與 JSON 解析
+  // 每一輪都照做**，那才是被浪費掉的 CPU。
+  //
+  // 代價有兩個，都評估過可接受：
+  //   1. DB 模擬的持倉監控從 120 秒變 240 秒一輪。安全，因為監控是用 1h K 線
+  //      的 high/low 判斷觸發（見本檔 `Uses 1h candlestick high/low so events
+  //      between cron runs are never missed`），不是用當下報價，所以兩次掃描
+  //      之間發生的事件不會漏。真倉那側走 live-runner 的 15 秒迴圈，不受影響。
+  //   2. 掃描中途 crash 時，鎖會多卡 240 秒而不是 70 秒。對 1h 訊號無所謂。
+  const SCAN_LOCK_TTL_SEC = 240;
   {
     const rScan = getRedis();
     if (rScan) {
       try {
-        const got = await rScan.set('scan-run-lock', Date.now(), { nx: true, ex: 70 });
+        const got = await rScan.set('scan-run-lock', Date.now(), { nx: true, ex: SCAN_LOCK_TTL_SEC });
         if (!got) {
           return NextResponse.json({ ok: true, skipped: 'scan already running (lock held)' });
         }
@@ -2385,6 +2408,11 @@ export async function GET(req: NextRequest) {
   }
 
   const timeframes = tfParam.split(',').map(s => s.trim()) as Timeframe[];
+  // 2026-09-10：量「CPU 被誰吃掉」。Fluid Active CPU 8/31 實測 108%，是唯一
+  // 超標項目，但各階段的佔比一直是推論的。砍 5m/15m 之前先把真實佔比印出來
+  // ——這個專案的規矩是先量再改。見 src/lib/scanTiming.ts 檔頭。
+  const timing     = new ScanTiming();
+  const scanBegan  = timing.begin();
   // Entry timeframe: multi-TF analysis confirms direction; only this TF produces the entry/TP/SL.
   // Override via ENTRY_TIMEFRAME env var; default 1h (the faster TF in a 4h+1h setup).
   const entryTf    = (process.env.ENTRY_TIMEFRAME ?? '1h').trim() as Timeframe;
@@ -2516,9 +2544,14 @@ export async function GET(req: NextRequest) {
       let symbolAtrPct = 50; // default: mid-volatility
       let fourHC: Candle[] | undefined;
       let cacheHit: RegimeCacheEntry | undefined;
+      const tRegime = timing.begin();
       try {
         // 540 bars = 90 days of 4H candles — enough for ADX regime + 90-day ATR percentile
-        if (!candleCache.has('4h')) candleCache.set('4h', await fetchCandlesCached(symbol, '4h', 540));
+        if (!candleCache.has('4h')) {
+          const tFetch4h = timing.begin();
+          candleCache.set('4h', await fetchCandlesCached(symbol, '4h', 540));
+          timing.mark('fetch:4h(540)', tFetch4h);
+        }
         fourHC = candleCache.get('4h')!;
         const cached = getRegimeCache(symbol);
         if (is4hBarUnchanged(cached, fourHC)) cacheHit = cached;
@@ -2558,6 +2591,9 @@ export async function GET(req: NextRequest) {
           }
         }
       } catch { /* keep default 50 */ }
+      // 一段量到底：4h 抓取 + ADX + ATR 百分位是同一組「每 4h 才會變」的計算，
+      // 分開量沒有意義（regimeCache 命中時三段一起被跳過）。
+      timing.mark('regimeAtr', tRegime);
 
       // Memoize once both values are known from a fresh computation. Skipped
       // entirely on a cache hit (nothing changed, no point rewriting the same
@@ -2583,9 +2619,15 @@ export async function GET(req: NextRequest) {
       } else if (symbolRegime === 'ranging' && regimeDetermined && !stratBPaused) {
         // Strategy B: mean reversion on entry TF only (BB + RSI crossover)
         try {
-          if (!candleCache.has(entryTf)) candleCache.set(entryTf, await fetchCandles(symbol, entryTf, 200));
+          if (!candleCache.has(entryTf)) {
+            const tFetchB = timing.begin();
+            candleCache.set(entryTf, await fetchCandles(symbol, entryTf, 200));
+            timing.mark(`fetch:${entryTf}`, tFetchB);
+          }
           const candles = candleCache.get(entryTf)!;
+          const tGenB   = timing.begin();
           const sigs    = generateMeanReversionSignals(symbol, entryTf, candles);
+          timing.mark('signalsB', tGenB);
           allSignals.push(...sigs);
           sigs.forEach(s => { if (s.score > topScore) topScore = s.score; });
         } catch { /* skip */ }
@@ -2593,7 +2635,11 @@ export async function GET(req: NextRequest) {
         // Strategy A: multi-TF loop (trending, or paused-B, or regime-fetch-failed → safe fallback)
         for (const tf of timeframes) {
           try {
-            if (!candleCache.has(tf)) candleCache.set(tf, await fetchCandles(symbol, tf, 200));
+            if (!candleCache.has(tf)) {
+              const tFetch = timing.begin();
+              candleCache.set(tf, await fetchCandles(symbol, tf, 200));
+              timing.mark(`fetch:${tf}`, tFetch);
+            }
             const candles = candleCache.get(tf)!;
 
             // HTF bias: fetch higher TF once (cached), compute EMA200 direction
@@ -2601,7 +2647,11 @@ export async function GET(req: NextRequest) {
             const htfTf = HTF_MAP[tf as Timeframe];
             if (htfTf) {
               try {
-                if (!candleCache.has(htfTf)) candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 250));
+                if (!candleCache.has(htfTf)) {
+                  const tHtf = timing.begin();
+                  candleCache.set(htfTf, await fetchCandles(symbol, htfTf, 250));
+                  timing.mark(`fetchHtf:${htfTf}`, tHtf);
+                }
                 const htfC   = candleCache.get(htfTf)!;
                 const htfPx  = htfC[htfC.length - 1].close;
                 // Only EMA200 is needed for HTF bias — skip the full indicator set
@@ -2633,13 +2683,19 @@ export async function GET(req: NextRequest) {
             let dbgLong = 0, dbgShort = 0;
             let dbgRejected: RejectedCandidate | undefined;
             if (isSignalCacheHit(cachedSig, candles, htfBias, symbolRegime)) {
+              // 命中也記一筆（耗時≈0，看的是 n）：命中率決定了 generateSignals
+              // 的真實呼叫量，而那正是「砍 5m/15m 能省多少」的分母。
+              const tHit = timing.begin();
               sigs = freshenCachedSignals(cachedSig!.signals);
+              timing.mark(`sigCacheHit:${tf}`, tHit);
               dbgLong = cachedSig!.dbgLong;
               dbgShort = cachedSig!.dbgShort;
               dbgRejected = cachedSig!.rejected;
             } else {
               const dbg: { long?: number; short?: number; rejected?: RejectedCandidate } = {};
+              const tGen = timing.begin();
               sigs = generateSignals(symbol, tf, candles, htfBias, symbolRegime, dbg);
+              timing.mark(`signals:${tf}`, tGen);
               dbgLong = dbg.long ?? 0;
               dbgShort = dbg.short ?? 0;
               dbgRejected = dbg.rejected;
@@ -2664,7 +2720,9 @@ export async function GET(req: NextRequest) {
       }
 
       // ── Phase 4: Fetch funding rate (cached 10min) ───────────
+      const tFunding = timing.begin();
       const symbolFundingRate = await fetchFundingRate(symbol).catch(() => 0);
+      timing.mark('fundingRate', tFunding);
 
       // Direction unification: highest TF's direction is master, drop conflicting signals
       const unified    = unifySignalDirection(allSignals);
@@ -3374,11 +3432,15 @@ export async function GET(req: NextRequest) {
   }
 
   // Monitor active trades for TP/SL hits (server-side, App can be closed)
+  const tMonitor = timing.begin();
   const monitor = await monitorActiveTrades(profileId, muteCancelPush)
     .catch(() => ({ monitored: 0, closed: 0, filled: 0, cancelled: 0 }));
+  timing.mark('monitorActiveTrades', tMonitor);
 
   // Shadow simulation: merge new rejects, advance live ones against real candles
+  const tShadow = timing.begin();
   await processShadowTrades(shadowCandidates);
+  timing.mark('processShadowTrades', tShadow);
 
   // v2.1 §0: flush reject-funnel entries (single batched lpush per scan)
   if (funnelEntries.length > 0) {
@@ -3430,6 +3492,12 @@ export async function GET(req: NextRequest) {
       } catch { /* non-fatal — panel just shows stale data */ }
     }
   }
+
+  // 2026-09-10：CPU 歸因。掛在 log 而不是回應本體——回應會被前端與 status
+  // 腳本消費，多塞欄位要同步改型別；這個數字只有在看 Vercel log 時才需要。
+  // `wall` 是牆鐘時間（含網路等待），`total` 只加總被量到的區段，兩者的差
+  // 就是「沒被量到的部分」（監控階段、影子模擬、Supabase 寫入）。
+  console.log(`[analyze][cpu] wall ${Date.now() - scanBegan}ms | ${timing.format()}`);
 
   return NextResponse.json({
     ok: true, analyzedAt: new Date().toISOString(),
