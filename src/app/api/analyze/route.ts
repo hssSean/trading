@@ -21,7 +21,7 @@ import {
   activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS,
   symbolsOnSignalCooldown, symbolsInSameCandle, SIGNAL_COOLDOWN_MS,
 } from '@/lib/tradeCooldown';
-import { evaluateDrawdownHalt, type DrawdownTradeRow } from '@/lib/drawdownHalt';
+import { evaluateDrawdownHalt, DEFAULT_MAX_DRAWDOWN_R, type DrawdownTradeRow } from '@/lib/drawdownHalt';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -1830,25 +1830,13 @@ async function cacheBreaker(r: import('@upstash/redis').Redis | null, profileId:
 // checkCircuitBreaker 只看當日、每天 UTC 0 點重置，擋不住「每天小輸、累積大輸」。
 // 這裡看整條已平倉權益曲線的高點回撤（詳細動機見 monitorMath.ts 的 calcDrawdown）。
 //
-// 門檻原為 8R：當時實測歷史 55 筆已平倉單最大回撤 2.01R，8R 約是 4 倍，判斷
-// 正常運作碰不到。可用 MAX_DRAWDOWN_R 環境變數調整；設為 0 或負數等於停用。
-//
 // 用「帳戶R」而非原始R：B 級輕倉只承擔一半風險，回撤要按實際帳戶衝擊算，
 // 跟熔斷、CSV 匯出的「帳戶R」欄位同一套口徑。
 //
-// **2026-08-19：8R → 12R，暫時性放寬，之後要收回去。**
-// 實際觸發時是 8.01R（高點 26.44R → 18.43R），只超標 0.01R，但近三天 1500 個
-// 候選 100% 被擋、系統完全停擺。關鍵在於**這 8R 回撤是用有 bug 的系統跑出來的**
-// （同日查出並修掉：未收盤K棒讓五組計分裡兩組共20分變成垃圾；真倉的 TP1 前保本
-// 與 TP1 後移動止損因為 place-before-cancel 撞幣安 closePosition 限制，從上線
-// 到當天為止一次都沒生效過）。也就是說，這條權益曲線反映的是「保護機制沒運作
-// 的策略」，拿它算出來的回撤去判定「策略失效」並不公平。
-//
-// 12R 的取法：目前觀察到的 8.01R × 1.5，留出累積修復後乾淨資料的空間，同時
-// 仍然是一道真的會擋的上限（不是形同虛設）。**這是暫時值，不是重新校準的
-// 結果**——等 2026-09 上旬累積 2-3 週修復後的資料，重跑一次歷史最大回撤，
-// 再決定該回到 8R 還是有依據地訂一個新值。
-const DEFAULT_MAX_DRAWDOWN_R = 12;
+// 門檻值與它的完整沿革（8R → 12R → 18R，以及每次改動的實測依據）在
+// `src/lib/drawdownHalt.ts` 的 DEFAULT_MAX_DRAWDOWN_R。2026-09-10 之前這裡
+// 另外有一份同名常數，兩邊各自維護——已合併成單一來源。
+// 可用 MAX_DRAWDOWN_R 環境變數覆寫；設為 0 或負數等於停用。
 
 // 2026-08-19：確認（acknowledge）之後，權益曲線只從確認那一刻之後的已平倉
 // 交易重新算起。這是解開下面那個死結的鑰匙——見 checkDrawdownHalt 註解。

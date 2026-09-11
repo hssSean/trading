@@ -34,6 +34,8 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
+// 報表印出的「目前設定」要跟關卡實際用的是同一個值，不要在這裡另寫預設值。
+import { readMaxDrawdownR } from '../src/lib/drawdownHalt';
 
 const reportPath = process.argv[2] ?? 'audit-fabricated-exits-2026-08-30.json';
 const N = Number(process.argv[3] ?? 50);      // 一段觀察期大約幾筆交易
@@ -104,9 +106,9 @@ function main() {
   const p95 = percentile(nullDd, 0.95);
   const p99 = percentile(nullDd, 0.99);
 
-  console.log(`\n目前設定 MAX_DRAWDOWN_R = 12（暫定值，原本是 8）`);
+  console.log(`\n目前設定 MAX_DRAWDOWN_R = ${readMaxDrawdownR()}（2026-09-10 依本腳本的 p95 從 12 校準而來）`);
   const pctAbove = (t: number) => nullDd.filter(d => d >= t).length / nullDd.length * 100;
-  for (const t of [8, 10, 12]) {
+  for (const t of [8, 10, 12, 18]) {
     console.log(`  門檻 ${String(t).padStart(2)}R → 純雜訊觸發率 ${pctAbove(t).toFixed(1)}%（每 ${N} 筆一段）`);
   }
 

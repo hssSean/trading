@@ -205,7 +205,10 @@ async function main() {
   // 額度吃緊時不該為了診斷去燒）。用線上同一個 calcDrawdown 與同一套口徑
   // （R 倍數 × tier 權重），算出來的數字才跟關卡實際看到的一致。
   const { calcDrawdown } = await import('../src/lib/monitorMath');
-  const limit = parseFloat(process.env.MAX_DRAWDOWN_R ?? '12');
+  // 門檻從 drawdownHalt.ts 讀，不要在這裡另寫一個預設值——診斷工具報的數字
+  // 必須跟關卡實際用的是同一個，否則會出現「status 說沒事、系統卻停著」。
+  const { readMaxDrawdownR } = await import('../src/lib/drawdownHalt');
+  const limit = readMaxDrawdownR();
   let q = db.from('trades').select('closed_at, pnl_percent, entry, stop_loss, tier')
     .eq('user_id', uid).not('closed_at', 'is', null).not('result', 'is', null);
   if (ack != null && Number(ack) > 0) q = q.gt('closed_at', Number(ack));
