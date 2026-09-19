@@ -2499,6 +2499,8 @@ export async function GET(req: NextRequest) {
     // 2026-08-18（docs/TODO.md P2 #7）：進場時框那個「只差分數」的候選＋價位，
     // 給 score_gate 影子模擬用。沒有被分數擋就維持 undefined。
     let scoreGateRejected: RejectedCandidate | undefined;
+    // catch 區塊也要記到這段耗時，所以宣告在 try 外面——見下面 tDecision 賦值處註解。
+    let tDecision = 0;
 
     try {
       // (Removed: a fetchTicker24h(symbol) whose result was discarded. Present
@@ -2711,6 +2713,12 @@ export async function GET(req: NextRequest) {
       const tFunding = timing.begin();
       const symbolFundingRate = await fetchFundingRate(symbol).catch(() => 0);
       timing.mark('fundingRate', tFunding);
+      // 2026-09-19：B7/B1 量測發現 wall time 有近半沒被任何 stage 記到——
+      // 這段（confluence 判斷 → same_dir_cap → DB insert → lock/pending-signal
+      // → Web Push notify）從沒被計時過，是原本 CPU 定位清單裡「候選」但
+      // 沒真的量到的部分。兩個記點包住 try/catch 兩條路徑，正常結束與拋錯
+      // 都要記到，否則異常路徑會讓這段時間憑空消失。
+      tDecision = timing.begin();
 
       // Direction unification: highest TF's direction is master, drop conflicting signals
       const unified    = unifySignalDirection(allSignals);
@@ -3091,12 +3099,19 @@ export async function GET(req: NextRequest) {
             : {}),
         });
       }
+      timing.mark('decisionWriteNotify', tDecision);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       results.push({ symbol, signalCount: 0, topScore, topSignal: null, locked: false, error: msg });
+      // tDecision 只有在 fundingRate 之後才會被賦值——更早（regime/signal
+      // 產生階段）就拋錯的話它還是哨兵值 0，這時 mark 會把 Date.now()-0
+      // 這個天文數字灌進統計，把所有百分比洗掉，所以只在真的量到時才記。
+      if (tDecision > 0) timing.mark('decisionWriteNotify', tDecision);
     }
 
+    const tDelay = timing.begin();
     await delay(300);
+    timing.mark('rateLimitDelay', tDelay);
   }
 
   // ── Pass 2: resolve deferred candidates in score order (docs/TODO.md P2 #5) ──
