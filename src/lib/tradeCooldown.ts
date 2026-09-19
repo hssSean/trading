@@ -148,3 +148,49 @@ export function activeCooldowns(rows: ClosedTradeForCooldown[], now: number): Se
   }
   return out;
 }
+
+// ── 策略B 連兩敗暫停 ───────────────────────────────────────────────────
+//
+// 2026-09-19：route.ts 的 `checkStratBPaused` 原本把查詢結果的前兩列直接
+// 當成「這個 symbol 最近兩筆已結束的交易」，而那個查詢的條件只有
+// `.not('result','is',null)` 加 `.order('closed_at', desc).limit(2)`。
+// 兩個東西會混進來、把真正的連兩敗擠掉，兩者都讓關卡 fail-open：
+//
+//   1. **未平倉的 tp1_hit 單**——它的 `result` 已經是 'WIN_TP1'，`closed_at`
+//      還是 NULL。Postgres 的 `ORDER BY ... DESC` 預設 NULLS FIRST，所以這種
+//      單會排在最前面。
+//   2. **CANCELLED**（掛單到期撤銷）——也有 result。實測 434 筆裡 236 筆是
+//      CANCELLED，佔比高到幾乎必然擠掉真的交易。
+//
+// 跟 `activeCooldowns` 同一個模式：查詢留在呼叫端，判定放這裡，時間邊界與
+// 排除規則才測得動。呼叫端仍應在 SQL 就過濾掉（省傳輸），但判定不依賴它有
+// 沒有過濾——這裡自己再過一次、自己重排。
+
+/** 不是一筆「交易結果」的 result 值。取消的掛單從來沒有部位，不算勝負。 */
+const NON_TRADE_RESULTS = new Set(['CANCELLED']);
+
+export interface StratBTradeRow {
+  result?: string | null;
+  closed_at?: number | null;
+}
+
+/** 連兩敗的判定窗口：最近那筆虧損必須落在這個時間內，過了就解除。 */
+export const STRAT_B_PAUSE_MS = 24 * 3600 * 1000;
+
+/**
+ * 這個 symbol 的策略B 現在該不該暫停：最近兩筆**已結束的真實交易**都是
+ * LOSS，且較新那筆在 24 小時內。
+ *
+ * 查不到、不足兩筆、或最近那筆已經過期 → false（跟原本一樣 fail-open：
+ * 這道關卡是節流不是安全底線，誤擋的代價高於漏擋）。
+ */
+export function isStratBPaused(rows: StratBTradeRow[], now: number): boolean {
+  const closed = rows
+    .filter(r => r.closed_at != null && r.result != null && !NON_TRADE_RESULTS.has(r.result))
+    .sort((a, b) => (b.closed_at as number) - (a.closed_at as number));
+
+  if (closed.length < 2) return false;
+  const [recent, prev] = closed;
+  if (recent.result !== 'LOSS' || prev.result !== 'LOSS') return false;
+  return now - (recent.closed_at as number) <= STRAT_B_PAUSE_MS;
+}

@@ -20,8 +20,10 @@ import { ScanTiming } from '@/lib/scanTiming';
 import {
   activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS,
   symbolsOnSignalCooldown, symbolsInSameCandle, SIGNAL_COOLDOWN_MS,
+  isStratBPaused, STRAT_B_PAUSE_MS, type StratBTradeRow,
 } from '@/lib/tradeCooldown';
 import { evaluateDrawdownHalt, DEFAULT_MAX_DRAWDOWN_R, type DrawdownTradeRow } from '@/lib/drawdownHalt';
+import { tp1MarkPayload, resultOnTp1FinalClose } from '@/lib/tp1Mark';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -1063,9 +1065,8 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
       // The next monitoring cycle fetches status='tp1_hit' AND result='WIN_TP1' AND closed_at IS NULL.
       // Phase 5: merge trailing stop initialization into this update to avoid a separate round-trip.
       const tp1UpdatePayload: Record<string, unknown> = {
-        status:            'tp1_hit',
+        ...tp1MarkPayload(),   // status + result，定義處在 src/lib/tp1Mark.ts
         last_monitored_at: now,
-        result:            'WIN_TP1',
         exit_price:        tp1Price,
         pnl_percent:       parseFloat(tp1Pnl.toFixed(2)),
         // closed_at intentionally omitted — null signals "still watching for TP2"
@@ -1083,7 +1084,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         if (tp1Res.error.code === '42703') {
           // Columns (exit_price, pnl_percent) may not exist yet — retry with base fields only
           const fb = await admin.from('trades')
-            .update({ status: 'tp1_hit', result: 'WIN_TP1' })
+            .update(tp1MarkPayload())
             .eq('id', trade.id).or('status.eq.active,status.is.null').select('id');
           if (fb.error) {
             console.error(`[monitor] tp1_hit write failed ${trade.id}: [${fb.error.code}] ${fb.error.message}`);
@@ -1197,8 +1198,12 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     const isFinalClosingTp1 = isTp1Hit; // tp1_hit trade reaching its final outcome
     const closeUpdate = isFinalClosingTp1
       ? {
-          // Only change result if upgrading to TP2; otherwise leave WIN_TP1 as-is
-          ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}),
+          // TP2 → 升級；否則維持既有 result。2026-09-19 之前這裡是
+          // `closeResult === 'WIN_TP2' ? {...} : {}`，也就是「不是 TP2 就完全
+          // 不碰 result」——而 live-runner 的 markTp1Hit 當時只寫 status 不寫
+          // result，交接過來的單就以 result=NULL 收場（虧損冷卻漏擋）。
+          // 標記端已經修好，這裡再補一道：result 是空的就回填 WIN_TP1。
+          ...resultOnTp1FinalClose(trade.result as string | null | undefined, closeResult as string),
           exit_price:   closePrice,
           closed_at:    now,
           pnl_percent:  parseFloat(pnl.toFixed(2)),
@@ -1229,7 +1234,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         //   2. exit_price/pnl_percent also missing (older schema) — minimal write.
         // 待修改事項.md pattern: log loudly so a silently-degraded write surfaces immediately.
         const midUpdate = isFinalClosingTp1
-          ? { ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}), exit_price: closePrice, closed_at: now, pnl_percent: parseFloat(pnl.toFixed(2)) }
+          ? { ...resultOnTp1FinalClose(trade.result as string | null | undefined, closeResult as string), exit_price: closePrice, closed_at: now, pnl_percent: parseFloat(pnl.toFixed(2)) }
           : { result: closeResult, exit_price: closePrice, closed_at: now, pnl_percent: parseFloat(pnl.toFixed(2)) };
         const midFilter = isFinalClosingTp1
           ? admin.from('trades').update(midUpdate).eq('id', trade.id).eq('status', 'tp1_hit').is('closed_at', null)
@@ -1242,7 +1247,7 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
         } else if (mid.error.code === '42703') {
           // exit_price / pnl_percent also missing — write minimal fields
           const fbUpdate = isFinalClosingTp1
-            ? { ...(closeResult === 'WIN_TP2' ? { result: 'WIN_TP2' } : {}), closed_at: now }
+            ? { ...resultOnTp1FinalClose(trade.result as string | null | undefined, closeResult as string), closed_at: now }
             : { result: closeResult, closed_at: now };
           const fbFilter = isFinalClosingTp1
             ? admin.from('trades').update(fbUpdate).eq('id', trade.id).eq('status', 'tp1_hit').is('closed_at', null)
@@ -1542,24 +1547,36 @@ async function checkStratBPaused(symbol: string): Promise<boolean> {
   try {
     const { createClient: mkChk } = await import('@supabase/supabase-js');
     const adm = mkChk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+    // 2026-09-19：這個查詢原本只有 `.not('result','is',null)` + limit(2)，
+    // 會被兩種「有 result 但不是已結束交易」的列擠掉真正的連兩敗，兩者都讓
+    // 關卡 fail-open（詳見 src/lib/tradeCooldown.ts 的 isStratBPaused 檔頭）：
+    //   - 未平倉的 tp1_hit（result='WIN_TP1'、closed_at=NULL，DESC 排序
+    //     預設 NULLS FIRST，會排到最前面）
+    //   - CANCELLED（掛單到期撤銷，實測佔全表一半以上）
+    // SQL 這側先過濾掉省傳輸，limit 放寬到 10 留餘裕；真正的判定在純函數裡，
+    // 它自己會再過一次、自己重排，不依賴呼叫端有沒有過濾對。
     const { data } = await adm.from('trades')
       .select('result, closed_at')
       .eq('symbol', symbol)
       .eq('strategy', 'B')          // 42703 → catch block → return false
       .not('result', 'is', null)
+      .not('closed_at', 'is', null)
+      .neq('result', 'CANCELLED')
       .order('closed_at', { ascending: false })
-      .limit(2);
+      .limit(10);
 
-    if (!data || data.length < 2) return false;
-    const [recent, prev] = data as { result: string; closed_at: number }[];
-    if (recent.result !== 'LOSS' || prev.result !== 'LOSS') return false;
+    if (!data) return false;
+    const rows = data as StratBTradeRow[];
+    if (!isStratBPaused(rows, Date.now())) return false;
 
-    const elapsed = Date.now() - recent.closed_at;
-    if (elapsed > 24 * 3_600_000) return false;
+    const recent = rows
+      .filter(r => r.closed_at != null)
+      .sort((a, b) => (b.closed_at as number) - (a.closed_at as number))[0];
+    const elapsed = Date.now() - (recent.closed_at as number);
 
     // Cache remaining pause duration in Redis so next cron reads fast
     if (r) {
-      const remainingSec = Math.ceil((24 * 3_600_000 - elapsed) / 1000);
+      const remainingSec = Math.ceil((STRAT_B_PAUSE_MS - elapsed) / 1000);
       try { await r.set(`stratB_pause:${symbol}`, true, { ex: remainingSec }); } catch { /* best-effort */ }
     }
     return true;

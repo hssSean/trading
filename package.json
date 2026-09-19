@@ -14,7 +14,8 @@
     "status": "npx tsx scripts/status.ts",
     "funnel-verdict": "npx tsx scripts/funnel-verdict.ts",
     "live-runner": "npx tsx scripts/live-runner.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "audit-invariants": "npx tsx scripts/audit-invariants.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",

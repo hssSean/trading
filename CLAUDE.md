@@ -55,6 +55,7 @@ curl -s "http://localhost:3000/api/analyze"   # 本機無 WEBHOOK_SECRET 時可�
 
 ```bash
 npm run status          # 系統活著嗎：最後訊號時間、持倉、保護單、回撤、心跳
+npm run audit-invariants   # trades 表自己跟自己矛盾的地方（純 Supabase，快）
 npm run audit-exits     # 拿幣安真實成交對帳 DB 的損益紀錄
 npm run audit-close-fills  # 止損止盈觸發後「真的平乾淨了嗎」（平過頭／沒平乾淨）
 npm run funnel-verdict  # 各風控濾網到底在保護還是在害（含悲觀覆蓋率把關）
@@ -68,6 +69,15 @@ npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料
 **`npm run status` 是排查任何「為什麼沒訊號／為什麼沒平倉」的第一步**——它會
 直接算出回撤、列出每筆真倉的止損止盈單，並分辨「TP1 已觸發」與「TP1 單根本
 沒掛上」。後者是 2026-08-23 那次「打到 TP1 卻沒出 50%」的形狀。
+
+**`npm run audit-invariants` 問的是另一個方向的問題**：上面幾支都在對帳
+「DB 跟外部事實（幣安）對不對得上」，只有這支在問「DB 自己內部一致嗎」。
+這個專案咬人的 bug 有一大類是後者——`route.ts`（DB 模擬）與 `live-runner`
+（真倉）兩個寫入者對同一張表的欄位語意認知不一致，寫出來的列單看都合理，
+合起來才矛盾。2026-09-19 第一次跑就抓到「`status='tp1_hit'` 卻 `result=NULL`」，
+下游代價是虧損冷卻整個漏擋（`activeCooldowns` 判 `result==='LOSS'`）。
+它不打交易所所以很快，有 🔴 時離開碼 1。詳見
+`docs/AUDIT-2026-09-19-策略與程式碼全面體檢.md`。
 
 **`npm run audit-close-fills` 補的是 status 看不到的那一面**：status 只看「現在」
 有沒有保護單，這支看「每一張觸發過的條件單有沒有真的把部位平乾淨」。2026-09-06

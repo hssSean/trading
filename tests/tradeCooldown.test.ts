@@ -174,3 +174,72 @@ describe('activeCooldowns — 邊界與組合', () => {
     expect(s.has(cooldownKey('ETHUSDT', 'LONG'))).toBe(false);
   });
 });
+
+// ── 策略B 連兩敗暫停 ───────────────────────────────────────────────────
+//
+// 2026-09-19 稽核抓到的第二個洞。route.ts 的 checkStratBPaused 原本直接把
+// 查詢結果的前兩列當「最近兩筆已結束的交易」，但那個查詢只有
+// `.not('result','is',null)`：
+//
+//   1. 未平倉的 tp1_hit 單 result 已經是 'WIN_TP1'、closed_at 還是 NULL。
+//      PostgREST 的 DESC 排序預設 NULLS FIRST，這種單會排到最前面，
+//      把真正最近的兩筆虧損擠掉。
+//   2. CANCELLED（掛單過期撤銷）也有 result，同樣會佔位。這個專案 434 筆
+//      裡有 236 筆是 CANCELLED。
+//
+// 兩者都是 fail-open：該暫停的沒暫停，而且完全沒有錯誤訊息。
+
+import { isStratBPaused } from '../src/lib/tradeCooldown';
+
+describe('isStratBPaused', () => {
+  const now = Date.UTC(2026, 8, 19, 12, 0, 0);
+  const h = 3600_000;
+
+  it('最近兩筆都是 24h 內的 LOSS → 暫停', () => {
+    expect(isStratBPaused([
+      { result: 'LOSS', closed_at: now - 1 * h },
+      { result: 'LOSS', closed_at: now - 5 * h },
+    ], now)).toBe(true);
+  });
+
+  it('只有一筆 LOSS → 不暫停', () => {
+    expect(isStratBPaused([
+      { result: 'LOSS', closed_at: now - 1 * h },
+      { result: 'WIN_TP1', closed_at: now - 5 * h },
+    ], now)).toBe(false);
+  });
+
+  it('最近那筆已經超過 24h → 解除', () => {
+    expect(isStratBPaused([
+      { result: 'LOSS', closed_at: now - 25 * h },
+      { result: 'LOSS', closed_at: now - 30 * h },
+    ], now)).toBe(false);
+  });
+
+  it('CANCELLED 不算一筆交易，不該把真正的連兩敗擠掉', () => {
+    expect(isStratBPaused([
+      { result: 'CANCELLED', closed_at: now - 0.5 * h },
+      { result: 'LOSS', closed_at: now - 1 * h },
+      { result: 'LOSS', closed_at: now - 5 * h },
+    ], now)).toBe(true);
+  });
+
+  it('未平倉的 tp1_hit（result=WIN_TP1、closed_at=NULL）不該佔位', () => {
+    expect(isStratBPaused([
+      { result: 'WIN_TP1', closed_at: null },
+      { result: 'LOSS', closed_at: now - 1 * h },
+      { result: 'LOSS', closed_at: now - 5 * h },
+    ], now)).toBe(true);
+  });
+
+  it('不足兩筆已結束的交易 → 不暫停', () => {
+    expect(isStratBPaused([{ result: 'LOSS', closed_at: now - 1 * h }], now)).toBe(false);
+  });
+
+  it('傳進來的順序不可靠時自己重排（照 closed_at 由新到舊）', () => {
+    expect(isStratBPaused([
+      { result: 'LOSS', closed_at: now - 5 * h },
+      { result: 'LOSS', closed_at: now - 1 * h },
+    ], now)).toBe(true);
+  });
+});

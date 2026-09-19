@@ -77,6 +77,7 @@ import { calcSimpleAtr, TP1_PARTIAL_FRACTION, updateMfeMae } from '../src/lib/mo
 import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
 import { readDailyLossCapFromEnv, sumTradingIncome, utcDayStart } from '../src/lib/dailyLossCap';
 import { evaluateDrawdownHalt, readMaxDrawdownR } from '../src/lib/drawdownHalt';
+import { tp1MarkPayload, tp1RollbackPayload } from '../src/lib/tp1Mark';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
 
@@ -218,14 +219,20 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
       }
     },
     async markTp1Hit(tradeId) {
-      const { error } = await supabase.from('trades').update({ status: 'tp1_hit' }).eq('id', tradeId);
+      // status 與 result 一起寫。2026-09-19 之前這裡只寫 status，而 route.ts
+      // 關一筆 tp1_hit 的單時刻意不覆寫 result（它假設標記端已經寫過），
+      // 於是「live-runner 標記、route.ts 關單」的那些單 result 永遠是 NULL
+      // ——虧損冷卻（activeCooldowns 判 result==='LOSS'）整個漏擋。
+      // 欄位組合的唯一定義處在 src/lib/tp1Mark.ts。
+      const { error } = await supabase.from('trades').update(tp1MarkPayload()).eq('id', tradeId);
       logErr('markTp1Hit', error);
     },
     async markActive(tradeId) {
-      // 只回滾 status。result/exit_price 不動——真倉的 TP1 標記本來就只寫
-      // status（見 markTp1Hit），沒有別的欄位被那個誤判污染。
+      // 回滾要連 result 一起清——markTp1Hit 現在會寫 result，只退 status 會
+      // 留下一筆「還在跑、卻已經記成 WIN_TP1」的活單。exit_price/pnl_percent
+      // 真倉路徑本來就不在標記時寫，沒有被這個誤判污染。
       const { error } = await supabase.from('trades')
-        .update({ status: 'active' }).eq('id', tradeId).eq('status', 'tp1_hit');
+        .update(tp1RollbackPayload()).eq('id', tradeId).eq('status', 'tp1_hit');
       logErr('markActive', error);
     },
     async finalizeClosed(tradeId, result) {
