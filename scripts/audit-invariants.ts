@@ -26,7 +26,9 @@
  *
  * 🔴 = 不變量被破壞，一定有程式或資料要修。
  * 🟡 = 可疑但有合法解釋，要人看一眼（例：止損距離極小的單在名目上限修好
- *      之前是真風險，之後只是「倉位被夾過」）。
+ *      之前是真風險，之後只是「倉位被夾過」＋推播會標示成本）。
+ *      **黃燈長期停在那裡是正常的**，它們代表「已知、已處理、但值得定期看一眼」，
+ *      不是待辦事項。會變成待辦的是紅燈。
  * 每項都印出 trade id，可以直接餵給 SQL 或 apply-audit-marks.ts。
  *
  * **只讀。** 不寫 DB、不碰倉位、不打交易所。
@@ -206,7 +208,7 @@ function checkTinyStopDistance(trades: TradeRow[]) {
     }
   }
   report('yellow', 'TINY_STOP', '止損距離 < 0.2%',
-    '名目上限會把倉位夾小（riskUSDT 低於設定值），且手續費占 R 的比例極高——是算術不是統計',
+    '名目上限已夾住倉位、推播也會標示成本（feeCost.ts，門檻 0.3R），所以這裡只是「值得看一眼」而不是待修',
     bad);
 }
 
@@ -296,8 +298,8 @@ function checkDuplicateOrderIds(trades: TradeRow[]) {
 function checkDirtyMarks(trades: TradeRow[]) {
   const dirty = trades.filter(t =>
     t.audit_verdict != null && t.audit_verdict !== 'OK' && t.audit_verdict !== '');
-  report('yellow', 'DIRTY_MARKED', '已標記為對帳異常的單仍在統計範圍內',
-    '任何直接統計 trades 的地方（戰績卡、回撤、影子基準）若沒排除 audit_verdict≠OK 的列，數字就是髒的',
+  report('yellow', 'DIRTY_MARKED', '已標記為對帳異常的單（回撤／熔斷已排除，顯示層刻意保留）',
+    '2026-09-20 起 evaluateDrawdownHalt 與熔斷都會過濾這些列（cleanPeriod.isAuditClean）。戰績卡仍含它們——那是刻意的決定，不是漏掉',
     dirty.length > 0 ? [`共 ${dirty.length} 筆被標記：`
       + Array.from(new Set(dirty.map(t => t.audit_verdict))).join(' / ')] : []);
 }

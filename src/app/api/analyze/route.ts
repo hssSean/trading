@@ -24,6 +24,9 @@ import {
 } from '@/lib/tradeCooldown';
 import { evaluateDrawdownHalt, DEFAULT_MAX_DRAWDOWN_R, type DrawdownTradeRow } from '@/lib/drawdownHalt';
 import { tp1MarkPayload, resultOnTp1FinalClose } from '@/lib/tp1Mark';
+import { dailyWeightedR, consecutiveLossStreak, type BreakerTradeRow } from '@/lib/circuitBreaker';
+import { formatFeeWarning } from '@/lib/feeCost';
+import { simulateShadow, readPessimisticShadow, type ShadowTrade } from '@/lib/shadowSim';
 import { shouldEnterAtMarket, shiftSignalToMarketEntry } from '@/lib/marketEntryException';
 
 export const maxDuration = 60;
@@ -1794,8 +1797,11 @@ async function checkCircuitBreaker(profileId: string, acctRiskPct: number): Prom
     const todayUTC = new Date();
     todayUTC.setUTCHours(0, 0, 0, 0);
 
+    // audit_verdict：對帳判定異常的列帶著捏造的 pnl_percent，不能進熔斷判準
+    // （見 src/lib/cleanPeriod.ts）。過濾在純函數裡做，不在 SQL——欄位萬一
+    // 沒 migration，這裡只會少一個欄位而不是整個查詢炸掉。
     const { data } = await adm.from('trades')
-      .select('result, pnl_percent, entry, stop_loss, tier, closed_at')
+      .select('result, pnl_percent, entry, stop_loss, tier, closed_at, audit_verdict')
       .eq('user_id', profileId).not('result', 'is', null)
       .gte('closed_at', todayUTC.getTime())
       .order('closed_at', { ascending: false });
@@ -1807,14 +1813,10 @@ async function checkCircuitBreaker(profileId: string, acctRiskPct: number): Prom
     // 單筆熔斷整天，喪失「連續虧損才熔斷」的本意；R 空間下門檻恆定，出單
     // 節奏不會因為使用者選了更高風險% 而被打斷。只有下面顯示用的真實帳戶%
     // 才乘 acctRiskPct，不影響觸發邏輯）。
-    const rows = data as { result: string; pnl_percent?: number | null; entry?: number | null; stop_loss?: number | null; tier?: string | null }[];
-    const dailyR = rows.reduce((s, t) => {
-      if (t.pnl_percent == null || !t.entry || !t.stop_loss) return s;
-      const stopPct = Math.abs(t.entry - t.stop_loss) / t.entry * 100;
-      if (stopPct <= 0) return s;
-      const rMultiple = t.pnl_percent / stopPct;          // e.g. -12% / 12% = -1R
-      return s + rMultiple * (t.tier === 'B' ? 0.5 : 1.0); // tier-weighted R
-    }, 0);
+    // 2026-09-20：兩個判準搬到 src/lib/circuitBreaker.ts 的純函數，順便修掉
+    // 兩個 fail-open——CANCELLED 會打斷連敗計數、對帳異常的列會污染 dailyR。
+    const rows = data as BreakerTradeRow[];
+    const dailyR = dailyWeightedR(rows);
     if (dailyR <= -3) {
       const realAcctPct = dailyR * acctRiskPct;
       const reason = `熔斷：當日帳戶虧損 ${realAcctPct.toFixed(2)}%（風險加權 ${dailyR.toFixed(2)}R ≤ -3R）`;
@@ -1823,11 +1825,7 @@ async function checkCircuitBreaker(profileId: string, acctRiskPct: number): Prom
     }
 
     // Check 2: 3 consecutive losses in today's trades
-    let streak = 0;
-    for (const t of rows) {
-      if (t.result === 'LOSS') streak++;
-      else break;
-    }
+    const streak = consecutiveLossStreak(rows);
     if (streak >= 3) {
       const reason = `熔斷：連續 ${streak} 筆止損`;
       await cacheBreaker(r, profileId, reason, todayUTC);
@@ -1918,7 +1916,7 @@ async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; 
     const { createClient: mk } = await import('@supabase/supabase-js');
     const adm = mk(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
     let q = adm.from('trades')
-      .select('closed_at, pnl_percent, entry, stop_loss, tier')
+      .select('closed_at, pnl_percent, entry, stop_loss, tier, audit_verdict')
       .eq('user_id', profileId).not('closed_at', 'is', null).not('result', 'is', null);
     if (ackAt > 0) q = q.gt('closed_at', ackAt);
     const { data } = await q.order('closed_at', { ascending: true });
@@ -1953,36 +1951,6 @@ async function checkDrawdownHalt(profileId: string): Promise<{ halted: boolean; 
 // it kills are net-positive. Every gate-rejected candidate that had concrete
 // entry/SL/TP levels becomes a "shadow trade" simulated against real candles;
 // /api/reject-funnel reports per-gate would-have-won/lost + net R.
-interface ShadowTrade {
-  id: string;
-  at: number;               // rejection time
-  symbol: string;
-  direction: string;
-  timeframe: string;
-  entry: number;
-  stopLoss: number;
-  tp1: number;
-  tp2: number;
-  score: number;
-  tier: string | null;
-  strategy: string;
-  rejectedAt: string;       // gate id from the funnel
-  signalPrice: number;
-  status: 'waiting' | 'active' | 'done';
-  filledAt?: number;
-  tp1Hit?: boolean;
-  result?: string;          // WIN_TP1 | WIN_TP2 | LOSS | EXPIRED | TIMEOUT
-  exitPrice?: number;
-  closedAt?: number;
-  lastCheckedAt: number;
-  // 2026-08-22 悲觀軌跡（同根K線同時觸及 TP/SL 時判賠）。全部 optional——
-  // 這個欄位加上去之前累積的 shadow_trades 沒有這些值，漏斗端必須能分辨
-  // 「這筆沒有悲觀資料」與「悲觀結果是 0」，不然舊資料會被當成 0R 拉低平均。
-  pessTp1Hit?: boolean;
-  pessDone?: boolean;
-  pessResult?: string;
-  pessExitPrice?: number;
-}
 
 // Gates where a full signal existed — worth simulating.
 // locked/same_candle/cooldown duplicate live trades and would double-count.
@@ -2004,87 +1972,15 @@ const LIVE_RUNNER_STALE_MS = 240_000;
 
 const SHADOW_MAX = 300; // hash size guard
 
-// 悲觀軌跡（同根 K 線同時觸及 TP/SL 時判賠）預設關閉——它讓每筆影子單多跑
-// 一次 walkTpSl，而 Vercel CPU 是目前唯一超標的額度。見 simulateShadow 內的
-// 說明。要打開就設 SHADOW_PESSIMISTIC=1。
-const PESSIMISTIC_SHADOW = process.env.SHADOW_PESSIMISTIC === '1';
+// 影子模擬的參數。悲觀軌跡 2026-09-20 反轉成預設開啟——關著的時候這段程式
+// 仍會寫出 pessResult，而那些值是複製樂觀結果來的，讓 funnel-verdict 的
+// 「兩端同號」把關永遠成立。詳見 src/lib/shadowSim.ts 檔頭。
+const SHADOW_SIM_CFG = {
+  waitingExpiryHours: WAITING_EXPIRY_HOURS,
+  intradayCloseHours: INTRADAY_CLOSE_HOURS,
+  pessimistic: readPessimisticShadow(),
+};
 
-function simulateShadow(st: ShadowTrade, candles: Candle[], now: number): void {
-  const isLong = st.direction === 'LONG';
-  const waitMs   = WAITING_EXPIRY_HOURS * 3600 * 1000;
-  const activeMs = INTRADAY_CLOSE_HOURS * 3600 * 1000;
-
-  if (st.status === 'waiting') {
-    for (const c of candles) {
-      if (c.closeTime <= st.at || c.openTime > st.at + waitMs) continue;
-      const touched = isLong ? c.low <= st.entry : c.high >= st.entry;
-      if (touched) { st.status = 'active'; st.filledAt = Math.max(c.openTime, st.at); break; }
-    }
-    if (st.status === 'waiting') {
-      if (now - st.at > waitMs) { st.status = 'done'; st.result = 'EXPIRED'; st.closedAt = now; }
-      return;
-    }
-  }
-  if (st.status !== 'active' || !st.filledAt) return;
-
-  const levels = { entry: st.entry, stopLoss: st.stopLoss, tp1: st.tp1, tp2: st.tp2, isLong };
-
-  // 2026-08-22：同一根K線同時觸及 TP 和 SL 時，K線看不出誰先到。這裡平行
-  // 跑一條悲觀假設（碰到 SL 就認賠）的軌跡，讓 /api/reject-funnel 把淨R
-  // 顯示成「悲觀 ~ 樂觀」區間。理由見 monitorMath.ts 的 TieBreak 說明：
-  // 真倉靠即時報價、看得到真實順序所以是準的，只有影子要猜，於是偏誤單向
-  // 偏向「這道關卡擋錯了、應該放寬」——而放寬與否正是靠這個數字決定的。
-  //
-  // 主軌跡仍用 optimistic：既有 shadow_trades 都是那個假設累積的，換掉會讓
-  // 新舊資料混在同一個統計裡而看不出來。悲觀軌跡另存欄位、可選，舊資料
-  // 沒有這些欄位時漏斗端會標示「樣本不足」而不是拿 0 當數字。
-  // 2026-08-26：改成預設關閉的開關。這條軌跡等於每筆影子單多跑一次
-  // walkTpSl（96-168 根 K 線），而 Vercel 的 Fluid Active CPU 額度剛好爆掉
-  // （4h5m/4h，每輪掃描的預算只有約 1.7 CPU 秒）。加它的時候只考慮了正確性，
-  // 沒算 CPU——CLAUDE.md 明寫「CPU 要省」，這是我漏掉的。
-  //
-  // 不刪除是因為它修的偏誤是真的（見上面說明），只是現在付不起：Upstash
-  // 額度也用盡了，影子資料這一週根本沒在累積，開著一點價值都沒有。
-  // 等 CPU 有餘裕（例如 cron 拉長之後）再設 SHADOW_PESSIMISTIC=1 打開。
-  if (PESSIMISTIC_SHADOW && !st.pessDone) {
-    const pess = walkTpSl(candles, st.filledAt, levels, !!st.pessTp1Hit, 'pessimistic');
-    st.pessTp1Hit = pess.tp1Hit;
-    if (pess.done) {
-      st.pessDone = true;
-      st.pessResult = pess.result;
-      st.pessExitPrice = pess.exitPrice;
-    }
-  }
-
-  const outcome = walkTpSl(candles, st.filledAt, levels, !!st.tp1Hit);
-  st.tp1Hit = outcome.tp1Hit;
-  if (outcome.done) {
-    st.status = 'done';
-    st.result = outcome.result;
-    st.exitPrice = outcome.exitPrice;
-    st.closedAt = outcome.closedAt;
-    // 樂觀軌跡先結束、悲觀還開著（例如一路沒碰過 SL 就直接 TP2）——那代表
-    // 兩邊其實同結果，收斂過去，不要留一個永遠不結案的空欄位。
-    if (!st.pessDone) {
-      st.pessDone = true;
-      st.pessResult = outcome.result;
-      st.pessExitPrice = outcome.exitPrice;
-    }
-    return;
-  }
-  if (now - st.filledAt > activeMs) {
-    const lastC  = candles[candles.length - 1];
-    st.status    = 'done';
-    st.result    = st.tp1Hit ? 'WIN_TP1' : 'TIMEOUT';
-    st.exitPrice = st.tp1Hit ? st.tp1 : lastC?.close;
-    st.closedAt  = now;
-    if (!st.pessDone) {
-      st.pessDone = true;
-      st.pessResult = st.pessTp1Hit ? 'WIN_TP1' : 'TIMEOUT';
-      st.pessExitPrice = st.pessTp1Hit ? st.tp1 : lastC?.close;
-    }
-  }
-}
 
 async function processShadowTrades(newCandidates: ShadowTrade[]): Promise<void> {
   const r = getRedis();
@@ -2137,7 +2033,7 @@ async function processShadowTrades(newCandidates: ShadowTrade[]): Promise<void> 
         for (const st of group) {
           // simulateShadow 是就地修改，所以要先快照才比得出前後差異。
           const before = snapshot(st);
-          simulateShadow(st, candles, now);
+          simulateShadow(st, candles, now, SHADOW_SIM_CFG);
           st.lastCheckedAt = now;
           if (shadowChanged(before, st)) writes[st.id] = JSON.stringify(st);
         }
@@ -3355,9 +3251,14 @@ export async function GET(req: NextRequest) {
             const effRisk = acctRiskPct * tierRiskMultiplier(entrySignal.symbol, entrySignal.tier);
             const plan = calcPositionPlan(acctSize, effRisk, entrySignal.entry, entrySignal.stopLoss, entrySignal.tier === 'B' ? 5 : 10);
             const planLine = plan ? `\n${formatPlanLine(plan)}｜止損虧 ${plan.riskUSDT}U` : '';
+            // 手續費佔 R 的警示（2026-09-20）。只在止損近到離譜時才出現
+            // （門檻 0.3R ≈ 止損距離 0.233%），**不擋單、不改價**——止損距離
+            // 下限已於 2026-09-07 實測無效，這裡只是把算術結果講出來讓使用者
+            // 自己決定跟不跟。詳見 src/lib/feeCost.ts。
+            const feeLine = formatFeeWarning(entrySignal.entry, entrySignal.stopLoss, isLimitOrder);
             await sendWebPushToUser(profileId, {
               title: `${edir} ${esym} 交易信號${eTier}${eKind}`,
-              body: `${isLimitOrder ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分${planLine}`,
+              body: `${isLimitOrder ? '⏳掛單' : '🔴市場入場'} 進場 $${fmtPrice(entrySignal.entry)} ｜ TP1 $${fmtPrice(entrySignal.takeProfits[0])} ｜ SL $${fmtPrice(entrySignal.stopLoss)} ｜ ${entrySignal.score}分${planLine}${feeLine}`,
               tag: `signal-${entrySignal.id}`,
             });
           }

@@ -49,3 +49,42 @@ export function isInRiskControlGap(t: DatedTrade): boolean {
     && t.closedAt >= RISK_CONTROL_GAP_START
     && t.closedAt < RISK_CONTROL_GAP_END;
 }
+
+// ── 對帳判定：哪些列可以進風控算式 ─────────────────────────────────────
+//
+// 2026-09-19 的 `npm run audit-exits` 把 28 筆標成 `audit_verdict ≠ OK`，
+// 其中 **8 筆是硬證據的捏造出場**：DB 記 −0.05%（保本出場的簽名），幣安上
+// 那個部位實際是 +1.6%～+4.2%。成因是 DB 模擬用**收盤價 K 線**判定出場，
+// 幣安用**標記價**觸發——下影線碰到但標記價沒到，就會造出一筆從沒發生過的
+// 出場（見 route.ts 的 `excludeExchangeManaged` 檔頭）。
+//
+// 這些假虧損進過回撤計算。2026-08-27 那次把權益回撤推到 13R > 當時的 12R
+// 門檻，**整個系統被自己捏造的虧損停機**。跟 2026-08-19 那次（8.01R vs 8R，
+// 程式碼註解自己寫「這 8R 回撤是用有 bug 的系統跑出來的」）是同一個病。
+//
+// 2026-09-20 使用者決定：**回撤與熔斷先排除，顯示層（戰績卡）不動。**
+// 理由是這兩道會「自己把系統停掉」，誤停的代價具體且已經發生過；戰績卡只是
+// 顯示，改了反而會讓使用者看到的數字突然跳動、跟過去的印象對不起來。
+//
+// 缺欄位／沒對帳過一律視為乾淨：`audit_verdict` 只有跑過 audit-exits 的單
+// 才有值，把「沒查過」當成「有問題」會讓絕大多數單被排除，那是更糟的失效
+// 方向（風控直接失去資料 → n=0 → 不擋）。
+
+/** 對帳判定為「這筆可以用」的值。null／undefined／空字串＝沒對帳過，同樣算乾淨。 */
+const AUDIT_CLEAN_VERDICTS = new Set(['OK']);
+
+export interface AuditMarked {
+  /** `audit-exits` 寫入的對帳判定。沒跑過對帳的單是 null。 */
+  audit_verdict?: string | null;
+}
+
+/**
+ * 這一列的損益數字可不可以拿去餵風控算式（回撤、熔斷）。
+ *
+ * **不要拿來過濾顯示用的統計**——那是另一個決定，見上面的檔頭說明。
+ */
+export function isAuditClean(t: AuditMarked): boolean {
+  const v = t.audit_verdict;
+  if (v == null || v === '') return true;
+  return AUDIT_CLEAN_VERDICTS.has(v);
+}

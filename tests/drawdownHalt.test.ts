@@ -106,3 +106,41 @@ describe('readMaxDrawdownR', () => {
     expect(readMaxDrawdownR({ MAX_DRAWDOWN_R: 'abc' })).toBe(DEFAULT_MAX_DRAWDOWN_R);
   });
 });
+
+// 回撤曲線必須排除對帳判定異常的列。這些單的 pnl_percent 是捏造的，
+// 拿它算權益曲線就是拿假虧損去判定「策略失效」——2026-08-27 實際發生過，
+// 系統被自己捏造的虧損停機（13R > 當時的 12R 門檻）。
+describe('evaluateDrawdownHalt 排除對帳異常的列', () => {
+  // 止損距離固定 1%，所以 pnl_percent 直接等於 R 倍數，方便看數字。
+  const t = (closed_at: number, pnl: number, verdict: string | null = null) => ({
+    closed_at, pnl_percent: pnl, entry: 100, stop_loss: 99, tier: 'A',
+    audit_verdict: verdict,
+  });
+
+  it('捏造出場的假虧損不該進權益曲線', () => {
+    // 乾淨的兩筆：+5R 然後 −1R，回撤只有 1R，不該停機（門檻 3R）。
+    // 中間那筆 −10R 是 SIGN_FLIP，若被算進去回撤會變 11R 而誤觸發。
+    const rows = [
+      t(1000, 5),
+      t(2000, -10, 'SIGN_FLIP'),
+      t(3000, -1),
+    ];
+    const r = evaluateDrawdownHalt(rows, 3);
+    expect(r.halted).toBe(false);
+    expect(r.n).toBe(2);
+    expect(r.drawdownR).toBeCloseTo(1, 6);
+  });
+
+  it('audit_verdict=OK 與沒有該欄位的列照常納入', () => {
+    const rows = [t(1000, 5, 'OK'), { closed_at: 2000, pnl_percent: -6, entry: 100, stop_loss: 99, tier: 'A' }];
+    const r = evaluateDrawdownHalt(rows, 3);
+    expect(r.n).toBe(2);
+    expect(r.halted).toBe(true);
+  });
+
+  it('全部都是髒資料時等同沒有資料 —— 不擋（n=0 的既有語意）', () => {
+    const r = evaluateDrawdownHalt([t(1000, -50, 'SIGN_FLIP')], 3);
+    expect(r.n).toBe(0);
+    expect(r.halted).toBe(false);
+  });
+});

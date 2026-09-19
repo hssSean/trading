@@ -35,6 +35,7 @@
 // 只會多一個在 Redis 掛掉時行為不同的分支。
 
 import { calcDrawdown, type EquityPoint } from './monitorMath';
+import { isAuditClean, type AuditMarked } from './cleanPeriod';
 
 /**
  * 預設門檻。`MAX_DRAWDOWN_R` 環境變數可覆寫，設 0 停用。
@@ -78,7 +79,7 @@ import { calcDrawdown, type EquityPoint } from './monitorMath';
  */
 export const DEFAULT_MAX_DRAWDOWN_R = 18;
 
-export interface DrawdownTradeRow {
+export interface DrawdownTradeRow extends AuditMarked {
   closed_at?: number | null;
   pnl_percent?: number | null;
   entry?: number | null;
@@ -105,11 +106,16 @@ export interface DrawdownHaltResult {
  *
  * 缺 `pnl_percent` / `entry` / `stop_loss` 的列跳過——算不出 R 的資料放進去
  * 只會污染曲線。止損距離為 0 同理（會產生 Infinity）。
+ *
+ * 2026-09-20：對帳判定異常的列也跳過（`isAuditClean`）。那些單的 `pnl_percent`
+ * 是 DB 模擬捏造的，拿它算權益曲線等於用假虧損去判定「策略失效」——
+ * 2026-08-27 實際發生過，系統被自己捏造的虧損停機。
  */
 export function toEquityPoints(rows: DrawdownTradeRow[]): EquityPoint[] {
   const out: EquityPoint[] = [];
   for (const t of rows) {
     if (t.closed_at == null || t.pnl_percent == null || !t.entry || !t.stop_loss) continue;
+    if (!isAuditClean(t)) continue;
     const stopPct = Math.abs(t.entry - t.stop_loss) / t.entry * 100;
     if (!(stopPct > 0)) continue;
     out.push({

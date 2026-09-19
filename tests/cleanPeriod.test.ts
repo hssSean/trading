@@ -68,3 +68,40 @@ describe('isInRiskControlGap', () => {
     expect(isInRiskControlGap(t)).toBe(true);
   });
 });
+
+// ── 對帳判定：哪些列可以進風控算式 ─────────────────────────────────────
+//
+// 2026-09-19 的對帳把 28 筆標成 audit_verdict≠OK，其中 8 筆是**硬證據的捏造
+// 出場**（DB 記 −0.05% 保本，幣安實際 +1.6%～+4.2%）。這些假虧損進過回撤
+// 計算，2026-08-27 那次把權益回撤推到 13R > 12R 門檻、**系統被自己捏造的
+// 虧損停機**。使用者 2026-09-20 決定：回撤與熔斷先排除，顯示層不動。
+
+import { isAuditClean } from '../src/lib/cleanPeriod';
+
+describe('isAuditClean', () => {
+  it('沒有對帳過的列（audit_verdict 是 null）視為乾淨', () => {
+    expect(isAuditClean({ audit_verdict: null })).toBe(true);
+  });
+
+  it('欄位根本不存在時視為乾淨 —— 缺欄位不等於有問題', () => {
+    expect(isAuditClean({})).toBe(true);
+  });
+
+  it('對帳判定 OK 的視為乾淨', () => {
+    expect(isAuditClean({ audit_verdict: 'OK' })).toBe(true);
+  });
+
+  it('空字串視為乾淨（等同沒標記）', () => {
+    expect(isAuditClean({ audit_verdict: '' })).toBe(true);
+  });
+
+  it('SIGN_FLIP（捏造出場的硬證據）不乾淨', () => {
+    expect(isAuditClean({ audit_verdict: 'SIGN_FLIP' })).toBe(false);
+  });
+
+  it('AMOUNT_MISMATCH / NO_CLOSE_FILL / NO_ENTRY_FILL 都不乾淨', () => {
+    expect(isAuditClean({ audit_verdict: 'AMOUNT_MISMATCH' })).toBe(false);
+    expect(isAuditClean({ audit_verdict: 'NO_CLOSE_FILL' })).toBe(false);
+    expect(isAuditClean({ audit_verdict: 'NO_ENTRY_FILL' })).toBe(false);
+  });
+});

@@ -61,6 +61,7 @@ npm run audit-close-fills  # 止損止盈觸發後「真的平乾淨了嗎」（
 npm run funnel-verdict  # 各風控濾網到底在保護還是在害（含悲觀覆蓋率把關）
 npx tsx scripts/drawdown-threshold.ts   # 用 bootstrap 訂回撤門檻
 npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料，預設試跑
+npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的悲觀值，預設試跑
 ```
 
 金鑰放 `.env.local`，或用 `ENV_FILE=env.txt` 指定別的檔案。載入器只印變數名
@@ -110,6 +111,9 @@ npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料
 
 - **調參紀律（規格書 §4）**：一次只動一個濾網，先看拒絕漏斗與影子模擬的淨 R 數據再決定放寬或收緊；淨 R ≤ 0 的關卡代表擋得對，不要動。
   - **看漏斗淨 R 之前先看悲觀覆蓋率**（`npm run funnel-verdict` 會自動把關）。`29b2499` 之前結案的影子單永遠沒有悲觀值，`netRPess` 是 0，而 0 會讓「兩端同號」的判斷失效——樂觀 +24 配悲觀 0 看起來像跨零，實際上只是沒算。2026-09-01 實測八道關卡只有 `circuit_breaker` 覆蓋率達標。
+    - **⚠ 2026-09-20 發現：那一整個月的悲觀值本身就是假的，不要相信 2026-09-20 之前的任何漏斗判語。** `SHADOW_PESSIMISTIC` 於 2026-08-26 因 CPU 改成預設關閉，但 `simulateShadow` 關閉時**仍然會寫 `pessResult`**——樂觀軌跡結案時直接複製過去。於是 `netRPess ≡ netR`，「兩端同號」永遠成立，把關等於不存在。報表上 `circuit_breaker` −7.08／−7.08、`btc_direction` −7.00／−7.00 兩端完全同值就是這個簽名：**同值不是「結論穩健」，是「根本沒算」**。
+    - 已修（`src/lib/shadowSim.ts`）：悲觀軌跡改預設開啟（成本是對已抓回的 K 線多跑一次純比較迴圈，微秒級；貴的是 `fetchCandles` 的 I/O，兩條軌跡本來就共用）；關閉時一個欄位都不寫，寧可覆蓋率 0 也不要假數字；`EXPIRED` 補上 pess 欄位（兩邊 R 都是 0，本來就該算進覆蓋率，`score_gate` 只有 49% 主因是這個）。Redis 既有的 75 筆假值已用 `scripts/reset-shadow-pess.ts --apply` 清掉。
+    - **覆蓋率要約兩週才會重建。在那之前任何濾網都不要動。**
   - **目前狀態：不要調參。** 真實成交 n=78 每筆 −0.081R、t=−0.55，跟三層模擬結論一致（測不出邊際）。檢定力 sd=1.31，偵測 +0.1R/筆 需 n≈680。詳見 `docs/ANALYSIS-2026-08-30-真實成交對帳.md`。
   - **止損距離下限也測過了，無效（2026-09-07）。** 策略 B 沒有下限、止損可以近到 0.103%，看起來很像該修——但 clamp／skip 兩種修法各四個門檻全部 `|t| < 1`，而且 3個月×8檔時最強的變體 t=2.59，6個月×15檔重跑後掉到 t=−0.02 且符號翻面。要動之前先讀 `docs/ANALYSIS-2026-09-07-止損距離下限.md`；那份也記了一個容易誤讀的陷阱：報表的 `n=1473` 是假的，真正受影響的只有 22–77 筆（其餘訊號對成對差異貢獻 0，同時放大 n 又縮小 sd，t 值反而不動）。
   - **S/R 阻力位測不出資訊量，TP1 那段夾持不用救（2026-09-07B）。** `buildSignalLevels` 的「TP1 被最近阻力夾住」對 1h/4h/1d 是**死碼**——swing 分支的 `tp1Max` 與 `MIN_RR_SWING` 同為 2.0R，`max(min(阻力,2R),2R) ≡ 2R`，而系統 98% 的單是 1h。看起來很該修，但置換檢定（n=85，洗牌 3000 次）三個指標 p = 0.74／0.20／0.14 全不顯著，觸及率真實值還**低於**隨機。詳見 `docs/ANALYSIS-2026-09-07B-阻力位資訊量.md`，重跑 `ENV_FILE=env.txt npx tsx scripts/sr-mechanism.ts`。**這關掉了第五個參數家族。**
@@ -118,6 +122,7 @@ npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料
   - **「手續費占 R」不是統計問題，是算術**（`費率% ÷ 止損距離%`）。要分清楚「這筆成本高」與「改了會比較好」——前者除法就能證明，後者得實測，而實測通常是測不出來。
 - **倉位的絕對金額要另外把關**：所有風控上限都是 R 或百分比，唯獨 `dailyLossCap` 與 `calcPositionPlan` 的名目上限是用「錢」衡量的。名目 = 風險金額 ÷ 止損距離，**止損距離趨近 0 時名目會爆炸，而每一道 R 上限都不會有反應**（那個部位「就是 1R 風險」）。`checkLiquidationSafety` 也攔不到——槓桿 10 倍時強平距離約 10%，極近的止損確實會先觸發，它會判定通過。
 - **平倉數量取整不能留灰塵**：2026-09-06 把保護單從 `closePosition=true` 改成 `quantity + reduceOnly`（UNI 翻倉的修法）之後，出場量才開始經過 `roundToStepSize`，而它原本的 `Math.floor(qty / stepSize)` 會被浮點誤差削掉一整格（`16.24 / 0.01 = 1623.9999999999998`；step 0.01 有 9.1%、step 0.001 有 12.9% 的合法數量會中）。少平一格 = 部位永遠不歸零，**下游全部跟著錯**：殘渣被判成 TP1（假的 `tp1_hit` + 假的 TP1 推播）、灰塵帶著止損繼續跑十幾小時、最後把保本出場記成完整 −1R。2026-09-08 已修（`precision.ts` 補 1e-9 容差、`didTp1PartialFill` 補 25% 下界），但**任何新的「算數量」路徑都要記得這件事**。
+- **風控查詢要排除「有 `result` 但不是交易結果」的列。** `CANCELLED`（掛單到期撤銷，實測佔 trades 表一半以上）與未平倉的 `tp1_hit`（`result='WIN_TP1'`、`closed_at=NULL`，而 Postgres `ORDER BY ... DESC` 預設 **NULLS FIRST**，會排到最前面）兩種都會擠掉真正的交易紀錄。2026-09-20 實測有三處中招且全部 fail-open：`checkStratBPaused` 的連兩敗、熔斷的連敗 streak、以及回撤／熔斷吃到 `audit_verdict≠OK` 的捏造損益。判定一律抽成純函數（`tradeCooldown.isStratBPaused`、`circuitBreaker.*`、`cleanPeriod.isAuditClean`），**函數自己再過濾一次、自己重排，不依賴呼叫端的 SQL 有沒有寫對**。
 - **「部位變小」不等於「TP1 發生」**：手動平倉（這個帳戶會用手機 App 直接下單）、ADL、部分強平、取整灰塵都會讓部位變小。判準統一走 `tradeBridge.didTp1PartialFill`，別在別處重寫 `positionQty < entryQty * 0.99`。
 - **損益一律用 R 倍數**（損益% ÷ 止損距離%）與帳戶實際損益衡量，不用原始價格 %——ATR 止損的原始 % 會嚴重誤導（熔斷曾因此誤鎖整天）。
 - **Supabase 缺欄位**：insert 對 `42703`/`PGRST204` 有兩段式 fallback；新增欄位時要同步更新 fallback 剝除清單並提醒使用者跑 `ALTER TABLE`。

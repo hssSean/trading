@@ -864,7 +864,9 @@ async function runCycle(
         .select('drawdown_ack_at').eq('id', userId).single();
       const ackAt = Number((prof as { drawdown_ack_at?: number | null } | null)?.drawdown_ack_at ?? 0) || 0;
 
-      let q = supabase.from('trades').select('closed_at, pnl_percent, entry, stop_loss, tier')
+      // audit_verdict：對帳異常的列 pnl_percent 是捏造的，evaluateDrawdownHalt
+      // 會自己把它們濾掉（src/lib/cleanPeriod.ts），但欄位要撈出來才濾得到。
+      let q = supabase.from('trades').select('closed_at, pnl_percent, entry, stop_loss, tier, audit_verdict')
         .eq('user_id', userId).not('closed_at', 'is', null).not('result', 'is', null);
       if (ackAt > 0) q = q.gt('closed_at', ackAt);
       const { data: closedRows } = await q;
