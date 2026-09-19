@@ -23,8 +23,16 @@ export interface ExitPolicyConfig {
   name: string;
   /** TP1 觸及時先實現的比例（0 = 不做部分停利，全部留到 TP2/移動止損） */
   tp1Fraction: number;
-  /** TP1 之前，浮盈達這個 R 就把止損移到進場價；null = 不做 */
+  /** TP1 之前，浮盈達這個 R 就啟動保護（地板見 mfeGiveback）；null = 不做 */
   breakevenAtR: number | null;
+  /**
+   * 保護地板怎麼設。null = 固定在進場價（既有行為，「保本」）。
+   * 設數字 = 地板改成 entry + 這個比例 × 當下 mfeR（隨最高浮盈推進，只進不退），
+   * 即「最多回吐峰值的 (1 - 這個比例)」。2026-09-19 加，見
+   * docs/ANALYSIS-2026-08-12 §4：18 筆時間止損出場合計回吐 10.09R，
+   * 固定保本只守住進場價、峰值與保本之間那段完全沒保護。
+   */
+  mfeGiveback: number | null;
   /** TP1 之後的移動止損距離（ATR 倍數）；null = 不移動，停在保本價 */
   trailAtrMult: number | null;
   /**
@@ -149,7 +157,9 @@ export function simulateExit(input: ExitInput, policy: ExitPolicyConfig): ExitOu
 
     // ④ 更新止損
     if (!tp1Hit && policy.breakevenAtR !== null && mfeR >= policy.breakevenAtR) {
-      stop = isLong ? Math.max(stop, entry) : Math.min(stop, entry);
+      const floorR = policy.mfeGiveback !== null ? policy.mfeGiveback * mfeR : 0;
+      const floor = atR(floorR);
+      stop = isLong ? Math.max(stop, floor) : Math.min(stop, floor);
     }
     if (tp1Hit && policy.trailAtrMult !== null) {
       const a = atr[Math.min(i, atr.length - 1)] ?? 0;

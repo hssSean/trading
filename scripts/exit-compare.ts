@@ -66,7 +66,7 @@ export const WAIT_BARS = 8;
 //   盤整停滯 = 滿 8 根且進度在 ±0.3R      engine/timeStop.ts
 //   到期平倉 = 24h（1h K 線 → 24 根）     route.ts INTRADAY_CLOSE_HOURS
 export const BASELINE: ExitPolicyConfig = {
-  name: '現況（線上）', tp1Fraction: 0.5, breakevenAtR: 0.5, trailAtrMult: 2,
+  name: '現況（線上）', tp1Fraction: 0.5, breakevenAtR: 0.5, mfeGiveback: null, trailAtrMult: 2,
   stallBars: 8, stallBandR: 0.3, maxBars: 24,
   tp1AtR: null, tp2AtR: null,
 };
@@ -97,6 +97,14 @@ const POLICIES: ExitPolicyConfig[] = [
   v('TP2 拉近到 +2.5R', { tp2AtR: 2.5 }),
   v('TP1 +1.5R ＋ TP2 +2.5R', { tp1AtR: 1.5, tp2AtR: 2.5 }),
   v('TP1 +1.0R ＋ TP2 +2.0R', { tp1AtR: 1.0, tp2AtR: 2.0 }),
+
+  // 2026-09-19：docs/修改清單 B6。ANALYSIS-2026-08-12 §4 用 MFE 做的靜態
+  // 反事實試算指出時間止損那 15 筆合計回吐 10.09R，但那個算法只把虧損單
+  // 改好、算不到「保護提早啟動會不會砍到現在會贏的單」——exitPolicy.ts
+  // 檔頭就是為了修這個問題而存在的模擬器，所以在這裡走真實 K 線驗證，
+  // 不能只信那個粗估的 ~5R。固定保本只守住進場價，峰值到保本之間那段
+  // 完全沒保護；mfeGiveback 讓地板跟著峰值推進，最多回吐一半浮盈。
+  v('保本改用半MFE動態地板', { mfeGiveback: 0.5 }),
 ];
 
 // ── 工具 ────────────────────────────────────────────────────────

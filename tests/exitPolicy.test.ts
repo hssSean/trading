@@ -7,7 +7,7 @@ const bar = (high: number, low: number, close: number): ExitBar => ({ high, low,
 const atrOf = (n: number, v = 2) => Array(n).fill(v);
 
 const NONE: ExitPolicyConfig = {
-  name: 'none', tp1Fraction: 0, breakevenAtR: null, trailAtrMult: null,
+  name: 'none', tp1Fraction: 0, breakevenAtR: null, mfeGiveback: null, trailAtrMult: null,
   stallBars: null, stallBandR: 0.3, maxBars: null,
   tp1AtR: null, tp2AtR: null,
 };
@@ -94,6 +94,37 @@ describe('保本觸發：好處與代價都要算到', () => {
     expect(withBe.r).toBe(0);        // 保本出場，錯過整段
     expect(without.r).toBe(2);       // 不設保本反而吃到 +2R
     expect(withBe.mfeR).toBeGreaterThan(0);
+  });
+});
+
+describe('mfeGiveback：保護地板隨峰值推進，不是固定卡在進場價', () => {
+  // tp1 固定在 +1R（105），所有峰值都刻意留在 105 之下，避免提早觸發 TP1
+  // 蓋掉 pre-TP1 的地板邏輯（tp1Hit 一旦為真，mfeGiveback 分支就不會再跑）。
+  it('峰值 +0.8R 後回落 → 地板收在半 MFE（+0.4R）而不是進場價', () => {
+    const bars = [
+      bar(104, 103, 103.5),  // mfeR=0.8，下一根才生效：地板 = entry+0.5*0.8R = 102(+0.4R)
+      bar(101, 98, 99),      // 回落，跌破地板 102
+    ];
+    const r = simulateExit({ ...L, bars, atr: atrOf(2) }, p({ breakevenAtR: 0.5, mfeGiveback: 0.5 }));
+    expect(r.r).toBeCloseTo(0.4, 4);
+    expect(r.reason).toBe('breakeven');
+  });
+
+  it('地板只進不退：兩次推進後，地板停在最後一次峰值換算的位置', () => {
+    const bars = [
+      bar(102.6, 102, 102.3), // mfeR=0.52，下一根地板 = entry+0.5*0.52R = 101.3
+      bar(104.9, 102, 104),   // mfeR=0.98（未破前一根地板 101.3），下一根地板 = 102.45
+      bar(103, 100, 101),     // 回落跌破 102.45
+    ];
+    const r = simulateExit({ ...L, bars, atr: atrOf(3) }, p({ breakevenAtR: 0.5, mfeGiveback: 0.5 }));
+    expect(r.r).toBeCloseTo(0.49, 4);
+  });
+
+  it('mfeGiveback=null 時地板固定在進場價（既有行為不變）', () => {
+    const bars = [bar(104, 100, 103), bar(101, 96, 97)];
+    const r = simulateExit({ ...L, bars, atr: atrOf(2) }, p({ breakevenAtR: 0.5, mfeGiveback: null }));
+    expect(r.r).toBe(0);
+    expect(r.reason).toBe('breakeven');
   });
 });
 
