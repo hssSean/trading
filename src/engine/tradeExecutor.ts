@@ -10,6 +10,7 @@ import { PlaceOrderParams } from './binanceClient';
 import { TradeAction } from './tradeBridge';
 import { TimeStopCloseReason } from './timeStop';
 import { roundToStepSize } from './precision';
+import { extractBinanceErrorCode } from './pendingOrderLifecycle';
 
 export interface TradeExecutorClient {
   placeOrder(params: PlaceOrderParams): Promise<{ orderId: number; clientOrderId: string; status: string }>;
@@ -112,6 +113,36 @@ export interface ExecutionResult {
 const MAX_RECLOSE_ATTEMPTS = 3;
 
 /**
+ * 送一張 reduceOnly 平倉單；被 -2022（ReduceOnly Order is rejected）拒絕時，
+ * 確認部位方向與數量**完全吻合**才改送非 reduceOnly 的同一張單。
+ *
+ * 2026-09-23 UNIUSDT：部位 41 在幣安 testnet 上「僅減倉」整個失靈——撤光所有
+ * 掛單後 reduceOnly 市價單仍被拒，手機 App 平倉也一樣（錯誤訊息自己建議
+ * 「取消僅減倉選項後再試」）。保護單 13 次觸發都被 `Reduce only reject` 打回，
+ * 最後是非 reduceOnly、數量等於部位才平掉。
+ *
+ * 單向持倉模式下，SELL 41 對 +41 多單就是剛好平掉；風險在於數量或方向對不上
+ * 時會開出反向倉位，所以只在「部位此刻的正負號與數量都跟這張單一致」時才做。
+ * 任何一項不符（包含部位已經是 0）都把原本的錯誤丟回去。
+ */
+async function placeCloseOrder(client: TradeExecutorClient, order: PlaceOrderParams) {
+  try {
+    return await client.placeOrder(order);
+  } catch (e) {
+    if (!order.reduceOnly || extractBinanceErrorCode(e) !== -2022 || order.quantity === undefined) throw e;
+    const signed = await client.getPositionQty(order.symbol);
+    const expectedSign = order.side === 'SELL' ? 1 : -1; // SELL 平多、BUY 平空
+    if (Math.sign(signed) !== expectedSign || Math.abs(Math.abs(signed) - order.quantity) > 1e-9) throw e;
+    const { reduceOnly: _ro, newClientOrderId, ...rest } = order;
+    return client.placeOrder({
+      ...rest,
+      // 原 ID 已被用掉（雖然被拒絕）；加短後綴，總長仍 < 36。
+      ...(newClientOrderId ? { newClientOrderId: `${newClientOrderId.slice(0, 31)}-nro` } : {}),
+    });
+  }
+}
+
+/**
  * 送出平倉單之後，反覆確認部位歸零；沒歸零就用同方向的 reduceOnly MARKET
  * 單補平剩下的量。
  *
@@ -137,10 +168,13 @@ async function closeUntilFlat(
     const qty = roundToStepSize(remaining, action.stepSize);
     if (qty <= 0) return { flat: false, remaining: signed, extraOrders };
 
-    await client.placeOrder({
+    // 2026-09-23：原本是 `-fullclose-r${attempt}`，真實 tradeId 25 字加上去是
+    // 38 字，超過幣安上限（< 36），每一張補單都被 -4015 拒絕——這條補平路徑
+    // 從來沒真的送出去過。
+    await placeCloseOrder(client, {
       ...action.order,
       quantity: qty,
-      newClientOrderId: `${tradeId}-fullclose-r${attempt}`,
+      newClientOrderId: `${tradeId}-fc${attempt}`,
     });
     extraOrders++;
   }
@@ -219,7 +253,7 @@ export async function executeTradeAction(
         }
       }
 
-      await client.placeOrder(action.order);
+      await placeCloseOrder(client, action.order);
       // 不在這裡寫最終結果——MARKET 單的 ACK 回應不保證帶精確成交價，下一輪
       // decideTradeAction 會偵測到 positionQty=0，走 sync_closed_position
       // 那條用真實 getUserTrades 資料的路徑，比這裡猜測更可靠。但「為什麼

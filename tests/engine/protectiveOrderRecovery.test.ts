@@ -126,6 +126,32 @@ describe('TP1 條件單被拒絕／撤銷後補掛', () => {
   });
 });
 
+describe('策略 B 止盈單不見了（部位還在 = 沒成交，B 的止盈是整單了結）', () => {
+  const b = (o: Partial<BridgeTradeRow> = {}) => tradeRow({ strategy: 'B', tp2: 9.176, ...o });
+
+  it('價格還沒到止盈 → 重掛整單止盈', () => {
+    const a = decideTradeAction(b(), snapshot({ tp1OrderStillOpen: false, markPrice: 8.9 }), risk);
+    expect(a.kind).toBe('place_tp1_order');
+    if (a.kind === 'place_tp1_order') expect(a.order.quantity).toBe(51);
+  });
+
+  it('價格已超過止盈 → 市價平倉', () => {
+    const a = decideTradeAction(b(), snapshot({ tp1OrderStillOpen: false, markPrice: 9.3 }), risk);
+    expect(a.kind).toBe('close_full_position');
+    if (a.kind === 'close_full_position') expect(a.closeReason).toBeNull();
+  });
+
+  it('止盈單還掛著 → 照舊等待', () => {
+    const a = decideTradeAction(b(), snapshot({ tp1OrderStillOpen: true, markPrice: 8.9 }), risk);
+    expect(a.kind).toBe('hold');
+  });
+
+  it('不知道在不在（undefined）→ 照舊等待', () => {
+    const a = decideTradeAction(b(), snapshot({ tp1OrderStillOpen: undefined, markPrice: 8.9 }), risk);
+    expect(a.kind).toBe('hold');
+  });
+});
+
 describe('TP2 條件單不見了（部位還在 = 沒成交）', () => {
   // TP1 已發生：51 → 25 剩 26
   const afterTp1 = (o: Partial<BridgeExchangeSnapshot> = {}) => snapshot({

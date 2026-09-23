@@ -15,9 +15,21 @@ class FakeClient implements TradeExecutorClient {
   callSequence: string[] = [];
   nextOrderId = 1000;
 
+  /** 前 N 張 reduceOnly 單被幣安以 -2022 拒絕（模擬 UNI 2026-09-23 那種狀態）。 */
+  rejectReduceOnlyTimes = 0;
+  /** 下單丟這個錯誤碼（非 -2022 的其他錯誤）。 */
+  placeErrorCode: number | null = null;
+
   async placeOrder(params: PlaceOrderParams) {
     this.placeOrderCalls.push(params);
     this.callSequence.push('place');
+    if (this.placeErrorCode !== null) {
+      throw Object.assign(new Error('binance error'), { response: { data: { code: this.placeErrorCode } } });
+    }
+    if (params.reduceOnly && this.rejectReduceOnlyTimes > 0) {
+      this.rejectReduceOnlyTimes--;
+      throw Object.assign(new Error('ReduceOnly Order is rejected.'), { response: { data: { code: -2022 } } });
+    }
     if (this.positionAfterPlace.length > 0) this.positionQty = this.positionAfterPlace.shift() as number;
     return { orderId: this.nextOrderId++, clientOrderId: params.newClientOrderId ?? '', status: 'NEW' };
   }
@@ -240,9 +252,111 @@ describe('executeTradeAction — close_full_position', () => {
     expect(client.placeOrderCalls).toHaveLength(2);
     expect(client.placeOrderCalls[1]).toMatchObject({
       symbol: 'UNIUSDT', side: 'SELL', type: 'MARKET', quantity: 41, reduceOnly: true,
-      newClientOrderId: 'trade-1-fullclose-r1', // 冪等 ID 不能重複，否則幣安 -4015
+      newClientOrderId: 'trade-1-fc1', // 冪等 ID 不能重複，否則幣安 -4015
     });
     expect(res.closeVerification).toEqual({ flat: true, remaining: 0, extraOrders: 1 });
+  });
+
+  // 2026-09-23：原本補單 ID 是 `${tradeId}-fullclose-r1`。真實 tradeId 是 25 字
+  // （trade-<13 位數>-<5 碼>），加起來 38 字，超過幣安上限（< 36）——被 -4015
+  // 拒絕，「補平殘留部位」這條路從來沒有真的送出去過。測試用的 'trade-1'
+  // 太短，所以一直沒被抓到。
+  it('真實長度的 tradeId，所有平倉單的 clientOrderId 都 < 36 字', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    client.positionAfterPlace = [41, 20, 10, 5];
+    client.positionQty = 75;
+    const realId = 'trade-1789866040715-28chl';
+
+    await executeTradeAction(client, persist, realId, fullClose({
+      order: { symbol: 'UNIUSDT', side: 'SELL', type: 'MARKET', quantity: 75, reduceOnly: true, newClientOrderId: `${realId}-fullclose` },
+    }));
+
+    for (const p of client.placeOrderCalls) expect((p.newClientOrderId ?? '').length).toBeLessThan(36);
+  });
+
+  // 2026-09-23：UNI 的部位在幣安 testnet 上「僅減倉」整個失靈——撤光所有掛單
+  // 之後，reduceOnly 市價單仍被 -2022 拒絕，手機 App 平倉也一樣。最後是不勾
+  // 僅減倉、數量剛好等於部位才平掉。這裡讓系統自己走同一條路，但只在部位
+  // 方向與數量**完全吻合**時才做（否則非 reduceOnly 單會開出反向倉位）。
+  describe('reduceOnly 被 -2022 拒絕時的備援', () => {
+    it('部位方向與數量完全吻合 → 改送非 reduceOnly 的同一張單', async () => {
+      const client = new FakeClient();
+      const persist = new FakePersist();
+      client.rejectReduceOnlyTimes = 1;
+      client.positionQty = 75; // 多單 75，平倉單 SELL 75
+      client.positionAfterPlace = [0];
+
+      const res = await executeTradeAction(client, persist, 'trade-1', fullClose());
+
+      expect(client.placeOrderCalls).toHaveLength(2);
+      expect(client.placeOrderCalls[1]).toMatchObject({ symbol: 'UNIUSDT', side: 'SELL', type: 'MARKET', quantity: 75 });
+      expect(client.placeOrderCalls[1].reduceOnly).toBeUndefined();
+      expect(res.closeVerification?.flat).toBe(true);
+    });
+
+    it('數量不吻合 → 不冒險，照樣丟錯', async () => {
+      const client = new FakeClient();
+      const persist = new FakePersist();
+      client.rejectReduceOnlyTimes = 1;
+      client.positionQty = 41;
+
+      await expect(executeTradeAction(client, persist, 'trade-1', fullClose())).rejects.toThrow();
+      expect(client.placeOrderCalls).toHaveLength(1);
+    });
+
+    it('方向相反（平多單卻看到空單）→ 丟錯', async () => {
+      const client = new FakeClient();
+      const persist = new FakePersist();
+      client.rejectReduceOnlyTimes = 1;
+      client.positionQty = -75;
+
+      await expect(executeTradeAction(client, persist, 'trade-1', fullClose())).rejects.toThrow();
+      expect(client.placeOrderCalls).toHaveLength(1);
+    });
+
+    it('部位已經是 0（可能剛被別的單平掉）→ 丟錯，不開新倉', async () => {
+      const client = new FakeClient();
+      const persist = new FakePersist();
+      client.rejectReduceOnlyTimes = 1;
+      client.positionQty = 0;
+
+      await expect(executeTradeAction(client, persist, 'trade-1', fullClose())).rejects.toThrow();
+      expect(client.placeOrderCalls).toHaveLength(1);
+    });
+
+    it('其他錯誤碼 → 不走備援', async () => {
+      const client = new FakeClient();
+      const persist = new FakePersist();
+      client.placeErrorCode = -1001;
+      client.positionQty = 75;
+
+      await expect(executeTradeAction(client, persist, 'trade-1', fullClose())).rejects.toThrow();
+      expect(client.placeOrderCalls).toHaveLength(1);
+    });
+
+    it('補平殘留部位那張也適用', async () => {
+      const client = new FakeClient();
+      const persist = new FakePersist();
+      client.positionAfterPlace = [41];       // 第一張只平掉 34
+      client.rejectReduceOnlyTimes = 0;
+      const action = fullClose();
+      // 第一張成功後，讓補單的 reduceOnly 被拒
+      const orig = client.placeOrder.bind(client);
+      let n = 0;
+      client.placeOrder = async (p: PlaceOrderParams) => {
+        n++;
+        if (n === 2) client.rejectReduceOnlyTimes = 1;
+        if (n === 3) client.positionAfterPlace = [0];
+        return orig(p);
+      };
+
+      const res = await executeTradeAction(client, persist, 'trade-1', action);
+
+      expect(client.placeOrderCalls[2]).toMatchObject({ side: 'SELL', quantity: 41 });
+      expect(client.placeOrderCalls[2].reduceOnly).toBeUndefined();
+      expect(res.closeVerification?.flat).toBe(true);
+    });
   });
 
   it('空單的殘留部位是負數，補單要用絕對值', async () => {

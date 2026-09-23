@@ -658,6 +658,7 @@ describe('decideTradeAction — strategy B (single take-profit target, tp1==tp2)
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
+        tp1OrderStillOpen: true, // 止盈單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
       }),
       risk(),
     );

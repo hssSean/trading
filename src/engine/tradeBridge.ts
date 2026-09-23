@@ -479,6 +479,21 @@ function holdOrTimeStop(
   return { kind: 'hold', reason: holdReason };
 }
 
+/**
+ * TP1 後移動止損的最小移動幅度（R）。2026-09-23 使用者決定設、幅度由我定。
+ *
+ * 原本每 15 秒只要 markPrice−2×ATR 比現有止損好一點點就撤單重掛：UNIUSDT
+ * 三天約 190 次（10.145 → 10.146 這種級距）。每次換單都是 cancel-then-place，
+ * 中間有無保護窗口，也多一次被交易所拒絕的機會（那三天 UNI 被拒 13 次）。
+ *
+ * 0.1R 的代價上限就是「最多少鎖 0.1R」；ATR 棘輪每輪的移動量通常遠小於
+ * 0.01R，所以換單次數會降到原本的零頭。只套用在 TP1 後的棘輪——TP1 前的
+ * 保本移動是一次性的大跳（≥0.5R 觸發、直接移到進場價），不受影響。
+ *
+ * DB 模擬（route.ts）的棘輪是 5 分鐘一輪，本來就沒有這個問題，沒有同步改。
+ */
+export const TRAIL_MIN_STEP_R = 0.1;
+
 // 保護單（止損／TP2）失效、而價格已經走到它該成交的位置——市價平掉全部，
 // 代替那張沒成交的單出場。撤單清單同 holdOrTimeStop：reduceOnly 條件單會
 // 佔可平額度，送平倉單前先撤。
@@ -725,7 +740,15 @@ export function decideTradeAction(
     // 策略B沒有兩階段 TP，交給預掛的 TAKE_PROFIT_MARKET（quantity=全部部位+
     // reduceOnly，不是 closePosition——見 orderLifecycle.ts 的 -4130 說明）
     // 條件單觸發整單平倉——這裡只負責「還沒掛就補掛」，不用輪詢比價。
-    if (trade.exchangeTp1AlgoId === null) {
+    // 2026-09-23：止盈單被拒絕／撤銷後 exchangeTp1AlgoId 仍有值，原本永遠不補掛。
+    // B 的止盈是整單了結，所以「部位還在而單子不見」= 它沒成交。價格已超過
+    // 止盈 → 代替它出場；還沒到 → 重掛（下面同一段 placement）。
+    const tpOrderLost = trade.exchangeTp1AlgoId !== null && snapshot.tp1OrderStillOpen === false;
+    if (tpOrderLost && (trade.isLong ? snapshot.markPrice >= trade.tp1 : snapshot.markPrice <= trade.tp1)) {
+      const close = closeInPlaceOfProtectiveOrder(trade, snapshot);
+      if (close) return close;
+    }
+    if (trade.exchangeTp1AlgoId === null || tpOrderLost) {
       const tp1Decision = decideTp1OrderPlacement({
         tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong, strategy: 'B',
         positionQty: snapshot.positionQty, tp1: trade.tp1, filters: snapshot.filters,
@@ -826,6 +849,13 @@ export function decideTradeAction(
       isLong: trade.isLong, entry: trade.entry, tp1: trade.tp1, markPrice: snapshot.markPrice,
       atr1h: snapshot.atr1h, currentTrailingStop: snapshot.currentStop.triggerPrice,
     });
+    // 2026-09-23：改善不到 TRAIL_MIN_STEP_R 就不換單（理由見常數定義）。
+    const riskDist = Math.abs(trade.entry - trade.stopLoss);
+    const cur = snapshot.currentStop.triggerPrice;
+    const improvementR = riskDist > 0 ? (trade.isLong ? target - cur : cur - target) / riskDist : 0;
+    if (improvementR < TRAIL_MIN_STEP_R - 1e-9) {
+      return holdOrTimeStop(trade, snapshot, true, `持有中（TP1 已達標，移動止損改善 ${improvementR.toFixed(3)}R 未達 ${TRAIL_MIN_STEP_R}R 門檻）`);
+    }
     const stopDecision = decideTrailingStopReplace({
       tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
       currentStopOrder: { orderId: snapshot.currentStop.algoId, stopPrice: snapshot.currentStop.triggerPrice },
