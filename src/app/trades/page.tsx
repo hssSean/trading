@@ -7,6 +7,7 @@ import { calcPositionPlan, tierRiskMultiplier } from '@/lib/position';
 import { isFinallyClosed, isUnconfirmedSync } from '@/lib/tradeSync';
 import { isCleanPeriod } from '@/lib/cleanPeriod';
 import { TP1_PARTIAL_FRACTION } from '@/lib/monitorMath';
+import { effectiveStop, tp1StopAdvice } from '@/lib/stopSync';
 import { StatsHero } from '@/components/StatsHero';
 import { TradeResult, TradeRecord } from '@/types';
 import { TradeCard } from '@/components/ui/TradeCard';
@@ -231,9 +232,12 @@ const TradeRow = memo(function TradeRow({
     distTP1 = trade.direction === 'LONG'
       ? (trade.tp1 - livePx) / livePx * 100
       : (livePx - trade.tp1) / livePx * 100;
+    // 2026-09-23：用實際止損（移動過就是 current_stop），不是開單時的原始止損——
+    // AVAX 那筆幣安止損已在 10.973，卡片仍以 8.9054 算出「緩衝 22.90%」。
+    const slNow = effectiveStop(trade);
     distSL = trade.direction === 'LONG'
-      ? (livePx - trade.stopLoss) / livePx * 100
-      : (trade.stopLoss - livePx) / livePx * 100;
+      ? (livePx - slNow) / livePx * 100
+      : (slNow - livePx) / livePx * 100;
     nearSL = distSL < 1.5;
   }
   // Distance to TP2 for trades watching for TP2 upgrade.
@@ -439,7 +443,7 @@ const TradeRow = memo(function TradeRow({
           tp2={trade.tp2}
           current={livePx > 0 ? livePx : null}
           formatPrice={fmtPrice}
-          trailingStop={isWatchingTp2 ? trade.currentStop ?? null : null}
+          trailingStop={isTp1Hit ? trade.currentStop ?? null : null}
           exitPrice={isFinallyClosed(trade) ? trade.exitPrice ?? null : null}
           distToTp1Label={isPending && livePx > 0 && distTP1 > 0 ? `TP1 ${distTP1.toFixed(2)}%` : undefined}
           distToStopLabel={isPending && livePx > 0 && distSL >= 0 ? `止損 ${distSL.toFixed(2)}%` : undefined}
@@ -488,14 +492,24 @@ const TradeRow = memo(function TradeRow({
 
       {/* Live trailing stop for TP1-watching trades */}
       {isWatchingTp2 && (() => {
-        const stopLvl = trade.currentStop && trade.currentStop > 0 ? trade.currentStop : trade.entry;
-        const lockedR = Math.abs(trade.entry - trade.stopLoss) > 0
-          ? (trade.direction === 'LONG' ? stopLvl - trade.entry : trade.entry - stopLvl) / Math.abs(trade.entry - trade.stopLoss)
-          : 0;
+        // 2026-09-23：原本 current_stop 缺值就退回進場價並寫「請移到這」——真倉的
+        // current_stop 以前從沒被寫過，所以這裡對真倉永遠顯示錯的價位。
+        const advice = tp1StopAdvice(trade);
+        if (advice.kind === 'managed_unknown') {
+          return (
+            <div className="bg-accent/[0.08] rounded-[10px] px-3 py-2 mb-3">
+              <p className="text-[11px] text-text-s">移動止損由系統在交易所自動管理（價位同步中）</p>
+            </div>
+          );
+        }
+        const stopLvl = advice.stop;
+        const lockedR = advice.kind === 'moved' ? advice.lockedR : 0;
         return (
           <div className="flex items-center justify-between bg-accent/[0.08] rounded-[10px] px-3 py-2 mb-3">
             <div>
-              <div className="text-[11px] text-text-s">移動止損（請移到這）</div>
+              <div className="text-[11px] text-text-s">
+                {advice.kind === 'moved' && advice.byExchange ? '移動止損（交易所已掛）' : '移動止損（請移到這）'}
+              </div>
               <div className="text-[15px] text-accent num mt-0.5">{fmtPrice(stopLvl)}</div>
             </div>
             <p className="text-[10px] text-right leading-4 text-text-m">
@@ -541,11 +555,25 @@ const TradeRow = memo(function TradeRow({
       })()}
 
       {/* TP1 hit: breakeven reminder */}
-      {isTp1Hit && (
-        <div className="mb-3 bg-accent/[0.06] rounded-[10px] px-3 py-2">
-          <p className="text-accent/85 text-[11px]">TP1 已達標，建議將止損移至成本 <span className="num text-accent">{fmtPrice(trade.entry)}</span>，繼續持有等待 TP2</p>
-        </div>
-      )}
+      {/* 2026-09-23：原本寫死「移至成本 entry」，跟交易所實際止損（live-runner
+          移動止損）對不上。改依實際止損決定文案，見 lib/stopSync.ts。 */}
+      {isTp1Hit && (() => {
+        const advice = tp1StopAdvice(trade);
+        return (
+          <div className="mb-3 bg-accent/[0.06] rounded-[10px] px-3 py-2">
+            <p className="text-accent/85 text-[11px]">
+              {advice.kind === 'moved' ? (
+                <>TP1 已達標，止損{advice.byExchange ? '已由系統移至' : '目前在'} <span className="num text-accent">{fmtPrice(advice.stop)}</span>
+                  {advice.lockedR >= 0.05 ? `（鎖 +${advice.lockedR.toFixed(1)}R）` : '（保本）'}，繼續持有等待 TP2</>
+              ) : advice.kind === 'managed_unknown' ? (
+                <>TP1 已達標，移動止損由系統在交易所自動管理，繼續持有等待 TP2</>
+              ) : (
+                <>TP1 已達標，建議將止損移至成本 <span className="num text-accent">{fmtPrice(advice.stop)}</span>，繼續持有等待 TP2</>
+              )}
+            </p>
+          </div>
+        );
+      })()}
 
       {/* 分析依據。2026-08-21 改版：原本把五組評分擠成一行純文字、再接 11 條
           同權重的理由，每條看起來都一樣重要，得逐條讀才知道這張單的性格。

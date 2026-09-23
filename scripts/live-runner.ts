@@ -78,6 +78,7 @@ import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
 import { readDailyLossCapFromEnv, sumTradingIncome, utcDayStart } from '../src/lib/dailyLossCap';
 import { evaluateDrawdownHalt, readMaxDrawdownR } from '../src/lib/drawdownHalt';
 import { tp1MarkPayload, tp1RollbackPayload } from '../src/lib/tp1Mark';
+import { currentStopToSync } from '../src/lib/stopSync';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
 
@@ -154,6 +155,7 @@ interface DbTradeRow {
   mfe_price: number | null;
   mae_price: number | null;
   close_reason: string | null;
+  current_stop: number | string | null;
 }
 
 const VALID_TIMEFRAMES = new Set(['5m', '15m', '1h', '4h', '1d']);
@@ -795,7 +797,7 @@ async function runCycle(
   // 42703/PGRST204 就退回不含該欄位的查詢，功能降級但不中斷。
   const BASE_COLS = 'id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,'
     + 'suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,'
-    + 'exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price,close_reason';
+    + 'exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price,close_reason,current_stop';
 
   const selectOpen = (cols: string) => supabase
     .from('trades').select(cols).eq('user_id', userId).is('closed_at', null);
@@ -1045,6 +1047,20 @@ async function runCycle(
           }
         } catch (e) {
           console.error(`[mfe/mae] ${row.symbol} 計算失敗: ${String(e).slice(0, 150)}`);
+        }
+      }
+
+      // 2026-09-23：把交易所上「現在實際的止損價」對帳回 trades.current_stop。
+      // 移動止損只換幣安條件單、從沒寫這個欄位，App 卡片於是永遠顯示寫死的
+      // 「建議將止損移至成本」——AVAX 那筆幣安止損 10.973、App 叫人移到 9.5551。
+      // 用對帳而不是在 update_trailing_stop 順手寫，理由見 src/lib/stopSync.ts。
+      // 只在價格變了才寫一次；失敗只 log，不擋監控。
+      if (snapshot.positionQty > 0) {
+        const stopToWrite = currentStopToSync(row.current_stop, snapshot.currentStop?.triggerPrice);
+        if (stopToWrite !== null) {
+          const { error } = await supabase.from('trades').update({ current_stop: stopToWrite }).eq('id', row.id);
+          if (error) console.error(`[current_stop] ${row.symbol} 更新失敗: [${error.code}] ${error.message}`);
+          else row.current_stop = stopToWrite;
         }
       }
 
