@@ -181,6 +181,19 @@ describe('executeTradeAction — close_full_position', () => {
     expect(persist.forceCloseReasonCalls).toEqual([{ tradeId: 'trade-1', reason: 'time_stop_expiry_post_tp1' }]);
   });
 
+  // 2026-09-23：代替被拒絕的止損／TP2 出場——不是時間止損，不能寫 pending 原因，
+  // 否則對帳會把它標成「時間止損」。
+  it('closeReason=null 時照樣平倉，但不寫關單原因', async () => {
+    const client = new FakeClient();
+    const persist = new FakePersist();
+    const action: TradeAction = fullClose({ closeReason: null });
+
+    await executeTradeAction(client, persist, 'trade-1', action);
+
+    expect(client.placeOrderCalls).toEqual([action.order]);
+    expect(persist.forceCloseReasonCalls).toEqual([]);
+  });
+
   it('撤掉保護性條件單之後才送平倉單——reduceOnly 條件單會佔用可平額度', async () => {
     const client = new FakeClient();
     const persist = new FakePersist();

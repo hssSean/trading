@@ -118,7 +118,7 @@ export function SignalCard({ signal, onClick, compact }: Props) {
       {/* Position sizing */}
       {plan && (
         <div className="mb-3">
-          <p className="tlabel mb-1.5">倉位計算（{effRisk}% 風險）</p>
+          <p className="tlabel mb-1.5">倉位計算（{+effRisk.toFixed(2)}% 風險）</p>
           <div className="grid grid-cols-3 gap-2">
             <StatChip icon={<Wallet className="w-4 h-4" />} label="建議倉位" value={`${plan.positionUSDT}U`} />
             <StatChip icon={<Layers className="w-4 h-4" />} label="本金×槓桿" value={`${plan.marginUSDT}U×${plan.leverage}`} />
@@ -131,7 +131,7 @@ export function SignalCard({ signal, onClick, compact }: Props) {
               看起來像算錯了——實際上是止損太近，照押會吃掉整個帳戶的保證金。 */}
           {plan.notionalCapped && !plan.belowMinNotional && (
             <p className="text-[#E6AF5A] text-[10px] mt-1.5">
-              止損距離僅 {slPct.toFixed(2)}%，倉位已縮至上限（本金約帳戶 20%），實際風險低於 {effRisk}%
+              止損距離僅 {slPct.toFixed(2)}%，倉位已縮至上限（本金約帳戶 20%），實際風險低於 {+effRisk.toFixed(2)}%
             </p>
           )}
         </div>

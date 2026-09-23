@@ -79,6 +79,7 @@ import { readDailyLossCapFromEnv, sumTradingIncome, utcDayStart } from '../src/l
 import { evaluateDrawdownHalt, readMaxDrawdownR } from '../src/lib/drawdownHalt';
 import { tp1MarkPayload, tp1RollbackPayload } from '../src/lib/tp1Mark';
 import { currentStopToSync } from '../src/lib/stopSync';
+import { findOrphanEntryOrders } from '../src/lib/orphanEntry';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
 
@@ -186,6 +187,9 @@ function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
     exchangeTp2AlgoId: row.exchange_tp2_algo_id ?? null,
     // 「價格到底有沒有到過 TP1」的證據，給 didTp1PartialFill 用（2026-09-09）。
     mfePrice: row.mfe_price,
+    // 止損被拒絕後補掛用（2026-09-23）。numeric 欄位可能回字串，轉成數字。
+    lastKnownStop: row.current_stop != null && Number.isFinite(Number(row.current_stop))
+      ? Number(row.current_stop) : null,
   };
 }
 
@@ -285,9 +289,14 @@ function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersis
       // status='active' 是 trades/page.tsx 判斷「已經進場、脫離等待進場」
       // 的欄位——跟 route.ts 的 Phase 1 fill-detection 寫的是同一個值，
       // filled_at 也是同一個欄位，全站對「進場了沒」的判斷方式維持一致。
+      // 2026-09-23：只改還在 'waiting' 的列。place_initial_stop 也是「止損被
+      // 交易所拒絕後補掛」的路徑，原本每補一次就把 filled_at 重設成現在
+      // （時間止損的計時歸零）、把 tp1_hit 改回 active（下一輪又重新標 TP1、
+      // 再發一次假的 TP1 推播）——UNI 9/23 12:39 就是這樣。第一次成交的
+      // waiting→active 本來就由主迴圈的自我修復先做掉，這裡只是保險。
       const { error } = await supabase.from('trades').update({
         status: 'active', filled_at: filledAt,
-      }).eq('id', tradeId);
+      }).eq('id', tradeId).eq('status', 'waiting');
       logErr('markFilled', error);
     },
     async setEntryQty(tradeId, entryQty) {
@@ -347,6 +356,11 @@ async function buildSnapshot(
   // 的單同樣不可能成交，讓判斷退回「要有價格證據」那條路。
   const tp1OrderStillOpen = row.exchange_tp1_algo_id !== null
     && openAlgoOrders.some(a => a.algoId === row.exchange_tp1_algo_id);
+  // TP2 同一份清單（2026-09-23）：部位還在而 TP2 不見 = 被拒絕/撤銷，要重掛。
+  // 從沒掛過（null）時給 undefined＝不知道，不觸發任何重掛判斷。
+  const tp2OrderStillOpen = row.exchange_tp2_algo_id != null
+    ? openAlgoOrders.some(a => a.algoId === row.exchange_tp2_algo_id)
+    : undefined;
 
   // ATR 只有「策略A + 已經過 TP1」需要（移動止損棘輪）——其他情況不用多打
   //一次 K 線請求。
@@ -400,7 +414,7 @@ async function buildSnapshot(
   // 見 tradeBridge.ts 的 protectiveOrderCount。
   const protectiveOrderCount = openAlgoOrders.length;
 
-  return { positionQty, positionQtySigned, protectiveOrderCount, entryOrderStillOpen, currentStop, tp1OrderStillOpen, markPrice, filters, recentTrades, atr1h, now: Date.now() };
+  return { positionQty, positionQtySigned, protectiveOrderCount, entryOrderStillOpen, currentStop, tp1OrderStillOpen, tp2OrderStillOpen, markPrice, filters, recentTrades, atr1h, now: Date.now() };
 }
 
 async function buildRiskInput(
@@ -578,8 +592,12 @@ async function notifyIfNeeded(
   //    損益（MARKET 單 ACK 不保證帶精確成交價，見 tradeExecutor.ts 說明），
   //    兩則各自有用，不是重複：使用者需要立刻知道系統主動關了倉。
   if (action.kind === 'close_full_position') {
+    // closeReason=null（2026-09-23）：止損／TP2 條件單被交易所拒絕，價格已經
+    // 走到它該成交的位置，系統代替它市價出場。
     await sendWebPushToUser(userId, {
-      title: `${CLOSE_REASON_PUSH_LABEL[action.closeReason] ?? '⏱ 系統平倉'} ${sym}`,
+      title: action.closeReason === null
+        ? `🛑 ${sym} 保護單被交易所拒絕，系統代為市價平倉`
+        : `${CLOSE_REASON_PUSH_LABEL[action.closeReason] ?? '⏱ 系統平倉'} ${sym}`,
       body: `${dir} 系統主動平倉中，成交結果稍後回報`,
       tag: `forceclose-${row.id}`,
     });
@@ -757,12 +775,15 @@ async function runCycle(
   }
 
   // 全帳戶對帳——涵蓋所有 symbol，抓 DB 追蹤不到的異常（見檔案頂部說明）。
+  // accountOpenOrders 留給下面「孤兒進場單」那一步用（要等 open trades 讀完）。
+  let accountOpenOrders: Awaited<ReturnType<BinanceFuturesClient['getOpenOrders']>> | null = null;
   try {
     const [positions, openOrders, openAlgoOrders] = await Promise.all([
       binance.getPositionRisk(),
       binance.getOpenOrders(),
       binance.getOpenAlgoOrders(),
     ]);
+    accountOpenOrders = openOrders;
     const anomalies = reconcilePositionsAndOrders(positions, openOrders, openAlgoOrders);
     if (anomalies.length > 0) {
       console.log(`[${nowStr()}] ⚠ 全帳戶對帳異常 ${anomalies.length} 筆:`);
@@ -817,6 +838,22 @@ async function runCycle(
   // 經過 unknown：兩段式 fallback 讓 supabase-js 推不出單一列型別（兩次查詢
   // 的欄位集不同），這裡的 shape 由 DbTradeRow 保證，不是靠推導。
   const openTrades = (rows ?? []) as unknown as DbTradeRow[];
+
+  // 2026-09-23：孤兒進場單——DB 已結案、交易所上卻還掛著的 LIMIT 進場單。
+  // 實測 SOL/ZEC 兩張從 09-01 掛到 09-23，成交就是一個沒人管的裸倉。
+  // 放在「沒有 open trades 就 return」之前：那種情況下我們的進場單全都是孤兒。
+  if (accountOpenOrders) {
+    const orphans = findOrphanEntryOrders(accountOpenOrders, new Set(openTrades.map(t => t.id)));
+    for (const o of orphans) {
+      try {
+        await binance.cancelOrder(o.symbol, o.orderId, false);
+        console.log(`[${nowStr()}] 🧹 已撤銷孤兒進場單 ${o.symbol} orderId=${o.orderId}（${o.tradeId} 在 DB 已結案）`);
+      } catch (e) {
+        console.error(`[${nowStr()}] 撤銷孤兒進場單 ${o.symbol} orderId=${o.orderId} 失敗（下輪會再試）: ${describeError(e)}`);
+      }
+    }
+  }
+
   if (openTrades.length === 0) {
     console.log(`[${nowStr()}] OK，目前沒有開著的推薦單`);
     return;

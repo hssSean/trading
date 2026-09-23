@@ -159,6 +159,15 @@ export interface BridgeTradeRow {
    */
   exchangeTp2AlgoId?: number | null;
   /**
+   * 最後一次在交易所上看到的止損價（trades.current_stop，live-runner 每輪對帳
+   * 寫入，見 src/lib/stopSync.ts）。
+   *
+   * 2026-09-23 新增，給「止損不見了要補掛」那一步用：原本一律補在原始
+   * `stopLoss`，UNIUSDT 棘輪已推到 10.25 的止損被交易所拒絕後，補回去的是
+   * 8.473——鎖住的利潤整個還回去。選填：沒有就退回原始止損。
+   */
+  lastKnownStop?: number | null;
+  /**
    * 這筆存續期間看過的最有利價格（MFE，多單是最高價、空單是最低價）。
    * `null` = 還沒量測過。
    *
@@ -224,6 +233,13 @@ export interface BridgeExchangeSnapshot {
    * 選填：不帶就是「不知道」，退回舊行為（不擋）。
    */
   tp1OrderStillOpen?: boolean;
+  /**
+   * 這筆的 TP2 條件單此刻還掛在交易所上。2026-09-23 新增。
+   *
+   * TP2 是「剩餘部位全部平掉」，所以**部位還在而 TP2 單不見了 = 它沒成交**
+   * （被拒絕或被撤銷）。不帶 = 不知道，維持舊行為（不重掛）。
+   */
+  tp2OrderStillOpen?: boolean;
 }
 
 export interface RiskCheckInput {
@@ -300,7 +316,12 @@ export type TradeAction =
   | {
       kind: 'close_full_position';
       order: PlaceOrderParams;
-      closeReason: TimeStopCloseReason;
+      /**
+       * `null` = 不是時間止損，而是「保護單失效後代替它出場」（止損被拒絕且
+       * 價格已穿過、TP2 被拒絕且價格已超過）。這種情況不寫 pending 原因，
+       * 讓 sync_closed_position 照一般止損/獲利出場的規則推論。
+       */
+      closeReason: TimeStopCloseReason | null;
       /**
        * 送出平倉單**之前**要先撤掉的保護性條件單（止損／TP1／TP2 的 algoId）。
        *
@@ -456,6 +477,30 @@ function holdOrTimeStop(
     }
   }
   return { kind: 'hold', reason: holdReason };
+}
+
+// 保護單（止損／TP2）失效、而價格已經走到它該成交的位置——市價平掉全部，
+// 代替那張沒成交的單出場。撤單清單同 holdOrTimeStop：reduceOnly 條件單會
+// 佔可平額度，送平倉單前先撤。
+function closeInPlaceOfProtectiveOrder(
+  trade: BridgeTradeRow,
+  snapshot: BridgeExchangeSnapshot,
+): TradeAction | null {
+  const closeDecision = decideFullClose({
+    tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong, positionQty: snapshot.positionQty,
+  });
+  if (closeDecision.skip) return null;
+  return {
+    kind: 'close_full_position',
+    order: closeDecision.order,
+    closeReason: null,
+    cancelAlgoIds: [
+      snapshot.currentStop?.algoId,
+      trade.exchangeTp1AlgoId,
+      trade.exchangeTp2AlgoId,
+    ].filter((id, i, all): id is number => typeof id === 'number' && all.indexOf(id) === i),
+    stepSize: snapshot.filters.stepSize,
+  };
 }
 
 export function decideTradeAction(
@@ -635,10 +680,26 @@ export function decideTradeAction(
   }
 
   // 4. 有部位但沒止損——最危險的裸倉窗口，優先於任何其他判斷處理。
+  //
+  // 2026-09-23：止損「不見」不只是剛成交還沒掛——更常見的是條件單觸發後被
+  // 交易所拒絕（testnet 流動性薄，PERCENT_PRICE／Reduce only reject，UNI 一檔
+  // 就 13 次）。兩個修正：
+  //   - 補在「最後已知的止損」與原始止損中較有利的那個，不把棘輪鎖住的利潤還回去。
+  //   - 價格已經穿過那個價位 → 止損本來就該成交了，直接市價平倉。掛一張會
+  //     立即觸發的止損只會被 -2021 拒絕，每 15 秒重試、永遠掛不上。
   if (snapshot.currentStop === null) {
+    const last = trade.lastKnownStop;
+    const lastIsBetter = last != null && last > 0
+      && (trade.isLong ? last > trade.stopLoss : last < trade.stopLoss);
+    const desiredStop = lastIsBetter ? last : trade.stopLoss;
+    const crossed = trade.isLong ? snapshot.markPrice <= desiredStop : snapshot.markPrice >= desiredStop;
+    if (crossed) {
+      const close = closeInPlaceOfProtectiveOrder(trade, snapshot);
+      if (close) return close;
+    }
     const stopDecision = decideTrailingStopReplace({
       tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
-      currentStopOrder: null, desiredStopPrice: trade.stopLoss,
+      currentStopOrder: null, desiredStopPrice: desiredStop,
       positionQty: snapshot.positionQty, filters: snapshot.filters,
     });
     if (stopDecision.kind === 'initialize') {
@@ -679,7 +740,14 @@ export function decideTradeAction(
   // 策略A，TP1 還沒發生：確保條件單掛著（第一次補掛，或者理論上異常消失後
   // 補掛一次），沒有動作就等交易所觸發。
   if (!tp1Happened) {
-    if (trade.exchangeTp1AlgoId === null) {
+    // 2026-09-23：TP1 單被拒絕／撤銷後 exchangeTp1AlgoId 仍有值，原本永遠不會
+    // 補掛（UNI 的 TP1 被 `Reduce only reject` 打回後，那筆就再也沒有止盈）。
+    // 只在「價格從沒到過 TP1」時補——那種情況 TP1 不可能成交過，不見一定是
+    // 被拒絕/撤銷，沒有「其實剛成交、部位還沒反映」的競態，不會重複減倉。
+    const tp1OrderLost = trade.exchangeTp1AlgoId !== null
+      && snapshot.tp1OrderStillOpen === false
+      && !priceReachedTp1({ mfePrice: trade.mfePrice, markPrice: snapshot.markPrice, tp1: trade.tp1, isLong: trade.isLong });
+    if (trade.exchangeTp1AlgoId === null || tp1OrderLost) {
       const tp1Decision = decideTp1OrderPlacement({
         tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong, strategy: 'A',
         positionQty: snapshot.positionQty, tp1: trade.tp1, filters: snapshot.filters,
@@ -733,6 +801,23 @@ export function decideTradeAction(
     }
     // skip 不 return——掛不上 TP2（部位太小之類）時仍然要讓移動止損接手，
     // 不能因此整筆卡住不管理。
+  }
+
+  // 2026-09-23：TP2 單不見了但部位還在 = 沒成交（被拒絕/撤銷）。原本
+  // exchangeTp2AlgoId 有值就不再理會，UNI 價格漲過 TP2 一整段、部位還在。
+  // 價格已經過 TP2 → 代替它出場；還沒到 → 重掛。
+  if (trade.exchangeTp2AlgoId != null && trade.tp2 != null && snapshot.tp2OrderStillOpen === false) {
+    const pastTp2 = trade.isLong ? snapshot.markPrice >= trade.tp2 : snapshot.markPrice <= trade.tp2;
+    if (pastTp2) {
+      const close = closeInPlaceOfProtectiveOrder(trade, snapshot);
+      if (close) return close;
+    } else {
+      const tp2Decision = decideTp2OrderPlacement({
+        tradeId: trade.id, symbol: trade.symbol, isLong: trade.isLong,
+        positionQty: snapshot.positionQty, tp2: trade.tp2, filters: snapshot.filters,
+      });
+      if (!tp2Decision.skip) return { kind: 'place_tp2_order', order: tp2Decision.order };
+    }
   }
 
   // 移動止損棘輪。沒有 ATR 資料就不亂動，維持現狀。

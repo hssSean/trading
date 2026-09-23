@@ -94,6 +94,11 @@ async function main() {
   console.log(`\n對帳範圍：近 ${days} 天，${symbols.length} 個 symbol\n`);
 
   const all: Array<{ symbol: string; row: AuditRow }> = [];
+  // 2026-09-23：觸發了卻被交易所拒絕的條件單。這種單沒有成交，上面的對帳
+  // 完全看不到它——但它是最危險的一種：止損「觸發過」、部位卻原封不動。
+  // UNIUSDT 一檔三天被拒絕 13 次（testnet 流動性薄：PERCENT_PRICE、
+  // Reduce only reject），live-runner 的補救邏輯就是這次才補上的。
+  const rejected: Array<{ symbol: string; time: number; orderType: string; trigger: string; reason: string; clientAlgoId: string }> = [];
 
   for (const symbol of symbols) {
     let rows: AuditRow[];
@@ -113,6 +118,14 @@ async function main() {
           actualQty: parseFloat(a.actualQty as string),
           closePosition: a.closePosition,
         }));
+
+      for (const a of history) {
+        if (a.algoStatus !== 'REJECTED') continue;
+        rejected.push({
+          symbol, time: a.triggerTime ?? a.createTime, orderType: a.orderType,
+          trigger: a.triggerPrice, reason: a.rejectReason ?? '（交易所沒給原因）', clientAlgoId: a.clientAlgoId,
+        });
+      }
 
       if (triggered.length === 0) {
         console.log(`${symbol.padEnd(12)} 期間沒有任何條件單被觸發`);
@@ -184,6 +197,18 @@ async function main() {
   if (partial.length > 0) {
     console.log(`\n⚠ 有 ${partial.length} 張**止損單**沒把部位平乾淨（TP1 只平一半是正常的，止損不是）。`);
     console.log(`   這代表那筆 trade 在 DB 看起來已經出場、實際上還有部位掛在交易所。`);
+    console.log(`   （同一個 clientAlgoId 緊接著又出現一列「平乾淨」的，是同一張單分兩筆成交，不算異常。）`);
+  }
+
+  if (rejected.length > 0) {
+    rejected.sort((a, b) => a.time - b.time);
+    console.log(`\n🔴 有 ${rejected.length} 張條件單觸發後被交易所拒絕（沒有成交，部位原封不動）：`);
+    for (const r of rejected) {
+      console.log(`   ${r.symbol.padEnd(12)} ${new Date(r.time).toISOString()} ${r.orderType.padEnd(19)}`
+        + ` 觸發價 ${r.trigger.padStart(10)}  ${r.reason.trim()}  ${r.clientAlgoId}`);
+    }
+    console.log(`   live-runner 2026-09-23 起會自動補救（價格已穿過就市價平倉、否則重掛），`
+      + `這裡列出來是讓你知道發生過幾次。`);
   }
 }
 

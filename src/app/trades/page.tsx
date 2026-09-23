@@ -528,7 +528,7 @@ const TradeRow = memo(function TradeRow({
         const slPct = Math.abs(trade.entry - trade.stopLoss) / trade.entry * 100;
         return (
           <div className="mb-3">
-            <p className="tlabel mb-1.5">倉位計算（{effRisk}% 風險）</p>
+            <p className="tlabel mb-1.5">倉位計算（{+effRisk.toFixed(2)}% 風險）</p>
             <div className="grid grid-cols-2 gap-2">
               <StatChip icon={<Wallet className="w-4 h-4" />} label="建議倉位" value={`${plan.positionUSDT}U`} />
               <StatChip icon={<Layers className="w-4 h-4" />} label="本金×槓桿" value={`${plan.marginUSDT}U×${plan.leverage}`} />
@@ -547,7 +547,7 @@ const TradeRow = memo(function TradeRow({
                 那格因此低於設定的風險%，不講會看起來像算錯了。 */}
             {plan.notionalCapped && !plan.belowMinNotional && (
               <p className="text-[#E6AF5A] text-[10px] mt-1.5">
-                止損距離僅 {slPct.toFixed(2)}%，倉位已縮至上限（本金約帳戶 20%），實際風險低於 {effRisk}%
+                止損距離僅 {slPct.toFixed(2)}%，倉位已縮至上限（本金約帳戶 20%），實際風險低於 {+effRisk.toFixed(2)}%
               </p>
             )}
           </div>

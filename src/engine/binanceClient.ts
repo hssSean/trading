@@ -208,6 +208,8 @@ export interface AlgoOrderHistory extends AlgoOrder {
   actualPrice?: string;
   createTime: number;
   triggerTime?: number;
+  /** algoStatus=REJECTED 時交易所給的原因（例如 PERCENT_PRICE、Reduce only reject）。 */
+  rejectReason?: string;
 }
 
 export class BinanceFuturesClient {

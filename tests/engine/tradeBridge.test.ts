@@ -561,6 +561,7 @@ describe('decideTradeAction — TP1 order placement (strategy A, partial)', () =
       snapshot({
         positionQty: 0.01, // 還是滿倉
         currentStop: { algoId: 222, triggerPrice: 64000 },
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
       }),
       risk(),
     );
@@ -578,6 +579,7 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
       snapshot({
         positionQty: 0.01, // TP1 還沒發生（entryQty 沒有變小）
         currentStop: { algoId: 222, triggerPrice: 64000 }, // 原始止損，還沒 arm 過
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         markPrice: 65500, // entry(65000) + 0.5×riskDist(1000) = 65500
       }),
       risk(),
@@ -594,6 +596,7 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         markPrice: 65400, // 差 100，還沒到 0.5R
       }),
       risk(),
@@ -607,6 +610,7 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 65000 }, // 已經 arm 過（= entry）
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         markPrice: 65500,
       }),
       risk(),
@@ -620,6 +624,7 @@ describe('decideTradeAction — pre-TP1 breakeven arm (策略修改.md 修改1, 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 66000 },
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         markPrice: 64500, // entry(65000) - 0.5×riskDist(1000) = 64500
       }),
       risk(),
@@ -819,7 +824,7 @@ describe('decideTradeAction — strategy A trailing stop after TP1', () => {
 
   it('holds when the target is not more favorable than the current stop (no unnecessary order)', () => {
     const a = decideTradeAction(
-      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333 }),
+      tradeRow({ exchangeEntryOrderId: 111, entryQty: 0.01, exchangeTp1AlgoId: 333, mfePrice: 67500 }),
       snapshot({
         positionQty: 0.005,
         currentStop: { algoId: 222, triggerPrice: 66000 },
@@ -852,6 +857,7 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
       snapshot({
         positionQty: 0.01, // 還沒 TP1
         currentStop: { algoId: 222, triggerPrice: 64000 },
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         markPrice: 65100, // progress = 0.1R，卡在 -0.3~0.3 之間
         now: 8.5 * 3600_000, // 8.5 小時 = 8.5 根 1h K 線，超過 8 根門檻
       }),
@@ -868,6 +874,7 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         // progress = 0.4R：不在停滯區間(±0.3R)，也還沒到 2026-08-17 調降後
         // 的保本門檻(0.5R)，才會真的落到這條時間止損分支而不是先被保本
         // arm 攔截走（見上面 pre-TP1 breakeven arm 那組測試）。
@@ -911,6 +918,7 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         markPrice: 65100,
         now: 8.5 * 3600_000,
       }),
@@ -931,6 +939,7 @@ describe('decideTradeAction — time stop forces a close_full_position with the 
       snapshot({
         positionQty: 0.01,
         currentStop: { algoId: 222, triggerPrice: 64000 },
+        tp1OrderStillOpen: true, // TP1 單還掛著（2026-09-23 起「不見了」代表被拒絕，會觸發重掛）
         markPrice: 65100,
         now: 8.5 * 3600_000,
       }),

@@ -226,7 +226,9 @@ export async function executeTradeAction(
       // 關」這個事實現在就確定了，先記下來，等對帳那一刻直接採用。
       //
       // 沒平乾淨也照寫：關單原因是我們自己剛做的決定，跟平乾淨與否無關。
-      await persist.markForceCloseReason(tradeId, action.closeReason);
+      // closeReason=null：代替失效的保護單出場，不是時間止損——不寫 pending
+      // 原因，讓對帳照一般止損/獲利出場推論（見 TradeAction 型別註解）。
+      if (action.closeReason !== null) await persist.markForceCloseReason(tradeId, action.closeReason);
 
       const verification = await closeUntilFlat(client, tradeId, action);
       if (verification.flat) {
