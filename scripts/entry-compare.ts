@@ -113,6 +113,13 @@ async function main(): Promise<void> {
         const riskDist = isLong ? fillPx - sl : sl - fillPx;
         if (riskDist <= 0) { perPolicy.push({ name: p.name, r: 0, filled: false }); continue; }
 
+        // 2026-09-24（verify-strategy.ts B6）：限價單成交那一根若也碰到止損，判止損。
+        // 原本出場從下一根才開始走——限價單正是回調時成交、那一根最容易順便打到
+        // 止損，忽略它會系統性偏袒「等回調」的政策（市價在開盤成交，不受影響）。
+        const fb = fwd[fillIdx];
+        const fillBarStop = p.waitBars > 0 && (isLong ? fb.low <= sl : fb.high >= sl);
+        if (fillBarStop) { perPolicy.push({ name: p.name, r: -1, filled: true }); continue; }
+
         const bars: ExitBar[] = fwd.slice(fillIdx + 1).map(c => ({ high: c.high, low: c.low, close: c.close }));
         const a = atr.slice(e.idx + 1 + fillIdx + 1, e.idx + 1 + FORWARD_BARS);
         if (bars.length < 30) { perPolicy.push({ name: p.name, r: 0, filled: false }); continue; }

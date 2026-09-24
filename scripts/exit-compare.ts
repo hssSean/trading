@@ -31,9 +31,12 @@
 
 import type { Candle, TradingSignal } from '../src/types';
 import { generateSignals, generateMeanReversionSignals } from '../src/analysis/signals';
-import { adx } from '../src/analysis/indicators';
 import { fetchHistorical } from './backtest';
-import { simulateExit, pairedCompare, type ExitPolicyConfig, type ExitBar } from '../src/lib/exitPolicy';
+import { pairedCompare, type ExitPolicyConfig } from '../src/lib/exitPolicy';
+import {
+  LIVE, aggregate4h, makeFourHView, adx4hAt, regimeFromAdx, RegimeTracker, closes4hWithForming, ema200Bias,
+  simulateFill, simulateExitAfterFill, tradeCostR, type FourHView,
+} from './lib/liveReplica';
 import axios from 'axios';
 import { pathToFileURL } from 'node:url';
 
@@ -42,12 +45,12 @@ const NSYM = Math.max(1, parseInt(process.argv[3] ?? '10', 10));
 
 const WARMUP = 250;
 const WINDOW_1H = 200;
-const WINDOW_4H = 540;
 // 2026-08-26：對齊 route.ts 的 STRONG_THRESHOLD(65) / STRONG_THRESHOLD_B(13)。
 // 原本是 70/10，跟線上不符——65-70 那一格在真實資料裡是最賠的區間，
 // 用 70 等於把最差的一段排除掉，基準線會偏樂觀。見 backtest.ts 同名常數說明。
-const MIN_SCORE_A = 65;
-const MIN_SCORE_B = 13;
+// 2026-09-24：改從 scripts/lib/liveReplica.ts 取（verify-strategy.ts 會比對 route.ts）。
+const MIN_SCORE_A = LIVE.STRONG_THRESHOLD;
+const MIN_SCORE_B = LIVE.STRONG_THRESHOLD_B;
 const SLIP = 0.0003;
 // 進場冷卻：同一檔幣在這麼多根之內不重複進場。用來近似線上的 symbol 鎖，
 // 但**不依賴出場時間**——依賴的話成對比較就破功了（見檔頭說明 1）。
@@ -55,9 +58,11 @@ const ENTRY_COOLDOWN_BARS = 24;
 // 每筆訊號往後看的最大根數。要夠長才不會讓「讓贏家跑久一點」的政策被
 // 資料長度截斷（那會系統性低估它們）。
 export const FORWARD_BARS = 200;
-// 掛單等待成交的窗口。route.ts 的 WAITING_EXPIRY_HOURS = 8（1h K 線 → 8 根），
-// 超過就取消——這是三分之二訊號從未成交的來源。
-export const WAIT_BARS = 8;
+// 掛單等待成交的窗口。2026-09-24 以前這裡是 8，註解寫「route.ts 的
+// WAITING_EXPIRY_HOURS = 8」——那個常數只是抓 K 線的後備窗口；真正決定撤單的是
+// WAITING_EXPIRY_BARS = 4（route.ts 與 tradeBridge.ts 都是）。多給一倍時間成交，
+// 會把「沒回調就跑掉」的單算成成交。
+export const WAIT_BARS = LIVE.WAITING_EXPIRY_BARS;
 
 // ── 線上實際參數（照抄，不是重新設計）──────────────────────────
 //   TP1_PARTIAL_FRACTION = 0.5          monitorMath.ts
@@ -125,43 +130,60 @@ export function rollingAtr(candles: Candle[], period = 14): number[] {
   return out;
 }
 
-export function derive4h(c: Candle[]): Candle[] {
-  const out: Candle[] = [];
-  const rem = c.length % 4;
-  for (let i = rem === 0 ? 0 : rem; i + 3 < c.length; i += 4) {
-    const g = c.slice(i, i + 4);
-    out.push({
-      openTime: g[0].openTime, open: g[0].open,
-      high: Math.max(...g.map(x => x.high)), low: Math.min(...g.map(x => x.low)),
-      close: g[3].close, volume: g.reduce((s, x) => s + x.volume, 0), closeTime: g[3].closeTime,
-    });
-  }
-  return out;
+// 2026-09-24：原本以陣列長度對齊（`c.length % 4`），拼出來的 4H 棒不在 UTC 4H
+// 邊界上，跟幣安真實 4H 不同；改用 liveReplica 的 UTC 對齊版本。名字保留給既有呼叫端。
+export const derive4h = aggregate4h;
+
+// 同一個 1H 陣列只拼一次 4H（regimeAt 會被逐根呼叫）
+const fourHCache = new WeakMap<Candle[], FourHView>();
+function fourHOf(c: Candle[]): FourHView {
+  let v = fourHCache.get(c);
+  if (!v) { v = makeFourHView(aggregate4h(c)); fourHCache.set(c, v); }
+  return v;
 }
 
+/**
+ * 無狀態的 regime 標籤（18-23 一律 transitional，沒有遲滯）。給只需要分類的
+ * 呼叫端用；要重現線上進場請用 collectEntries（它有遲滯）。
+ *
+ * 2026-09-24 以前：門檻是 >25／<20（線上是 ≥23／≤18），而且註解寫「540 根 4H」
+ * 實際切的是 540 根 1H → 只有 135 根 4H 餵給 ADX。現在只吃 T 時點已收盤的 4H，
+ * 最多 540 根。
+ */
 export function regimeAt(c: Candle[], i: number): 'trending' | 'ranging' | 'transitional' {
-  const s = Math.max(0, i - WINDOW_4H + 1);
-  const { adx: a } = adx(derive4h(c.slice(s, i + 1)), 14);
-  if (isNaN(a)) return 'ranging';
-  if (a > 25) return 'trending';
-  if (a < 20) return 'ranging';
-  return 'transitional';
+  return regimeFromAdx(adx4hAt(fourHOf(c), c[i].closeTime + 1));
 }
 
 export interface Entry { symbol: string; sig: TradingSignal; idx: number }
 
+/**
+ * 重現線上 1H 進場：regime 遲滯、4H EMA200 bias 傳進 generateSignals、只有 1H 一個
+ * 時框時的 confluence（4H 同向或中性才放行）。2026-09-24 以前 htfBias 傳 null、
+ * 沒有遲滯也沒有 confluence——跑的是一個線上從來不會執行的進場集合。
+ */
 export function collectEntries(symbol: string, candles: Candle[]): Entry[] {
   const out: Entry[] = [];
+  const v4 = fourHOf(candles);
+  const tracker = new RegimeTracker();
   let lastEntryIdx = -Infinity;
   for (let i = WARMUP; i < candles.length - 1; i++) {
+    const T = candles[i].closeTime + 1;
+    const a = adx4hAt(v4, T);
+    if (isNaN(a)) continue;
+    const regime = tracker.next(a); // 遲滯狀態每根都推進，不能被冷卻跳過
     if (i - lastEntryIdx < ENTRY_COOLDOWN_BARS) continue;
-    const regime = regimeAt(candles, i);
     if (regime === 'transitional') continue;
     const w = candles.slice(Math.max(0, i - WINDOW_1H + 1), i + 1);
-    const sigs = regime === 'ranging'
-      ? generateMeanReversionSignals(symbol, '1h', w).filter(s => s.score >= MIN_SCORE_B)
-      : generateSignals(symbol, '1h', w, null, regime).filter(s => s.score >= MIN_SCORE_A);
-    const best = sigs.sort((a, b) => b.score - a.score)[0];
+    let best: TradingSignal | undefined;
+    if (regime === 'ranging') {
+      best = generateMeanReversionSignals(symbol, '1h', w).filter(s => s.score >= MIN_SCORE_B)
+        .sort((x, y) => y.score - x.score)[0];
+    } else {
+      const bias = ema200Bias(closes4hWithForming(v4, T, candles[i].close, 250));
+      best = generateSignals(symbol, '1h', w, bias, regime).filter(s => s.tier || s.score >= MIN_SCORE_A)
+        .sort((x, y) => y.score - x.score)[0];
+      if (best && !(bias === null || bias === best.direction)) continue; // confluence
+    }
     if (!best) continue;
     const slipped = best.direction === 'LONG' ? best.entry * (1 + SLIP) : best.entry * (1 - SLIP);
     out.push({ symbol, sig: { ...best, entry: slipped }, idx: i });
@@ -199,6 +221,7 @@ async function main(): Promise<void> {
   const reasonByPolicy = new Map<string, Map<string, number>>(POLICIES.map(p => [p.name, new Map()]));
   let skippedOpen = 0;
   let neverFilled = 0;
+  const baseNetR: number[] = []; // 基準政策扣手續費＋滑價後的 R（回答「賺不賺錢」用；政策比較仍用毛 R）
 
   for (const symbol of syms) {
     process.stdout.write(`  ${symbol} ... `);
@@ -211,7 +234,6 @@ async function main(): Promise<void> {
     let used = 0;
     for (const e of entries) {
       const isLong = e.sig.direction === 'LONG';
-      const fwd = candles.slice(e.idx + 1, e.idx + 1 + FORWARD_BARS);
 
       // ── 先模擬掛單成交 ──
       // 訊號的 entry 是掛在現價下方（做多）等回調的**限價單**，不是市價。
@@ -221,30 +243,30 @@ async function main(): Promise<void> {
       // 原因就是「沒回調就跑掉」的單在真實世界是取消，在模擬裡卻變成
       // 「已經用更好的價格進場」直接獲利，把整個結果灌爆。
       // 真實資料的佐證：237 筆有訊號、只有 78 筆有結果，三分之二沒成交。
-      let fillIdx = -1;
-      for (let k = 0; k < Math.min(WAIT_BARS, fwd.length); k++) {
-        const c = fwd[k];
-        if (isLong ? c.low <= e.sig.entry : c.high >= e.sig.entry) { fillIdx = k; break; }
-      }
-      if (fillIdx < 0) { neverFilled++; continue; }
-
-      const bars: ExitBar[] = fwd.slice(fillIdx + 1).map(c => ({ high: c.high, low: c.low, close: c.close }));
-      const a = atr.slice(e.idx + 1 + fillIdx + 1, e.idx + 1 + FORWARD_BARS);
-      if (bars.length < 30) continue; // 往後資料不足，任何政策都比不準
-
-      const input = {
+      //
+      // 2026-09-24：改用 liveReplica 的共用版本，補上兩件事——
+      //   成交前先碰到 TP1 → 取消（route.ts cancel_tp1_direct），以前會變成之後
+      //     回調才成交的單；
+      //   成交那一根若也碰到止損 → 判止損。以前出場從「成交的下一根」開始走，
+      //     那一根被忽略，而限價單正是在回調時成交、那一根最容易順便打到止損。
+      const lv = {
         entry: e.sig.entry, stopLoss: e.sig.stopLoss,
-        tp1: e.sig.takeProfits[0], tp2: e.sig.takeProfits[1] ?? e.sig.takeProfits[0],
-        isLong, bars, atr: a,
+        tp1: e.sig.takeProfits[0], tp2: e.sig.takeProfits[1] ?? e.sig.takeProfits[0], isLong,
       };
-      const results = POLICIES.map(p => ({ p, o: simulateExit(input, p) }));
+      const fill = simulateFill(candles, e.idx, lv, false);
+      if (fill.kind !== 'filled') { neverFilled++; continue; }
+      if (candles.length - fill.idx < 30) continue; // 往後資料不足，任何政策都比不準
+
+      const results = POLICIES.map(p => ({ p, o: simulateExitAfterFill(candles, atr, fill.idx, fill.price, lv, false, p, FORWARD_BARS) }));
       // 只要有任何一個政策沒走完，這筆就整批排除——成對比較必須每個政策
       // 都拿到同一批樣本，否則就是在比不同的東西。
-      if (results.some(r => r.o.reason === 'open')) { skippedOpen++; continue; }
+      if (results.some(r => r.o === null)) { skippedOpen++; continue; }
+      const riskPct = Math.abs(fill.price - lv.stopLoss) / fill.price;
       for (const { p, o } of results) {
-        rByPolicy.get(p.name)!.push(o.r);
+        rByPolicy.get(p.name)!.push(o!.grossR);
+        if (p.name === BASELINE.name) baseNetR.push(o!.grossR - tradeCostR(riskPct, false, o!.reason, o!.tp1Hit));
         const m = reasonByPolicy.get(p.name)!;
-        m.set(o.reason, (m.get(o.reason) ?? 0) + 1);
+        m.set(o!.reason, (m.get(o!.reason) ?? 0) + 1);
       }
       used++;
     }
@@ -261,6 +283,10 @@ async function main(): Promise<void> {
 
   console.log('\n' + '─'.repeat(70));
   console.log(`  基準：${BASELINE.name}   淨 ${f(netOf(baseR))}R   每筆 ${f(netOf(baseR) / n, 3)}R`);
+  // 上面是毛 R（政策之間的成對比較不受成本影響，用毛 R 比較乾淨）。
+  // 要回答「賺不賺錢」得看扣掉手續費＋滑價之後的這一列——未含資金費率，
+  // 完整版見 scripts/verify-strategy.ts。
+  console.log(`  　扣手續費＋滑價後：淨 ${f(netOf(baseNetR))}R   每筆 ${f(netOf(baseNetR) / (baseNetR.length || 1), 3)}R`);
   const bm = reasonByPolicy.get(BASELINE.name)!;
   console.log(`  出場分佈：${Array.from(bm.entries()).sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k}=${c}`).join('  ')}`);
   console.log('─'.repeat(70));

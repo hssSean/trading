@@ -59,6 +59,8 @@ npm run audit-invariants   # trades 表自己跟自己矛盾的地方（純 Supa
 npm run audit-exits     # 拿幣安真實成交對帳 DB 的損益紀錄
 npm run audit-close-fills  # 止損止盈觸發後「真的平乾淨了嗎」（平過頭／沒平乾淨）
 npm run funnel-verdict  # 各風控濾網到底在保護還是在害（含悲觀覆蓋率把關）
+npm run verify-strategy [月數] [幣數]   # 策略扣成本後能不能賺錢；先驗回測工具與線上是否分岔
+
 npx tsx scripts/drawdown-threshold.ts   # 用 bootstrap 訂回撤門檻
 npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料，預設試跑
 npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的悲觀值，預設試跑
@@ -114,6 +116,9 @@ npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的�
     - **⚠ 2026-09-20 發現：那一整個月的悲觀值本身就是假的，不要相信 2026-09-20 之前的任何漏斗判語。** `SHADOW_PESSIMISTIC` 於 2026-08-26 因 CPU 改成預設關閉，但 `simulateShadow` 關閉時**仍然會寫 `pessResult`**——樂觀軌跡結案時直接複製過去。於是 `netRPess ≡ netR`，「兩端同號」永遠成立，把關等於不存在。報表上 `circuit_breaker` −7.08／−7.08、`btc_direction` −7.00／−7.00 兩端完全同值就是這個簽名：**同值不是「結論穩健」，是「根本沒算」**。
     - 已修（`src/lib/shadowSim.ts`）：悲觀軌跡改預設開啟（成本是對已抓回的 K 線多跑一次純比較迴圈，微秒級；貴的是 `fetchCandles` 的 I/O，兩條軌跡本來就共用）；關閉時一個欄位都不寫，寧可覆蓋率 0 也不要假數字；`EXPIRED` 補上 pess 欄位（兩邊 R 都是 0，本來就該算進覆蓋率，`score_gate` 只有 49% 主因是這個）。Redis 既有的 75 筆假值已用 `scripts/reset-shadow-pess.ts --apply` 清掉。
     - **覆蓋率要約兩週才會重建。在那之前任何濾網都不要動。**
+  - **2026-09-24 獲利驗證：扣成本後每筆 −0.055R（t=−2.40，12 個月 n=2079），策略 B −0.514R（t=−4.34）。** 毛邊際 ~+0.02R 小於成本 ~0.08R。詳見 `docs/ANALYSIS-2026-09-24-策略獲利能力驗證.md`。
+  - **回測規則只有一份：`scripts/lib/liveReplica.ts`。** 不要再在腳本裡複製 regime／掛單／出場邏輯——2026-09-24 查出 backtest／exit-compare 的複製品九處跟線上分岔。
+  - **訊號與 regime 只吃已收盤 K 棒**（`closedCandlesOnly`）。快取以最後一根 openTime 為 key，吃形成中 K 棒會把「開盤幾分鐘」的答案凍結整根（42% 時點訊號不同）。
   - **目前狀態：不要調參。** 真實成交 n=78 每筆 −0.081R、t=−0.55，跟三層模擬結論一致（測不出邊際）。檢定力 sd=1.31，偵測 +0.1R/筆 需 n≈680。詳見 `docs/ANALYSIS-2026-08-30-真實成交對帳.md`。
   - **止損距離下限也測過了，無效（2026-09-07）。** 策略 B 沒有下限、止損可以近到 0.103%，看起來很像該修——但 clamp／skip 兩種修法各四個門檻全部 `|t| < 1`，而且 3個月×8檔時最強的變體 t=2.59，6個月×15檔重跑後掉到 t=−0.02 且符號翻面。要動之前先讀 `docs/ANALYSIS-2026-09-07-止損距離下限.md`；那份也記了一個容易誤讀的陷阱：報表的 `n=1473` 是假的，真正受影響的只有 22–77 筆（其餘訊號對成對差異貢獻 0，同時放大 n 又縮小 sd，t 值反而不動）。
   - **S/R 阻力位測不出資訊量，TP1 那段夾持不用救（2026-09-07B）。** `buildSignalLevels` 的「TP1 被最近阻力夾住」對 1h/4h/1d 是**死碼**——swing 分支的 `tp1Max` 與 `MIN_RR_SWING` 同為 2.0R，`max(min(阻力,2R),2R) ≡ 2R`，而系統 98% 的單是 1h。看起來很該修，但置換檢定（n=85，洗牌 3000 次）三個指標 p = 0.74／0.20／0.14 全不顯著，觸及率真實值還**低於**隨機。詳見 `docs/ANALYSIS-2026-09-07B-阻力位資訊量.md`，重跑 `ENV_FILE=env.txt npx tsx scripts/sr-mechanism.ts`。**這關掉了第五個參數家族。**

@@ -176,6 +176,13 @@ async function main(): Promise<void> {
 
         if (fillIdx < 0) { slot.r.set(p.name, 0); continue; }
 
+        // 2026-09-24（verify-strategy.ts B6）：成交那一根若也碰到這個政策的止損，
+        // 判止損。原本出場從下一根才開始走，那一根被忽略——而止損越近越容易在
+        // 成交那根就被掃到，忽略它會系統性偏袒「近止損」的政策。
+        const fb = fwd[fillIdx];
+        const fillBarStop = isLong ? fb.low <= sl : fb.high >= sl;
+        if (fillBarStop) { slot.r.set(p.name, -1 - ROUND_TRIP_FEE_PCT / distPct); continue; }
+
         const bars: ExitBar[] = fwd.slice(fillIdx + 1).map(c => ({ high: c.high, low: c.low, close: c.close }));
         const a = atr.slice(e.idx + 1 + fillIdx + 1, e.idx + 1 + FORWARD_BARS);
         if (bars.length < 30) { usable = false; break; }

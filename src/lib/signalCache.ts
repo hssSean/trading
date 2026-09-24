@@ -39,6 +39,21 @@ export interface SignalCacheEntry {
   rejected?: RejectedCandidate;
 }
 
+/**
+ * 丟掉還在跑的最後一根 K 棒（closeTime 還沒到）。
+ *
+ * fetchCandles 回傳的最後一根是形成中的 K 棒。generateSignals 的 price／RSI／
+ * BB／EMA 都吃最後一根，所以輸入含形成中 K 棒時，同一根 K 棒的不同時刻會
+ * 算出不同訊號——而下面的快取以最後一根的 openTime 為 key，會把「這根才開
+ * 幾分鐘」那一刻的答案沿用到整根結束（scripts/verify-strategy.ts 檢查 L1）。
+ * 只餵已收盤 K 棒，快取的前提「K 棒沒變 → 輸出不變」才成立，回測量到的也
+ * 才會是線上跑的同一個策略。
+ */
+export function closedCandlesOnly(candles: Candle[], now: number): Candle[] {
+  if (candles.length === 0) return candles;
+  return candles[candles.length - 1].closeTime >= now ? candles.slice(0, -1) : candles;
+}
+
 export function isSignalCacheHit(
   cached: SignalCacheEntry | undefined,
   candles: Candle[],

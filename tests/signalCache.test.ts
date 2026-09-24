@@ -5,6 +5,7 @@ import {
   setSignalCache,
   cloneSignals,
   freshenCachedSignals,
+  closedCandlesOnly,
   _resetSignalCache,
   type SignalCacheEntry,
 } from '../src/lib/signalCache';
@@ -127,5 +128,42 @@ describe('freshenCachedSignals', () => {
     const second = freshenCachedSignals(getSignalCache('BTCUSDT', '1h')!.signals);
     expect(second[0].reasons).toEqual(['original reason']);
     expect(second[0].tier).toBeUndefined();
+  });
+});
+
+// 2026-09-24（scripts/verify-strategy.ts 檢查 L1）：快取以最後一根 openTime 為 key，
+// 所以餵給 generateSignals 的必須是已收盤 K 棒——否則同一根 K 棒的不同時刻會算出
+// 不同訊號，而快取只留下「開盤幾分鐘」那一刻的答案。
+describe('closedCandlesOnly', () => {
+  const H = 3_600_000;
+  const bar = (openTime: number): Candle =>
+    ({ openTime, open: 1, high: 1, low: 1, close: 1, volume: 1, closeTime: openTime + H - 1 });
+
+  it('drops the still-forming last candle', () => {
+    const now = 10 * H + 5 * 60_000; // 第 10 根開盤 5 分鐘
+    const cs = [bar(8 * H), bar(9 * H), bar(10 * H)];
+    expect(closedCandlesOnly(cs, now).map(c => c.openTime)).toEqual([8 * H, 9 * H]);
+  });
+
+  it('keeps everything when the last candle has already closed', () => {
+    const now = 11 * H; // 第 10 根剛收盤、新的還沒抓回來
+    const cs = [bar(8 * H), bar(9 * H), bar(10 * H)];
+    expect(closedCandlesOnly(cs, now)).toHaveLength(3);
+  });
+
+  it('treats closeTime === now as still forming (closeTime is the last ms of the bar)', () => {
+    const cs = [bar(9 * H), bar(10 * H)];
+    expect(closedCandlesOnly(cs, 11 * H - 1)).toHaveLength(1);
+  });
+
+  it('makes the cache key stable across a bar: same input all hour → same output', () => {
+    const early = [bar(8 * H), bar(9 * H), { ...bar(10 * H), close: 1.0 }];
+    const late = [bar(8 * H), bar(9 * H), { ...bar(10 * H), close: 1.5 }];
+    const now = 10 * H + 30 * 60_000;
+    expect(closedCandlesOnly(early, now)).toEqual(closedCandlesOnly(late, now));
+  });
+
+  it('handles an empty array', () => {
+    expect(closedCandlesOnly([], Date.now())).toEqual([]);
   });
 });

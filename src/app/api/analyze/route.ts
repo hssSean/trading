@@ -10,7 +10,7 @@ import { calcPositionPlan, formatPlanLine, tierRiskMultiplier, MAX_TOTAL_RISK_PC
 import { clampAutoCloseAfterTp1, walkTpSl, deriveCloseReason, updateMfeMae, calcSimpleAtr, calcDrawdown, blendTp1PartialPnl, TP1_PARTIAL_FRACTION, applyStopSlippage, applyFundingRateCrowdingPenalty, type EquityPoint, type DrawdownState } from '@/lib/monitorMath';
 import { fetchCandlesCached } from '@/lib/candleCache';
 import { is4hBarUnchanged, getRegimeCache, setRegimeCache, type RegimeCacheEntry } from '@/lib/regimeCache';
-import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals } from '@/lib/signalCache';
+import { isSignalCacheHit, getSignalCache, setSignalCache, cloneSignals, freshenCachedSignals, closedCandlesOnly } from '@/lib/signalCache';
 import { startTimeStopShadow, advanceTimeStopShadow, type TimeStopShadow, type TimeStopTrigger } from '@/lib/timeStopShadow';
 import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib/cancelShadow';
 import { shadowChanged, snapshot } from '@/lib/shadowWrite';
@@ -2462,7 +2462,13 @@ export async function GET(req: NextRequest) {
         // Only ADX is needed here — computing full indicators (EMA200/MACD/BB/…)
         // over 540 bars every scan was already trimmed in an earlier pass;
         // cacheHit trims the ADX calc itself down to once per 4H bar.
-        symbolAdx = cacheHit ? cacheHit.adx : (calcAdx(fourHC, 14).adx ?? NaN);
+        //
+        // 2026-09-24（scripts/verify-strategy.ts 檢查 L2）：只吃已收盤的 4H。fourHC 的
+        // 最後一根是形成中的 K 棒，而 regimeCache 以它的 openTime 為 key——含它一起算，
+        // regime 就是由「這根 4H 開盤後第一次掃描」那幾分鐘的狀態決定、再沿用 4 小時
+        // （實測 3.2% 的時點開盤 vs 收盤前落在不同 regime）。去掉它之後快取的前提
+        // 「最後一根 openTime 沒變 → 輸入沒變」才成立。
+        symbolAdx = cacheHit ? cacheHit.adx : (calcAdx(closedCandlesOnly(fourHC, Date.now()), 14).adx ?? NaN);
         if (!isNaN(symbolAdx)) {
           regimeDetermined = true;
           if (symbolAdx >= 23)      symbolRegime = 'trending';
@@ -2487,7 +2493,7 @@ export async function GET(req: NextRequest) {
         if (cacheHit) {
           symbolAtrPct = cacheHit.atrPct;
         } else if (fourHC && fourHC.length >= 30) {
-          const atrHistory = calcAtrHistory(fourHC);
+          const atrHistory = calcAtrHistory(closedCandlesOnly(fourHC, Date.now())); // 同上 L2：跟 ADX 一起被快取 4 小時
           if (atrHistory.length >= 2) {
             const currentAtr4h = atrHistory[atrHistory.length - 1];
             symbolAtrPct = calcAtrPercentile(currentAtr4h, atrHistory.slice(0, -1));
@@ -2524,10 +2530,11 @@ export async function GET(req: NextRequest) {
         try {
           if (!candleCache.has(entryTf)) {
             const tFetchB = timing.begin();
-            candleCache.set(entryTf, await fetchCandles(symbol, entryTf, 200));
+            candleCache.set(entryTf, await fetchCandles(symbol, entryTf, 201));
             timing.mark(`fetch:${entryTf}`, tFetchB);
           }
-          const candles = candleCache.get(entryTf)!;
+          // 2026-09-24（scripts/verify-strategy.ts 檢查 L1）：只吃已收盤 K 棒，見下方策略 A 的說明。
+          const candles = closedCandlesOnly(candleCache.get(entryTf)!, Date.now());
           const tGenB   = timing.begin();
           const sigs    = generateMeanReversionSignals(symbol, entryTf, candles);
           timing.mark('signalsB', tGenB);
@@ -2540,10 +2547,22 @@ export async function GET(req: NextRequest) {
           try {
             if (!candleCache.has(tf)) {
               const tFetch = timing.begin();
-              candleCache.set(tf, await fetchCandles(symbol, tf, 200));
+              // 201 = 丟掉形成中那根之後剩 200 根，跟原本的輸入長度一樣
+              candleCache.set(tf, await fetchCandles(symbol, tf, 201));
               timing.mark(`fetch:${tf}`, tFetch);
             }
-            const candles = candleCache.get(tf)!;
+            // 2026-09-24（scripts/verify-strategy.ts 檢查 L1）：只吃已收盤 K 棒。
+            //
+            // fetchCandles 的最後一根是形成中的 K 棒，generateSignals 的 price／RSI／BB／
+            // EMA 都吃它；而下面的 signalCache 以最後一根的 openTime 為 key——所以以前
+            // 每根 K 棒第一次掃描（才開幾分鐘）算出的訊號，會被沿用到整根結束。實測
+            // 真實 1H K 線 42% 的時點「開盤 3 分鐘」與「收盤前」訊號不同，其中一成多是
+            // 收盤時才成立、線上永遠看不到的訊號。等於線上跑的是一個「用幾乎空白的
+            // K 棒判斷」的策略，回測量的是另一個。
+            //
+            // 現在訊號在 K 棒收盤後的第一次掃描成立（延遲最多一個掃描週期），快取的
+            // 前提「K 棒沒變 → 輸出不變」也才真的成立。
+            const candles = closedCandlesOnly(candleCache.get(tf)!, Date.now());
 
             // HTF bias: fetch higher TF once (cached), compute EMA200 direction
             let htfBias: 'LONG' | 'SHORT' | null = null;
