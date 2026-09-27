@@ -16,7 +16,8 @@
     "live-runner": "npx tsx scripts/live-runner.ts",
     "test": "vitest run",
     "audit-invariants": "npx tsx scripts/audit-invariants.ts",
-    "verify-strategy": "npx tsx scripts/verify-strategy.ts"
+    "verify-strategy": "npx tsx scripts/verify-strategy.ts",
+    "strategy-candidates": "npx tsx scripts/strategy-candidates.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",

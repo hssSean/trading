@@ -117,6 +117,7 @@ npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的�
     - 已修（`src/lib/shadowSim.ts`）：悲觀軌跡改預設開啟（成本是對已抓回的 K 線多跑一次純比較迴圈，微秒級；貴的是 `fetchCandles` 的 I/O，兩條軌跡本來就共用）；關閉時一個欄位都不寫，寧可覆蓋率 0 也不要假數字；`EXPIRED` 補上 pess 欄位（兩邊 R 都是 0，本來就該算進覆蓋率，`score_gate` 只有 49% 主因是這個）。Redis 既有的 75 筆假值已用 `scripts/reset-shadow-pess.ts --apply` 清掉。
     - **覆蓋率要約兩週才會重建。在那之前任何濾網都不要動。**
   - **2026-09-24 獲利驗證：扣成本後每筆 −0.055R（t=−2.40，12 個月 n=2079），策略 B −0.514R（t=−4.34）。** 毛邊際 ~+0.02R 小於成本 ~0.08R。詳見 `docs/ANALYSIS-2026-09-24-策略獲利能力驗證.md`。
+  - **2026-09-27 決定：修改不換。策略 B 與做空預設關閉**（`ENABLE_STRATEGY_B=1`／`ALLOW_SHORT=1` 可開）。修改後 −0.007R/筆、CI 跨 0，仍測不出正邊際。另外 10 種趨勢跟隨候選在 4.7 年 × 30 檔上全部沒過事先訂的標準，純做多的獲利集中在 2023–24 牛市。**不要再試「另一組技術指標」**，詳見 `docs/ANALYSIS-2026-09-27-修改還是換策略.md`，重跑 `npm run strategy-candidates`。
   - **回測規則只有一份：`scripts/lib/liveReplica.ts`。** 不要再在腳本裡複製 regime／掛單／出場邏輯——2026-09-24 查出 backtest／exit-compare 的複製品九處跟線上分岔。
   - **訊號與 regime 只吃已收盤 K 棒**（`closedCandlesOnly`）。快取以最後一根 openTime 為 key，吃形成中 K 棒會把「開盤幾分鐘」的答案凍結整根（42% 時點訊號不同）。
   - **目前狀態：不要調參。** 真實成交 n=78 每筆 −0.081R、t=−0.55，跟三層模擬結論一致（測不出邊際）。檢定力 sd=1.31，偵測 +0.1R/筆 需 n≈680。詳見 `docs/ANALYSIS-2026-08-30-真實成交對帳.md`。

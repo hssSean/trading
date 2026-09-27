@@ -75,6 +75,20 @@ const WAITING_EXPIRY_BARS  = 4;              // spec §3-A: 掛單有效期最�
 // 太保守，導致機制實質死碼」的問題。
 const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.5;
 
+// 2026-09-27（docs/ANALYSIS-2026-09-27-修改還是換策略.md）：策略 B 與做空預設關閉。
+//
+// 策略 B：12 個月 × 15 檔貼齊線上規則的模擬，扣成本後每筆 −0.514R（t=−4.34，n=93），
+// 整份驗證裡唯一強烈顯著的分組。盤整（ranging）時段因此不發新訊號，比照 transitional。
+//
+// 做空：現有策略做空 −0.069R（t=−2.30），另外 7 個趨勢跟隨候選在 4.7 年 × 15 檔上
+// 做空全部為負（4 個顯著）——8 個結構不同的策略方向一致，是整輪測試最穩定的訊號。
+// 被擋的做空仍走 short_disabled 影子模擬，之後若翻案看得出來。
+//
+// 兩者都不是「讓策略賺錢」的修法（停 B＋停空後模擬淨 R 約 −0.01～+0.04R，仍測不出
+// 正邊際），是把確定在虧的部分拿掉。要重新打開：Vercel 設 ENABLE_STRATEGY_B=1／ALLOW_SHORT=1。
+const STRATEGY_B_ENABLED = process.env.ENABLE_STRATEGY_B === '1';
+const ALLOW_SHORT        = process.env.ALLOW_SHORT === '1';
+
 function tfBarMinutes(tf: string | null | undefined): number {
   switch (tf) {
     case '5m':  return 5;
@@ -1965,6 +1979,8 @@ const SHADOW_GATES = new Set([
   'confluence', 'no_entry_tf', 'btc_direction', 'btc_chaos', 'btc_pause', 'loss_cooldown',
   'same_dir_cap', 'total_risk_cap', 'circuit_breaker', 'event_filter', 'insert_failed',
   'score_gate',
+  // 2026-09-27：做空停用後持續量測「如果做了會怎樣」，之後要不要重開看這裡的淨 R
+  'short_disabled',
 ]);
 // live-runner 心跳超過這麼久沒更新就視為停止。它每 60 秒寫一次（Redis TTL
 // 240 秒），這裡取同一個數字——4 倍寫入間隔的緩衝，單輪延遲不會被誤判。
@@ -2525,6 +2541,9 @@ export async function GET(req: NextRequest) {
       // transitional → nothing | ranging+determined → Strategy B | else → Strategy A
       if (symbolRegime === 'transitional') {
         // ADX 20-25: no new signals; regime/adx4h will surface this in results
+      } else if (symbolRegime === 'ranging' && regimeDetermined && !STRATEGY_B_ENABLED) {
+        // 策略 B 關閉（見 STRATEGY_B_ENABLED）：盤整不發新訊號，比照 transitional。
+        // 不退回策略 A——A 在盤整裡原本只是 B 暫停時的後備，沒有獨立的驗證。
       } else if (symbolRegime === 'ranging' && regimeDetermined && !stratBPaused) {
         // Strategy B: mean reversion on entry TF only (BB + RSI crossover)
         try {
@@ -2821,6 +2840,8 @@ export async function GET(req: NextRequest) {
         { skipKey = 'confluence';     skipReason = `跳過 — 多框架未確認 (${agreeTFs}/2 TF 同向，4H bias: ${entryTfBias ?? '中性'})`; }
       else if (topStrong && !entrySignal)
         { skipKey = 'no_entry_tf';    skipReason = `跳過 — 進場時區 (${entryTf}) 無合格信號（最高 ${topStrong.score}分@${topStrong.timeframe}，4H bias: ${entryTfBias ?? '中性'}）`; }
+      else if (entrySignal && entrySignal.direction === 'SHORT' && !ALLOW_SHORT)
+        { skipKey = 'short_disabled'; skipReason = `做空已停用 — ${symbol}（見 ALLOW_SHORT，2026-09-27 驗證）`; }
       else if (entrySignal) {
         const isLargeCap = symbol === 'BTCUSDT' || symbol === 'ETHUSDT';
 

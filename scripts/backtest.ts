@@ -140,6 +140,7 @@ export function runBacktest(symbol: string, candles: Candle[]): SimTrade[] {
     if (isNaN(a)) continue;
     const regime = tracker.next(a); // 遲滯狀態每根都推進
     if (i <= busyUntilIdx || regime === 'transitional') continue;
+    if (regime === 'ranging' && !LIVE.STRATEGY_B_ENABLED) continue; // 策略 B 關閉：盤整不做
 
     const window1h = candles.slice(Math.max(0, i - WINDOW_1H + 1), i + 1);
     let sig: TradingSignal | undefined;
@@ -157,6 +158,7 @@ export function runBacktest(symbol: string, candles: Candle[]): SimTrade[] {
     }
     if (!sig) continue;
 
+    if (sig.direction === 'SHORT' && !LIVE.ALLOW_SHORT) continue; // 做空停用
     const isLong = sig.direction === 'LONG';
     let lv = { entry: sig.entry, stopLoss: sig.stopLoss, tp1: sig.takeProfits[0], tp2: sig.takeProfits[1] ?? sig.takeProfits[0], isLong };
     const market = shouldEnterAtMarket(sig, MIN_SCORE_A + 10, bias === sig.direction);

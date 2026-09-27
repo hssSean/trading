@@ -35,6 +35,10 @@ export const LIVE = {
   BIAS_HOLD_BARS: 12,
   STRAT_B_PAUSE_H: 24,
   BTC_PAUSE_H: 2,
+  // 2026-09-27（docs/ANALYSIS-2026-09-27-修改還是換策略.md）：線上預設關閉，
+  // route.ts 的 ENABLE_STRATEGY_B／ALLOW_SHORT 環境變數可以重新打開。
+  STRATEGY_B_ENABLED: false,
+  ALLOW_SHORT: false,
 };
 
 // ── 成本模型 ──────────────────────────────────────────────────────

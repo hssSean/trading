@@ -39,10 +39,8 @@
  *   - 幣種是用「今天」的成交量前 N 名回頭測（倖存者偏誤），偏向高估。
  */
 
-import axios from 'axios';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import type { Candle, TradingSignal } from '../src/types';
 import { generateSignals, generateMeanReversionSignals } from '../src/analysis/signals';
 import { adx, ema } from '../src/analysis/indicators';
@@ -61,82 +59,7 @@ const NSYM = Math.max(1, parseInt(process.argv[3] ?? '15', 10));
 const WARMUP_1H = 250;
 const WINDOW_1H = 200;
 
-// ════════════════════════════════════════════════════════════════════
-// 資料抓取（磁碟快取，重跑不必再打幣安）
-// ════════════════════════════════════════════════════════════════════
-const CACHE_DIR = join(tmpdir(), 'verify-strategy-cache');
-if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
-const api = axios.create({ baseURL: 'https://fapi.binance.com/fapi/v1', timeout: 20_000 });
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-async function getJson<T>(path: string, params: Record<string, unknown>): Promise<T> {
-  for (let a = 0; a < 4; a++) {
-    try { return (await api.get(path, { params })).data as T; }
-    catch (e) { if (a === 3) throw e; await sleep(1000 * (a + 1)); }
-  }
-  throw new Error('unreachable');
-}
-
-async function fetchKlines(symbol: string, interval: '1h' | '4h', startMs: number, endMs: number): Promise<Candle[]> {
-  const day = Math.floor(endMs / 86_400_000);
-  const file = join(CACHE_DIR, `${symbol}-${interval}-${startMs}-${day}.json`);
-  if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf-8'));
-  const step = interval === '1h' ? H : H4;
-  const out: Candle[] = [];
-  let from = startMs;
-  while (from < endMs) {
-    const rows = await getJson<unknown[][]>('/klines', { symbol, interval, startTime: from, limit: 1500 });
-    if (!rows.length) break;
-    for (const k of rows) {
-      const c: Candle = {
-        openTime: k[0] as number, open: +(k[1] as string), high: +(k[2] as string), low: +(k[3] as string),
-        close: +(k[4] as string), volume: +(k[5] as string), closeTime: k[6] as number,
-      };
-      if (c.closeTime < endMs) out.push(c); // 只收已收盤的
-    }
-    from = (rows[rows.length - 1][0] as number) + step;
-    if (rows.length < 1500) break;
-    await sleep(200);
-  }
-  const seen = new Set<number>();
-  const dedup = out.filter(c => (seen.has(c.openTime) ? false : (seen.add(c.openTime), true)));
-  writeFileSync(file, JSON.stringify(dedup), { encoding: 'utf-8' });
-  return dedup;
-}
-
-interface Funding { t: number; rate: number }
-async function fetchFunding(symbol: string, startMs: number, endMs: number): Promise<Funding[]> {
-  const day = Math.floor(endMs / 86_400_000);
-  const file = join(CACHE_DIR, `${symbol}-funding-${startMs}-${day}.json`);
-  if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf-8'));
-  const out: Funding[] = [];
-  let from = startMs;
-  while (from < endMs) {
-    const rows = await getJson<{ fundingTime: number; fundingRate: string }[]>('/fundingRate', { symbol, startTime: from, limit: 1000 });
-    if (!rows.length) break;
-    for (const r of rows) out.push({ t: r.fundingTime, rate: +r.fundingRate });
-    from = rows[rows.length - 1].fundingTime + 1;
-    if (rows.length < 1000) break;
-    await sleep(200);
-  }
-  writeFileSync(file, JSON.stringify(out), { encoding: 'utf-8' });
-  return out;
-}
-
-async function topSymbols(n: number): Promise<string[]> {
-  const [info, tick] = await Promise.all([
-    getJson<{ symbols: { symbol: string; status: string; contractType: string }[] }>('/exchangeInfo', {}),
-    getJson<{ symbol: string; quoteVolume: string }[]>('/ticker/24hr', {}),
-  ]);
-  const perp = new Set(info.symbols
-    .filter(s => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.symbol.endsWith('USDT'))
-    .map(s => s.symbol));
-  const EX = /^(USDC|BUSD|TUSD|USDP|FDUSD|DAI|EUR|GBP|AUD|BVOL|IBVOL|BEAR|BULL|UP|DOWN|3L|3S)/;
-  return tick
-    .filter(t => perp.has(t.symbol) && !EX.test(t.symbol.replace('USDT', '')))
-    .sort((a, b) => +b.quoteVolume - +a.quoteVolume)
-    .slice(0, n).map(t => t.symbol);
-}
+import { fetchKlines, fetchFunding, fundingBetween, topSymbols, CACHE_DIR, type Funding } from './lib/binanceData';
 
 // ════════════════════════════════════════════════════════════════════
 // 階段 1：量測工具先驗
@@ -166,6 +89,16 @@ function checkConstants(): void {
     const v = (live as Record<string, number | null>)[k];
     if (v != null && v !== LIVE[k]) {
       issue({ id: 'V0', sev: '🔴', where: 'scripts/verify-strategy.ts', what: `本腳本的 ${k}=${LIVE[k]} 與線上 ${v} 不符`, evidence: 'route.ts 原始碼' });
+    }
+  }
+  // 開關的預設值：route.ts 寫成 `=== '1'` 代表預設關閉
+  const routeDefaults = {
+    STRATEGY_B_ENABLED: !/const STRATEGY_B_ENABLED\s*=\s*process\.env\.ENABLE_STRATEGY_B === '1'/.test(route),
+    ALLOW_SHORT: !/const ALLOW_SHORT\s*=\s*process\.env\.ALLOW_SHORT === '1'/.test(route),
+  };
+  for (const k of ['STRATEGY_B_ENABLED', 'ALLOW_SHORT'] as const) {
+    if (routeDefaults[k] !== LIVE[k]) {
+      issue({ id: 'V1', sev: '🔴', where: 'scripts/lib/liveReplica.ts', what: `${k} 預設值與 route.ts 不一致（replica=${LIVE[k]}）`, evidence: '模擬的會是另一組訊號' });
     }
   }
   if (live.WAITING_EXPIRY_BARS_BRIDGE !== live.WAITING_EXPIRY_BARS) {
@@ -341,11 +274,6 @@ function buildBtcContext(c1: Candle[], v4: FourHView): BtcCtx {
   return { regimeAt, pauseLongUntil: pl, pauseShortUntil: ps, times };
 }
 
-function fundingBetween(f: Funding[], a: number, b: number): number {
-  let s = 0;
-  for (const x of f) if (x.t > a && x.t <= b) s += x.rate;
-  return s;
-}
 function fundingAt(f: Funding[], T: number): number {
   let r = 0;
   for (const x of f) { if (x.t <= T) r = x.rate; else break; }
@@ -379,6 +307,7 @@ function simulateSymbol(
 
     if (i <= busyUntilIdx) continue;
     if (regime === 'transitional') continue;
+    if (regime === 'ranging' && !LIVE.STRATEGY_B_ENABLED) continue; // 策略 B 關閉：盤整不做
 
     const w = c1.slice(i - WINDOW_1H + 1, i + 1);
     const recentB = bResults.slice(-2);
@@ -406,6 +335,7 @@ function simulateSymbol(
 
     const dir = sig.direction;
     if (T - lastSignalT < LIVE.COOLDOWN_H * H) { gate('cooldown'); continue; }
+    if (dir === 'SHORT' && !LIVE.ALLOW_SHORT) { gate('short_disabled'); continue; }
     if (!isLargeCap && btc && btcIdx) {
       const bi = btcIdx.get(T);
       const br = btc.regimeAt.get(T) ?? 'chaotic';
@@ -468,39 +398,7 @@ function simulateSymbol(
 // ════════════════════════════════════════════════════════════════════
 // 階段 3：統計
 // ════════════════════════════════════════════════════════════════════
-const mean = (a: number[]) => a.reduce((s, x) => s + x, 0) / (a.length || 1);
-const sd = (a: number[]) => { const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / Math.max(1, a.length - 1)); };
-const f = (x: number, d = 3) => (x >= 0 ? '+' : '') + x.toFixed(d);
-
-function rng(seed: number) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32); }
-function bootstrapCI(a: number[], iters = 10_000): [number, number] {
-  if (a.length < 2) return [NaN, NaN];
-  const r = rng(42);
-  const ms: number[] = [];
-  for (let k = 0; k < iters; k++) { let s = 0; for (let j = 0; j < a.length; j++) s += a[Math.floor(r() * a.length)]; ms.push(s / a.length); }
-  ms.sort((x, y) => x - y);
-  return [ms[Math.floor(iters * 0.025)], ms[Math.floor(iters * 0.975)]];
-}
-
-interface Summary { n: number; mean: number; t: number; ci: [number, number]; win: number; pf: number }
-function summarize(rs: number[]): Summary {
-  const n = rs.length;
-  const m = mean(rs), s = sd(rs);
-  const pos = rs.filter(x => x > 0).reduce((q, x) => q + x, 0);
-  const neg = -rs.filter(x => x < 0).reduce((q, x) => q + x, 0);
-  return { n, mean: m, t: n > 1 && s > 0 ? m / (s / Math.sqrt(n)) : 0, ci: bootstrapCI(rs), win: rs.filter(x => x > 0).length / (n || 1), pf: neg > 0 ? pos / neg : Infinity };
-}
-function row(label: string, rs: number[]): string {
-  if (rs.length === 0) return `  ${label.padEnd(18)} n=0`;
-  const s = summarize(rs);
-  return `  ${label.padEnd(18)} n=${String(s.n).padStart(4)}  每筆 ${f(s.mean).padStart(7)}R  t=${f(s.t, 2).padStart(6)}  95%CI [${f(s.ci[0])}, ${f(s.ci[1])}]  勝率 ${(100 * s.win).toFixed(1).padStart(5)}%  PF ${s.pf === Infinity ? '∞' : s.pf.toFixed(2)}  合計 ${f(rs.reduce((q, x) => q + x, 0), 1)}R`;
-}
-
-function maxDrawdownR(rs: number[]): number {
-  let eq = 0, peak = 0, dd = 0;
-  for (const r of rs) { eq += r; peak = Math.max(peak, eq); dd = Math.max(dd, peak - eq); }
-  return dd;
-}
+import { mean, sd, f, summarize, row, maxDrawdownR } from './lib/rstats';
 
 function realFills(): number[] | null {
   const files = readdirSync(process.cwd()).filter(x => /^audit-fabricated-exits-.*\.json$/.test(x)).sort();
