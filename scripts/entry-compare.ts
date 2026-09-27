@@ -28,6 +28,7 @@ import { fetchHistorical } from './backtest';
 import {
   rollingAtr, collectEntries, topSymbols, BASELINE, FORWARD_BARS,
 } from './exit-compare';
+import { LIVE, ENTRY_SLIP, tradeCostR } from './lib/liveReplica';
 
 const MONTHS = Math.max(1, parseInt(process.argv[2] ?? '3', 10));
 const NSYM = Math.max(1, parseInt(process.argv[3] ?? '8', 10));
@@ -42,16 +43,25 @@ interface EntryPolicy {
    * 只在 waitBars > 0 時有意義。
    */
   pullbackFraction: number;
+  /**
+   * 市價進場時止損／止盈要不要跟著平移（2026-09-27 加）。
+   * false = 止損留在結構位、風險距離變大（原本的模型）；
+   * true  = 三個價位一起平移、R 結構不變——這才是線上 shiftSignalToMarketEntry 的做法，
+   *         真實紀錄裡賺錢的「市價進場」單就是這一種。
+   */
+  shiftLevels?: boolean;
 }
 
 const POLICIES: EntryPolicy[] = [
-  { name: '現況：等完整回調 8 根', waitBars: 8, pullbackFraction: 1 },
-  { name: '等待縮短到 4 根', waitBars: 4, pullbackFraction: 1 },
+  // 2026-09-27：基準改成線上實際的 4 根（WAITING_EXPIRY_BARS）。原本寫 8 根，是 B2 那個錯。
+  { name: '現況：等完整回調 4 根', waitBars: 4, pullbackFraction: 1 },
+  { name: '等待延長到 8 根', waitBars: 8, pullbackFraction: 1 },
   { name: '等待延長到 16 根', waitBars: 16, pullbackFraction: 1 },
   { name: '等待延長到 24 根', waitBars: 24, pullbackFraction: 1 },
-  { name: '只等一半回調 8 根', waitBars: 8, pullbackFraction: 0.5 },
-  { name: '只等 1/4 回調 8 根', waitBars: 8, pullbackFraction: 0.25 },
-  { name: '直接市價進場', waitBars: 0, pullbackFraction: 0 },
+  { name: '只等一半回調 4 根', waitBars: 4, pullbackFraction: 0.5 },
+  { name: '只等 1/4 回調 4 根', waitBars: 4, pullbackFraction: 0.25 },
+  { name: '直接市價進場（止損不動）', waitBars: 0, pullbackFraction: 0 },
+  { name: '直接市價進場（價位平移）', waitBars: 0, pullbackFraction: 0, shiftLevels: true },
 ];
 
 const BASE = POLICIES[0].name;
@@ -61,7 +71,8 @@ async function main(): Promise<void> {
   console.log('='.repeat(72));
   console.log(`  進場政策比較  |  ${MONTHS} 個月  |  ${syms.length} 檔幣`);
   console.log(`  ${syms.map(s => s.replace('USDT', '')).join(' ')}`);
-  console.log('  出場規則固定為線上現況；沒成交的訊號記 0R');
+  console.log('  出場規則固定為線上現況；沒成交的訊號記 0R；R 已扣手續費＋滑價');
+  console.log(`  只含線上目前會發的訊號（策略 B：${LIVE.STRATEGY_B_ENABLED ? '開' : '關'}，做空：${LIVE.ALLOW_SHORT ? '開' : '關'}）`);
   console.log('='.repeat(72));
 
   // 以訊號為單位配對：每個政策一組 R，索引對齊同一個訊號
@@ -79,29 +90,34 @@ async function main(): Promise<void> {
 
     let counted = 0;
     for (const e of entries) {
+      // 2026-09-27：只看線上目前還會發的訊號（策略 B、做空已預設關閉）
+      if (e.sig.strategy === 'B' && !LIVE.STRATEGY_B_ENABLED) continue;
+      if (e.sig.direction === 'SHORT' && !LIVE.ALLOW_SHORT) continue;
       const isLong = e.sig.direction === 'LONG';
       const fwd = candles.slice(e.idx + 1, e.idx + 1 + FORWARD_BARS);
       if (fwd.length < 40) continue;   // 往後資料不足，所有政策都比不準
       const market = fwd[0].open;      // 訊號隔一根的開盤價 = 追市價會拿到的價
-      const sl = e.sig.stopLoss;
-      const tp1 = e.sig.takeProfits[0];
-      const tp2 = e.sig.takeProfits[1] ?? tp1;
 
       const perPolicy: Array<{ name: string; r: number; filled: boolean }> = [];
       for (const p of POLICIES) {
         // 掛單價：在「訊號原本的掛單價」與「市價」之間插值
         const limitPx = market + (e.sig.entry - market) * p.pullbackFraction;
+        const shift = p.shiftLevels ? market - e.sig.entry : 0;
+        const sl = e.sig.stopLoss + shift;
+        const tp1 = e.sig.takeProfits[0] + shift;
+        const tp2 = (e.sig.takeProfits[1] ?? e.sig.takeProfits[0]) + shift;
 
         let fillIdx = -1;
         let fillPx = 0;
         if (p.waitBars === 0) {
-          fillIdx = -1 + 1 - 1; // 市價：第 0 根就成交
-          fillIdx = 0;
-          fillPx = market;
+          fillIdx = 0; // 市價：第 0 根開盤成交，加進場滑價
+          fillPx = isLong ? market * (1 + ENTRY_SLIP) : market * (1 - ENTRY_SLIP);
         } else {
           for (let k = 0; k < Math.min(p.waitBars, fwd.length); k++) {
             const c = fwd[k];
             if (isLong ? c.low <= limitPx : c.high >= limitPx) { fillIdx = k; fillPx = limitPx; break; }
+            // 2026-09-27：成交前先碰到 TP1 → 線上會取消（cancel_tp1_direct）
+            if (isLong ? c.high >= tp1 : c.low <= tp1) break;
           }
         }
         // 沒成交 = 沒進場 = 0R（不是把這個訊號丟掉——丟掉就等於假裝
@@ -118,7 +134,11 @@ async function main(): Promise<void> {
         // 止損，忽略它會系統性偏袒「等回調」的政策（市價在開盤成交，不受影響）。
         const fb = fwd[fillIdx];
         const fillBarStop = p.waitBars > 0 && (isLong ? fb.low <= sl : fb.high >= sl);
-        if (fillBarStop) { perPolicy.push({ name: p.name, r: -1, filled: true }); continue; }
+        const riskPct = riskDist / fillPx;
+        // 2026-09-27：扣成本。市價進場付 taker、限價付 maker——兩種政策的差異
+        // 有一部分就是這個，毛 R 比不出來。
+        const cost = (reason: string, tp1Hit: boolean) => tradeCostR(riskPct, p.waitBars === 0, reason, tp1Hit);
+        if (fillBarStop) { perPolicy.push({ name: p.name, r: -1 - cost('stop', false), filled: true }); continue; }
 
         const bars: ExitBar[] = fwd.slice(fillIdx + 1).map(c => ({ high: c.high, low: c.low, close: c.close }));
         const a = atr.slice(e.idx + 1 + fillIdx + 1, e.idx + 1 + FORWARD_BARS);
@@ -130,7 +150,7 @@ async function main(): Promise<void> {
         );
         // 走不完的樣本不能當 0R（那會假裝它沒發生），整個訊號跳過
         if (o.reason === 'open') { perPolicy.push({ name: p.name, r: NaN, filled: true }); continue; }
-        perPolicy.push({ name: p.name, r: o.r, filled: true });
+        perPolicy.push({ name: p.name, r: o.r - cost(o.reason, o.tp1Hit), filled: true });
       }
 
       if (perPolicy.some(x => Number.isNaN(x.r))) continue;
