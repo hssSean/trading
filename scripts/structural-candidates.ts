@@ -26,6 +26,7 @@
 import type { Candle } from '../src/types';
 import { fetchKlines, fetchFunding, fundingBetween, type Funding } from './lib/binanceData';
 import { mean, sd, f, summarize, row, tStat, maxDrawdownR, bootstrapCI } from './lib/rstats';
+import { F1, F1_TAKER, F1_ENTRY_SLIP, f1Direction, f1EntryTime, atrSeries, simulateHold } from '../src/lib/f1Paper';
 
 const UNIVERSE = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'BNBUSDT', 'LTCUSDT',
   'LINKUSDT', 'AVAXUSDT', 'DOTUSDT', 'BCHUSDT', 'TRXUSDT', 'ETCUSDT', 'ATOMUSDT',
@@ -42,76 +43,50 @@ const FETCH_FROM = Date.UTC(2021, 3, 1);
 const START = Date.UTC(2022, 0, 1);
 const SPLIT = Date.UTC(2024, 6, 1);
 const H = 3_600_000, H4 = 4 * H, D = 24 * H;
-const TAKER = 0.0005, ENTRY_SLIP = 0.0003, STOP_SLIP = 0.0005;
+const TAKER = F1_TAKER, ENTRY_SLIP = F1_ENTRY_SLIP;
 
 interface Trade { symbol: string; entryT: number; exitT: number; dir: 1 | -1; grossR: number; netR: number }
 
-function atr(c: Candle[], n = 20): number[] {
-  const out = new Array(c.length).fill(NaN);
-  let s = 0;
-  for (let i = 0; i < c.length; i++) {
-    const tr = i === 0 ? c[i].high - c[i].low
-      : Math.max(c[i].high - c[i].low, Math.abs(c[i].high - c[i - 1].close), Math.abs(c[i].low - c[i - 1].close));
-    s += tr;
-    if (i >= n) {
-      const j = i - n;
-      s -= j === 0 ? c[0].high - c[0].low
-        : Math.max(c[j].high - c[j].low, Math.abs(c[j].high - c[j - 1].close), Math.abs(c[j].low - c[j - 1].close));
-    }
-    if (i >= n - 1) out[i] = s / n;
-  }
-  return out;
-}
+// 2026-09-28：ATR 與持倉模擬改用 src/lib/f1Paper.ts——route.ts 的 F1 前向紙上追蹤也用
+// 同一份，回測與前向結果才比得起來。
+const atr = (c: Candle[], n = 20) => atrSeries(c, n);
 
-/**
- * 通用持倉模擬：entryIdx 那根開盤進場，止損 stopDist，最多持有 holdBars 根
- * （最後一根收盤出場）。進場那根就碰到止損 → 判止損（悲觀）。
- */
 function holdTrade(symbol: string, c: Candle[], entryIdx: number, dir: 1 | -1, stopDist: number, holdBars: number, fund: Funding[]): { t: Trade; exitIdx: number } | null {
-  if (entryIdx >= c.length || !(stopDist > 0)) return null;
-  const entry = c[entryIdx].open * (1 + dir * ENTRY_SLIP);
-  const stop = entry - dir * stopDist;
-  let exitIdx = -1, exitPx = 0;
-  const last = Math.min(entryIdx + holdBars - 1, c.length - 1);
-  if (last < entryIdx + holdBars - 1) return null; // 資料尾端走不完
-  for (let k = entryIdx; k <= last; k++) {
-    const b = c[k];
-    if (k > entryIdx && (dir === 1 ? b.open <= stop : b.open >= stop)) { exitIdx = k; exitPx = b.open * (1 - dir * STOP_SLIP); break; }
-    if (dir === 1 ? b.low <= stop : b.high >= stop) { exitIdx = k; exitPx = stop * (1 - dir * STOP_SLIP); break; }
-  }
-  if (exitIdx < 0) { exitIdx = last; exitPx = c[last].close * (1 - dir * ENTRY_SLIP); }
-  const risk = Math.abs(entry - stop);
-  const riskPct = risk / entry;
-  const grossR = dir * (exitPx - entry) / risk;
-  const fr = fundingBetween(fund, c[entryIdx].openTime, c[exitIdx].closeTime);
-  const netR = grossR - (2 * TAKER) / riskPct - dir * fr / riskPct;
-  return { t: { symbol, entryT: c[entryIdx].openTime, exitT: c[exitIdx].closeTime, dir, grossR, netR }, exitIdx };
+  const r = simulateHold(c, entryIdx, dir, stopDist, holdBars, fund);
+  if (!r) return null;
+  return { t: { symbol, entryT: c[entryIdx].openTime, exitT: c[r.exitIdx].closeTime, dir, grossR: r.grossR, netR: r.netR }, exitIdx: r.exitIdx };
 }
 
 // ── F1：資金費率極端值反向 ──────────────────────────────────────
 interface F1Opt { lag: number; pHi: number; pLo: number; hold: number }
-const F1_DEFAULT: F1Opt = { lag: 0, pHi: 0.95, pLo: 0.05, hold: 18 };
+const F1_DEFAULT: F1Opt = { lag: 0, pHi: F1.P_HI, pLo: F1.P_LO, hold: F1.HOLD_BARS };
 function f1(symbol: string, c4: Candle[], fund: Funding[], o: F1Opt = F1_DEFAULT): Trade[] {
   const idx = new Map(c4.map((c, i) => [c.openTime, i]));
   const a = atr(c4);
   const out: Trade[] = [];
   let busyUntil = -1;
-  for (let k = 90; k < fund.length; k++) {
+  const isDefault = o.pHi === F1.P_HI && o.pLo === F1.P_LO;
+  for (let k = F1.WINDOW; k < fund.length; k++) {
     const t = fund[k].t, fr = fund[k].rate;
     if (t < START) continue;
-    const win = fund.slice(k - 90, k).map(x => x.rate).sort((x, y) => x - y);
-    const p95 = win[Math.min(win.length - 1, Math.floor(win.length * o.pHi))], p05 = win[Math.floor(win.length * o.pLo)];
-    let dir: 1 | -1 | 0 = 0;
-    if (fr >= Math.max(p95, 0.0005)) dir = -1;      // 做多太擁擠 → 反向做空
-    else if (fr <= Math.min(p05, -0.0002)) dir = 1; // 做空太擁擠 → 反向做多
+    const prior = fund.slice(k - F1.WINDOW, k).map(x => x.rate);
+    let dir: 1 | -1 | 0;
+    if (isDefault) dir = f1Direction(prior, fr); // 預設版本走共用規則（= 前向紙上追蹤）
+    else {
+      // 穩健性變體：只換百分位
+      const win = prior.sort((x, y) => x - y);
+      const hi = win[Math.min(win.length - 1, Math.floor(win.length * o.pHi))], lo = win[Math.floor(win.length * o.pLo)];
+      dir = fr >= Math.max(hi, F1.MIN_HI) ? -1 : fr <= Math.min(lo, F1.MAX_LO) ? 1 : 0;
+    }
     if (!dir) continue;
-    // 結算時間對齊 4H 邊界（00/08/16 UTC）；結算當下之後的第一根 4H 開盤進場
-    const bar = Math.ceil(t / H4) * H4 + o.lag * H4;
+    const bar = f1EntryTime(t) + o.lag * H4;
     const i = idx.get(bar);
     if (i == null || i <= busyUntil || i < 21) continue;
-    const r = holdTrade(symbol, c4, i, dir, 3 * a[i - 1], o.hold, fund);
+    const r = holdTrade(symbol, c4, i, dir, F1.STOP_ATR * a[i - 1], o.hold, fund);
     if (!r) continue;
-    out.push(r.t); busyUntil = r.exitIdx;
+    // 同一檔幣佔用到「最長持有期」結束，不看是否提早止損——前向追蹤要 72h 後才結算、
+    // 事前不知道有沒有提早出場，回測用同樣的規則兩邊才一致。
+    out.push(r.t); busyUntil = i + o.hold - 1;
   }
   return out;
 }

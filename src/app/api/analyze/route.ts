@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
-import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange } from '@/api/binance';
+import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange, fetchFundingHistory } from '@/api/binance';
+import { runF1Paper } from '@/lib/f1PaperRunner';
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import type { RejectedCandidate } from '@/analysis/signals';
@@ -3402,6 +3403,28 @@ export async function GET(req: NextRequest) {
   const tShadow = timing.begin();
   await processShadowTrades(shadowCandidates);
   timing.mark('processShadowTrades', tShadow);
+
+  // 2026-09-28：F1「資金費率極端值反向」前向紙上追蹤——只記錄、不下單。
+  // 規則與回測共用 src/lib/f1Paper.ts；判準與背景見 docs/ANALYSIS-2026-09-27B-結構性資訊候選.md。
+  // 每小時最多一次；純 I/O（54 檔費率每 4 小時抓一次、到期單才抓 K 線），失敗不影響主流程。
+  {
+    const rf1 = getRedis();
+    if (rf1 && await claimPeriodicSlot('f1-paper', 3600)) {
+      const tF1 = timing.begin();
+      try {
+        const s = await runF1Paper(rf1, {
+          fetchFundingHistory: (sym, limit, start) => fetchFundingHistory(sym, limit, start),
+          fetch4h: (sym, limit, start) => fetchCandles(sym, '4h', limit, 2, start),
+        });
+        if (s.detected || s.resolved || s.voided || s.errors) {
+          console.log(`[f1-paper] detected=${s.detected} resolved=${s.resolved} voided=${s.voided} errors=${s.errors}`);
+        }
+      } catch (e) {
+        console.error('[f1-paper] failed:', String(e).slice(0, 150));
+      }
+      timing.mark('f1Paper', tF1);
+    }
+  }
 
   // v2.1 §0: flush reject-funnel entries (single batched lpush per scan)
   if (funnelEntries.length > 0) {

@@ -191,6 +191,22 @@ export async function fetchFundingRate(symbol: string): Promise<number> {
   }
 }
 
+/**
+ * 已結算的資金費率歷史（依時間排序）。F1 前向紙上追蹤用（src/lib/f1PaperRunner.ts）。
+ * 跟上面 fetchFundingRate 不同：那個回「最近一次」的單一值、失敗回 0；這個失敗就丟錯，
+ * 讓呼叫端跳過這檔幣——拿 0 冒充歷史會讓百分位判斷整個錯掉。
+ */
+export async function fetchFundingHistory(
+  symbol: string, limit = 100, startTime?: number,
+): Promise<{ t: number; rate: number }[]> {
+  const res = await client.get('/fundingRate', {
+    params: { symbol, limit, ...(startTime !== undefined ? { startTime } : {}) },
+  });
+  return (res.data as { fundingTime: number; fundingRate: string }[])
+    .map(x => ({ t: x.fundingTime, rate: parseFloat(x.fundingRate) }))
+    .sort((a, b) => a.t - b.t);
+}
+
 // ── Open Interest change ─────────────────────────────────────
 // 2026-08-10：拒絕漏斗診斷後續清單 #7——未平倉合約(OI)變化率，用來輔助
 // 判斷「新資金進場」還是「空頭回補」。先做顯示（訊號分析依據多一條

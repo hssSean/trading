@@ -18,7 +18,8 @@
     "audit-invariants": "npx tsx scripts/audit-invariants.ts",
     "verify-strategy": "npx tsx scripts/verify-strategy.ts",
     "strategy-candidates": "npx tsx scripts/strategy-candidates.ts",
-    "structural-candidates": "npx tsx scripts/structural-candidates.ts"
+    "structural-candidates": "npx tsx scripts/structural-candidates.ts",
+    "f1-paper": "npx tsx scripts/f1-paper-report.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",
