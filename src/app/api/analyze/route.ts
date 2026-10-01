@@ -90,6 +90,19 @@ const PRE_TP1_BREAKEVEN_TRIGGER_R = 0.5;
 const STRATEGY_B_ENABLED = process.env.ENABLE_STRATEGY_B === '1';
 const ALLOW_SHORT        = process.env.ALLOW_SHORT === '1';
 
+// 2026-10-01（docs/ANALYSIS-2026-10-01-週虧損檢查.md）：只有進場時框（1h）的訊號可以進場。
+//
+// 原本有兩條路讓 5m/15m 訊號頂替：⚡15m 短線單通道，以及「1h 沒訊號時任何時框 ≥75 分
+// 且順 4H 就頂上」的 fallback。這兩條路**從來沒被任何回測驗證過**（verify-strategy 只
+// 模擬 1h），止損又近、同樣風險要付更多手續費。2026-09-24～10-01 真實成交：
+//   1h  n=31  +73.63 USDT  +6.72R
+//   15m n=9   −18.70 USDT  −1.44R
+//   5m  n=9   −71.02 USDT  −4.37R（扣費後每筆 −0.58R，t=−2.69）
+// n 小，單憑這週不足以下統計結論；關掉的理由是「讓線上跑被驗證的那個策略」，跟 L1
+// （closedCandlesOnly）同一個原則。5m/15m 仍照常掃描、照常參與 confluence；被擋的候選
+// 落到 no_entry_tf 關卡，那一關有影子模擬，之後要翻案看得出來。ALLOW_LTF_ENTRY=1 可還原。
+const ALLOW_LTF_ENTRY    = process.env.ALLOW_LTF_ENTRY === '1';
+
 function tfBarMinutes(tf: string | null | undefined): number {
   switch (tf) {
     case '5m':  return 5;
@@ -2719,7 +2732,8 @@ export async function GET(req: NextRequest) {
       // give larger notional at the same risk — the "small account compounding"
       // mechanic without raising risk per trade.
       let isScalp = false;
-      if (!entrySignal && biasConfirmed) {
+      // 2026-10-01：下面兩條「非進場時框頂替」的路徑預設關閉（見 ALLOW_LTF_ENTRY）。
+      if (!entrySignal && biasConfirmed && ALLOW_LTF_ENTRY) {
         const scalpSig = strong.find(s =>
           s.timeframe === '15m' &&
           isStrongEnough(s) &&
@@ -2736,7 +2750,7 @@ export async function GET(req: NextRequest) {
       // direction matches the 4H bias may substitute when the entry TF itself
       // has no qualifying signal — strong trends often move too fast for 1H
       // to score before the entry window closes.
-      if (!entrySignal && biasConfirmed) {
+      if (!entrySignal && biasConfirmed && ALLOW_LTF_ENTRY) {
         entrySignal = strong.find(s =>
           isStrongEnough(s) &&
           s.score >= STRONG_THRESHOLD + 10 &&

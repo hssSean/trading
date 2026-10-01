@@ -2,7 +2,7 @@
 /**
  * 真實成交拆解——虧損到底集中在哪裡。
  *
- *   ENV_FILE=env.txt npx tsx scripts/real-trades-breakdown.ts [audit 報告.json]
+ *   ENV_FILE=env.txt npx tsx scripts/real-trades-breakdown.ts [audit 報告.json] [--since=YYYY-MM-DD]
  *
  * 輸入：`npm run audit-exits` 產出的報告（每筆的 realR 來自幣安真實成交，不是 DB 模擬）
  *      + Supabase trades 表的屬性（策略、方向、出場原因、MFE、分數、時框…）。
@@ -30,10 +30,13 @@ function group<T>(xs: T[], key: (x: T) => string | null): Map<string, T[]> {
 
 async function main(): Promise<void> {
   reportEnvLoad(loadEnvFile());
-  const file = process.argv[2] ?? readdirSync('.').filter(x => /^audit-fabricated-exits-.*\.json$/.test(x)).sort().pop();
+  // --since YYYY-MM-DD：只看該日之後平倉的（例如看「這一週」）
+  const sinceArg = process.argv.find(a => a.startsWith('--since='));
+  const since = sinceArg ? Date.parse(sinceArg.slice(8) + 'T00:00:00Z') : -Infinity;
+  const file = process.argv.slice(2).find(a => !a.startsWith('--')) ?? readdirSync('.').filter(x => /^audit-fabricated-exits-.*\.json$/.test(x)).sort().pop();
   if (!file) throw new Error('找不到 audit 報告，先跑 npm run audit-exits');
   const findings = (JSON.parse(readFileSync(file, 'utf-8')).findings as Finding[])
-    .filter(x => x.realR != null && Number.isFinite(x.realR));
+    .filter(x => x.realR != null && Number.isFinite(x.realR) && x.closedAt >= since);
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error('缺 NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY');

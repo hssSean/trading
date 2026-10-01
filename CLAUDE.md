@@ -118,6 +118,7 @@ npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的�
     - **覆蓋率要約兩週才會重建。在那之前任何濾網都不要動。**
   - **2026-09-24 獲利驗證：扣成本後每筆 −0.055R（t=−2.40，12 個月 n=2079），策略 B −0.514R（t=−4.34）。** 毛邊際 ~+0.02R 小於成本 ~0.08R。詳見 `docs/ANALYSIS-2026-09-24-策略獲利能力驗證.md`。
   - **2026-09-27 決定：修改不換。策略 B 與做空預設關閉**（`ENABLE_STRATEGY_B=1`／`ALLOW_SHORT=1` 可開）。修改後 −0.007R/筆、CI 跨 0，仍測不出正邊際。另外 10 種趨勢跟隨候選在 4.7 年 × 30 檔上全部沒過事先訂的標準，純做多的獲利集中在 2023–24 牛市。**不要再試「另一組技術指標」**，詳見 `docs/ANALYSIS-2026-09-27-修改還是換策略.md`，重跑 `npm run strategy-candidates`。
+  - **2026-10-01：只有 1h 能進場（`ALLOW_LTF_ENTRY` 預設關）。** 原本 ⚡15m 短線單與 Entry-TF fallback 會讓 5m/15m 頂替 1h 進場，這條路從沒被回測驗證過；當週 1h +73.6 USDT、5m/15m −89.7 USDT。5m/15m 仍掃描、仍參與 confluence。詳見 `docs/ANALYSIS-2026-10-01-週虧損檢查.md`。看某段期間的真實成交用 `real-trades-breakdown.ts --since=YYYY-MM-DD`。
   - **F1 前向紙上追蹤（2026-09-28 起，不下單）**：`ENV_FILE=env.txt npm run f1-paper` 看進度；滿 6 個月且 n≥300 才判。規則只有一份 `src/lib/f1Paper.ts`。
   - **2026-09-27B 結構性資訊也測過了：** 資金費率極端值（F1）、費率橫向排序（F3）、爆倉急跌接多（L1）三個都沒過。F1 在 2 批幣 10 個年度都贏過無條件做多（有弱資訊），但第三批幣扣成本後 −0.013R，不能單獨上線。詳見 `docs/ANALYSIS-2026-09-27B-結構性資訊候選.md`。
   - **回測規則只有一份：`scripts/lib/liveReplica.ts`。** 不要再在腳本裡複製 regime／掛單／出場邏輯——2026-09-24 查出 backtest／exit-compare 的複製品九處跟線上分岔。

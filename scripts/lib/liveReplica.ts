@@ -39,6 +39,9 @@ export const LIVE = {
   // route.ts 的 ENABLE_STRATEGY_B／ALLOW_SHORT 環境變數可以重新打開。
   STRATEGY_B_ENABLED: false,
   ALLOW_SHORT: false,
+  // 2026-10-01：只有 1h 能進場（route.ts ALLOW_LTF_ENTRY）。本模擬本來就只模擬 1h，
+  // 這個值存在是為了讓 verify-strategy 檢查 route.ts 的預設沒有被改回去。
+  ALLOW_LTF_ENTRY: false,
 };
 
 // ── 成本模型 ──────────────────────────────────────────────────────

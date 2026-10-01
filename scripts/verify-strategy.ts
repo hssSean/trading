@@ -95,8 +95,9 @@ function checkConstants(): void {
   const routeDefaults = {
     STRATEGY_B_ENABLED: !/const STRATEGY_B_ENABLED\s*=\s*process\.env\.ENABLE_STRATEGY_B === '1'/.test(route),
     ALLOW_SHORT: !/const ALLOW_SHORT\s*=\s*process\.env\.ALLOW_SHORT === '1'/.test(route),
+    ALLOW_LTF_ENTRY: !/const ALLOW_LTF_ENTRY\s*=\s*process\.env\.ALLOW_LTF_ENTRY === '1'/.test(route),
   };
-  for (const k of ['STRATEGY_B_ENABLED', 'ALLOW_SHORT'] as const) {
+  for (const k of ['STRATEGY_B_ENABLED', 'ALLOW_SHORT', 'ALLOW_LTF_ENTRY'] as const) {
     if (routeDefaults[k] !== LIVE[k]) {
       issue({ id: 'V1', sev: '🔴', where: 'scripts/lib/liveReplica.ts', what: `${k} 預設值與 route.ts 不一致（replica=${LIVE[k]}）`, evidence: '模擬的會是另一組訊號' });
     }
@@ -434,7 +435,7 @@ async function main(): Promise<void> {
   checkDerive4hAlignment(btc1);
   checkFormingBarCache(btc1.slice(-3000), btc4.slice(-1500));
   issue({ id: 'S1', sev: 'ℹ️', where: '本腳本', what: '幣種用「今天」的成交量前 N 名回頭測（倖存者偏誤），結果偏向高估', evidence: '無法完全消除；解讀時只當上限' });
-  issue({ id: 'S2', sev: 'ℹ️', where: '本腳本', what: '未模擬 5m/15m 多時框與組合層級風控（熔斷、回撤、同向上限）', evidence: '這些只會少做幾筆，不會讓沒邊際的訊號變有邊際' });
+  issue({ id: 'S2', sev: 'ℹ️', where: '本腳本', what: '未模擬 5m/15m 參與的 confluence 與組合層級風控（熔斷、回撤、同向上限）；5m/15m 進場自 2026-10-01 起線上已關閉', evidence: '這些只會少做幾筆，不會讓沒邊際的訊號變有邊際' });
 
   const order: Record<Severity, number> = { '🔴': 0, '🟡': 1, 'ℹ️': 2 };
   issues.sort((a, b) => order[a.sev] - order[b.sev]);
