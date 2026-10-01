@@ -233,6 +233,9 @@ async function main(): Promise<void> {
 
     let used = 0;
     for (const e of entries) {
+      // 2026-10-01：只看線上目前會發的訊號（策略 B、做空已預設關閉；collectEntries 只產 1h）
+      if (e.sig.strategy === 'B' && !LIVE.STRATEGY_B_ENABLED) continue;
+      if (e.sig.direction === 'SHORT' && !LIVE.ALLOW_SHORT) continue;
       const isLong = e.sig.direction === 'LONG';
 
       // ── 先模擬掛單成交 ──

@@ -103,6 +103,12 @@ const ALLOW_SHORT        = process.env.ALLOW_SHORT === '1';
 // 落到 no_entry_tf 關卡，那一關有影子模擬，之後要翻案看得出來。ALLOW_LTF_ENTRY=1 可還原。
 const ALLOW_LTF_ENTRY    = process.env.ALLOW_LTF_ENTRY === '1';
 
+// 2026-10-01：每筆固定風險 %（見 suggestedRiskPct 那裡的說明）。tier B 仍是 0.5%。
+const FIXED_RISK_PCT = (() => {
+  const v = parseFloat(process.env.FIXED_RISK_PCT ?? '');
+  return Number.isFinite(v) && v > 0 && v <= 2 ? v : 0.5;
+})();
+
 function tfBarMinutes(tf: string | null | undefined): number {
   switch (tf) {
     case '5m':  return 5;
@@ -2542,8 +2548,13 @@ export async function GET(req: NextRequest) {
         setRegimeCache(symbol, { lastBarOpenTime: fourHC[fourHC.length - 1].openTime, adx: symbolAdx, atrPct: symbolAtrPct });
       }
 
-      // >80th pct = high volatility → smaller risk; <30th = low vol → larger risk
-      const suggestedRiskPct = symbolAtrPct > 80 ? 0.5 : symbolAtrPct < 30 ? 1.5 : 1.0;
+      // 2026-10-01（docs/ANALYSIS-2026-10-01-週虧損檢查.md §倉位）：改成固定風險。
+      // 原本依 90 天 ATR 百分位給 0.5／1.0／1.5%（低波動放大），這條規則從沒被驗證過；
+      // 真實成交（A／做多／1h，n=142）風險金額 0.2～75 USDT 不等，1.5% 那 6 筆每筆 −0.55R，
+      // 大注那半 −0.177R、小注那半 +0.081R——沒有任何證據顯示大注的單比較會贏，於是
+      // 忽大忽小只放大波動：同樣 −6.8R，固定中位風險是 −94 USDT，實際是 −345 USDT。
+      // 固定風險不改變 R 期望值，只是不再讓運氣決定虧多少錢。0.5% 是原本 85% 的單在用的值。
+      const suggestedRiskPct = FIXED_RISK_PCT;
 
       // ── Strategy B consecutive-loss pause check ──────────────
       let stratBPaused = false;
