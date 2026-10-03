@@ -207,6 +207,33 @@ export async function fetchFundingHistory(
     .sort((a, b) => a.t - b.t);
 }
 
+/**
+ * 已收盤 K 線（含成交額 qv）。紙上策略用（src/lib/paper/runner.ts）。
+ * 跟 fetchCandles 不同：會丟掉還在跑的最後一根——紙上策略的所有規則都只吃已收盤 K 棒。
+ */
+export async function fetchClosedBars(
+  symbol: string, interval: '1h' | '4h' | '1d', limit: number, startTime?: number,
+): Promise<{ t: number; o: number; h: number; l: number; c: number; qv: number }[]> {
+  const res = await client.get('/klines', {
+    params: { symbol, interval, limit, ...(startTime !== undefined ? { startTime } : {}) },
+  });
+  const now = Date.now();
+  return (res.data as unknown[][])
+    .filter(k => (k[6] as number) < now)
+    .map(k => ({ t: k[0] as number, o: +(k[1] as string), h: +(k[2] as string), l: +(k[3] as string), c: +(k[4] as string), qv: +(k[7] as string) }));
+}
+
+/** USDT 本位、PERPETUAL、TRADING 的合約與 24h 成交額 */
+export async function fetchPerpTickers(): Promise<{ symbol: string; quoteVolume: number }[]> {
+  const [info, tick] = await Promise.all([client.get('/exchangeInfo'), client.get('/ticker/24hr')]);
+  const perp = new Set((info.data.symbols as { symbol: string; status: string; contractType: string; quoteAsset: string }[])
+    .filter(s => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
+    .map(s => s.symbol));
+  return (tick.data as { symbol: string; quoteVolume: string }[])
+    .filter(t => perp.has(t.symbol))
+    .map(t => ({ symbol: t.symbol, quoteVolume: +t.quoteVolume }));
+}
+
 // ── Open Interest change ─────────────────────────────────────
 // 2026-08-10：拒絕漏斗診斷後續清單 #7——未平倉合約(OI)變化率，用來輔助
 // 判斷「新資金進場」還是「空頭回補」。先做顯示（訊號分析依據多一條

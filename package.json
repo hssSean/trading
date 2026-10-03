@@ -19,7 +19,9 @@
     "verify-strategy": "npx tsx scripts/verify-strategy.ts",
     "strategy-candidates": "npx tsx scripts/strategy-candidates.ts",
     "structural-candidates": "npx tsx scripts/structural-candidates.ts",
-    "f1-paper": "npx tsx scripts/f1-paper-report.ts"
+    "f1-paper": "npx tsx scripts/f1-paper-report.ts",
+    "paper-report": "npx tsx scripts/paper-report.ts",
+    "paper-acceptance": "npx tsx scripts/paper-acceptance.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",

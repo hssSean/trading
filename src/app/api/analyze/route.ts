@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange, fetchFundingHistory } from '@/api/binance';
 import { runF1Paper } from '@/lib/f1PaperRunner';
+import { runStrategyA, runVideo, dueJob } from '@/lib/paper/runner';
+import { binancePaperDeps } from '@/lib/paper/deps';
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import type { RejectedCandidate } from '@/analysis/signals';
@@ -3428,6 +3430,30 @@ export async function GET(req: NextRequest) {
   const tShadow = timing.begin();
   await processShadowTrades(shadowCandidates);
   timing.mark('processShadowTrades', tShadow);
+
+  // 2026-10-03：策略 A（日線 Keltner）與影片策略 A/B/C 的紙上追蹤——只記錄、不下單，四套分開存。
+  // 規則照 C:\trading_stratage 的 Python 參考實作移植並通過規格驗收（scripts/paper-acceptance.ts）。
+  // 每天 UTC 00:20 之後：第一次掃描跑 strategyA、下一次跑 video（分兩次分散負擔，各約 2～5 秒 I/O）。
+  // 只在 00:20～06:00 檢查，其餘時間不花 Redis 指令。設計見 docs/superpowers/specs/2026-10-03-paper-strategies-design.md。
+  {
+    const nowP = Date.now();
+    const sinceMidnight = nowP % 86_400_000;
+    const rp = getRedis();
+    if (rp && sinceMidnight >= 20 * 60_000 && sinceMidnight < 6 * 3_600_000) {
+      const tP = timing.begin();
+      try {
+        const metaP = (await rp.hgetall<Record<string, unknown>>('paper:meta')) ?? {};
+        const job = dueJob(metaP, nowP);
+        if (job && await claimPeriodicSlot(`paper-job:${job}`, 1800)) {
+          const s = job === 'strategyA' ? await runStrategyA(rp, binancePaperDeps, nowP) : await runVideo(rp, binancePaperDeps, nowP);
+          console.log(`[paper] ${job} new=${s.newRecords} finished=${s.finished} open=${s.open} errors=${s.errors}${s.initialized ? ' (initialized)' : ''}`);
+        }
+      } catch (e) {
+        console.error('[paper] failed:', String(e).slice(0, 150));
+      }
+      timing.mark('paper', tP);
+    }
+  }
 
   // 2026-09-28：F1「資金費率極端值反向」前向紙上追蹤——只記錄、不下單。
   // 規則與回測共用 src/lib/f1Paper.ts；判準與背景見 docs/ANALYSIS-2026-09-27B-結構性資訊候選.md。
