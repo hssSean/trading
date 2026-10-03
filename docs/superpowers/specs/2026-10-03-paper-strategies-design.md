@@ -28,8 +28,8 @@
 
 ## Redis
 
-`paper:<strat>:orders`（hash，id → 訂單＋狀態）、`paper:<strat>:meta`（lastProcessed、trackStart）、
-`paper:univ:<A|V>`（hash，day → 當日幣池，point-in-time）。
+`paper:<strat>:open`（hash，未結束的紀錄，執行器讀寫）、`paper:<strat>:done`（hash，已結束，只寫；報表讀）、
+`paper:meta`（<job>.lastT、<job>.lastRunDay、trackStart、busy:<strat>:<symbol>）、`paper:univ`（day → 當日幣池）。
 
 ## 驗收
 
