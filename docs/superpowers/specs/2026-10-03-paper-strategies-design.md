@@ -48,6 +48,6 @@
   第一次掃描跑 strategyA、下一次跑 video；`/api/paper` 留作手動觸發。原因：Vercel 的
   `CRON_SECRET` 是否設定無法確認，新增 Vercel cron 可能 401 而靜默不跑。
 - 本機試跑（回溯 4 天）：strategyA 2.0 秒、video 4.5 秒。
-- 指令：`npm run paper-acceptance`（驗收）、`ENV_FILE=env.txt npm run paper-report`（報表）、
+- 指令：`ENV_FILE=env.txt npm run paper-run -- all`（從本機立刻執行／補跑，寫線上 Redis）、`npm run paper-acceptance`（驗收）、`ENV_FILE=env.txt npm run paper-report`（報表）、
   `npx tsx scripts/paper-dryrun.ts [天數]`（本機試跑，不碰線上 Redis）。
 - 第一次執行只記起點；第一筆紀錄最快在起點的隔天。
