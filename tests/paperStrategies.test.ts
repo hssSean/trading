@@ -160,3 +160,29 @@ describe('runner', () => {
     expect(u.map(x => x.symbol)).toEqual(['B']);
   });
 });
+
+describe('summarizePaper', () => {
+  // 延後 import，避免影響上面測試的載入順序
+  it('counts statuses, ignores non-done for R stats, and judges only after minN', async () => {
+    const { summarizePaper } = await import('../src/lib/paper/stats');
+    const now = 10 * 7 * D;
+    const recs = [
+      { status: 'done', netR: 2, grossR: 2.1, exitT: 1 },
+      { status: 'done', netR: -1, grossR: -0.9, exitT: 2 },
+      { status: 'open' }, { status: 'busy' }, { status: 'nofill' },
+    ];
+    const s = summarizePaper('videoA', recs, 0, now);
+    expect(s.counts).toMatchObject({ done: 2, open: 1, busy: 1, nofill: 1 });
+    expect(s.win).toBe(0.5);
+    expect(s.avgR).toBe(0.5);
+    expect(s.payoff).toBe(2);
+    expect(s.maxDdR).toBe(1);
+    expect(s.verdict).toBe('early');
+    expect(s.perWk).toBeCloseTo(0.2, 6);
+  });
+  it('strategy A: ≥ 50 trades with negative average triggers the stop rule', async () => {
+    const { summarizePaper } = await import('../src/lib/paper/stats');
+    const recs = Array.from({ length: 50 }, (_, i) => ({ status: 'done', netR: i % 2 ? 0.5 : -1, grossR: 0, exitT: i }));
+    expect(summarizePaper('strategyA', recs, 0, 7 * D).verdict).toBe('fail');
+  });
+});

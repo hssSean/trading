@@ -882,6 +882,12 @@ export default function SettingsPage() {
         <Section title="診斷">
           <div className="space-y-2">
             <button
+              onClick={() => router.push('/paper')}
+              className="w-full py-3 rounded-full border border-accent/30 text-accent text-sm"
+            >
+              紙上策略追蹤（策略 A・影片 A/B/C）
+            </button>
+            <button
               onClick={() => router.push('/funnel')}
               className="w-full py-3 rounded-full border border-accent/30 text-accent text-sm"
             >
