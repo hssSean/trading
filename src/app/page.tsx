@@ -20,7 +20,6 @@ export default function HomePage() {
   const day = Math.floor(now / 86_400_000);
   const today = useMemo(
     () => (data ? todaySummary(data.snapshot, data.signals, Date.now()) : null),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [data, day],
   );
 
