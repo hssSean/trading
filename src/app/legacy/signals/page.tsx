@@ -30,7 +30,7 @@ export default function SignalsPage() {
       <div className="px-3 pt-14 pb-2.5 safe-top border-b border-[#1B222B]">
         <div className="flex items-center mb-2.5">
           <div>
-            <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">交易信號</h1>
+            <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">交易信號 <span className="text-[#565E6B] text-[11px] font-normal">（舊策略）</span></h1>
             <p className="text-[#565E6B] text-[10px] mt-0.5 num">
               共 {allSignals.length} 筆{unread > 0 ? ` · ${unread} 個未讀` : ''}
             </p>

@@ -1314,7 +1314,7 @@ export default function TradesPage() {
       <div className="px-3 pt-14 pb-2.5 safe-top border-b border-[#1B222B] shrink-0">
         <div className="flex items-center mb-2.5">
           <div>
-            <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">交易紀錄</h1>
+            <h1 className="text-[#E8ECF1] text-[15px] font-medium tracking-[0.05em]">交易紀錄 <span className="text-[#565E6B] text-[11px] font-normal">（舊策略）</span></h1>
             <p className="text-[#565E6B] text-[10px] mt-0.5 num">
               {closed.length} 已結束 · {pending.length} 持倉
               {watchingTp2.length > 0 && <span className="text-[#0ECB81]"> · {watchingTp2.length} 追蹤TP2</span>}
