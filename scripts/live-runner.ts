@@ -82,6 +82,10 @@ import { currentStopToSync } from '../src/lib/stopSync';
 import { findOrphanEntryOrders } from '../src/lib/orphanEntry';
 import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
+import { runS3aLive } from '../src/engine/s3aLive';
+import { runPrep } from '../src/lib/s3s1/engine';
+import { binanceS3S1Deps } from '../src/lib/s3s1/deps';
+import { fetchClosedBars, fetchFundingHistory } from '../src/api/binance';
 
 const isLive = process.argv.includes('--live');
 if (isLive) {
@@ -760,6 +764,41 @@ async function pollKillSwitch(redis: Redis): Promise<KillSwitchState> {
   return cachedKs;
 }
 
+// ── S3-A（研究端 2026-10-06 部署文件；testnet 真的下單）──────────────────
+// 跟舊策略的 runCycle 完全分開：舊策略的單在 Supabase trades，S3-A 的單在 Redis s3a-live:*。
+// S3A_DRY_RUN=1：只印出會做的動作、不下單（第一次在雲端機器上跑時可以先開）。
+let s3aFilters: Map<string, { stepSize: number; tickSize: number; minNotional: number; minQty?: number }> | null = null;
+let s3aFiltersAt = 0;
+let s3aPrepTriedAt = 0;
+async function runS3aCycle(binance: BinanceFuturesClient, redis: Redis, userId: string): Promise<void> {
+  const ks = await pollKillSwitch(redis);
+  if (ks.active) return; // 跟舊策略一致：kill switch 啟動中不做任何下單／改單
+  if (!s3aFilters || Date.now() - s3aFiltersAt > 3_600_000) {
+    s3aFilters = parseSymbolFilters(await binance.getExchangeInfo() as Parameters<typeof parseSymbolFilters>[0]);
+    s3aFiltersAt = Date.now();
+  }
+  await runS3aLive({
+    client: binance,
+    store: redis,
+    filters: s3aFilters,
+    mainnetDaily: s => fetchClosedBars(s, '1d', 499),
+    mainnetFunding: (s, t) => fetchFundingHistory(s, 100, t),
+    ensurePrep: async now => {
+      const X = Math.floor(now / 86_400_000) * 86_400_000;
+      if (await redis.get(`s3s1:prep:${X}`)) return;
+      if (Date.now() - s3aPrepTriedAt < 10 * 60_000) return; // 很重（全市場日線），10 分鐘最多試一次
+      s3aPrepTriedAt = Date.now();
+      console.log(`[${nowStr()}] S3-A：今天的 prep 快照還沒有，自己算（約 10 秒）`);
+      await runPrep(redis, binanceS3S1Deps, now);
+    },
+    notify: async (title, body) => { await sendWebPushToUser(userId, { title, body, tag: 's3a' }).catch(() => undefined); },
+    log: msg => console.log(`[${nowStr()}]${msg.startsWith(' ') ? '' : ' '}${msg}`),
+    dryRun: process.env.S3A_DRY_RUN === '1',
+    killSwitch: false,
+    now: Date.now(),
+  });
+}
+
 async function runCycle(
   supabase: SupabaseClient,
   binance: BinanceFuturesClient,
@@ -1415,6 +1454,7 @@ async function main() {
   const userId = process.env.TRADING_USER_ID;
 
   console.log(`[${nowStr()}] live-runner 啟動（testnet，${CYCLE_MS / 1000}秒/輪，會真的下單）`);
+  console.log(`[${nowStr()}] S3-A：${process.env.S3A_DRY_RUN === '1' ? '試跑模式（S3A_DRY_RUN=1，只印出動作、不下單）' : '真的下單（testnet）'}；舊策略：只管理既有持倉，不再接新單`);
 
   // 沒設就要講出來。這是唯一一道用「錢」衡量的上限，其餘（MAX_TOTAL_RISK_PCT、
   // MAX_DRAWDOWN_R、熔斷）都是 R 或百分比，而 R 的分母會隨波動浮動——沒有這道
@@ -1442,6 +1482,11 @@ async function main() {
       await runCycle(supabase, binance, redis, userId);
     } catch (e) {
       console.log(`[${nowStr()}] ❌ 這輪整個失敗（不影響下一輪）: ${String(e)}`);
+    }
+    try {
+      await runS3aCycle(binance, redis, userId);
+    } catch (e) {
+      console.log(`[${nowStr()}] ❌ S3-A 這輪失敗（不影響下一輪、不影響舊策略）: ${String(e).slice(0, 200)}`);
     }
 
     const elapsed = Date.now() - cycleStart;

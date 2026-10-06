@@ -52,6 +52,31 @@ export async function fetchKlines(symbol: string, interval: KlineInterval, start
   return dedup;
 }
 
+export interface QvBar { t: number; o: number; h: number; l: number; c: number; qv: number }
+
+/** 跟 fetchKlines 一樣但帶成交額 qv（幣池排名要用）；另外的快取檔，不影響既有快取。 */
+export async function fetchBars(symbol: string, interval: '1h' | '12h' | '1d', startMs: number, endMs: number): Promise<QvBar[]> {
+  const day = Math.floor(endMs / 86_400_000);
+  const file = join(CACHE_DIR, `bars-${symbol}-${interval}-${startMs}-${endMs}-${day}.json`);
+  if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf-8'));
+  const step = interval === '1h' ? 3_600_000 : interval === '12h' ? 43_200_000 : 86_400_000;
+  const out: QvBar[] = [];
+  let from = startMs;
+  while (from < endMs) {
+    const rows = await getJson<unknown[][]>('/klines', { symbol, interval, startTime: from, limit: 1000 });
+    if (!rows.length) break;
+    for (const k of rows) {
+      if ((k[6] as number) >= endMs) continue;
+      out.push({ t: k[0] as number, o: +(k[1] as string), h: +(k[2] as string), l: +(k[3] as string), c: +(k[4] as string), qv: +(k[7] as string) });
+    }
+    from = (rows[rows.length - 1][0] as number) + step;
+    if (rows.length < 1000) break;
+    await sleep(250);
+  }
+  writeFileSync(file, JSON.stringify(out), { encoding: 'utf-8' });
+  return out;
+}
+
 export interface Funding { t: number; rate: number }
 export async function fetchFunding(symbol: string, startMs: number, endMs: number): Promise<Funding[]> {
   const day = Math.floor(endMs / 86_400_000);

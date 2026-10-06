@@ -1,5 +1,7 @@
 # 紙上部署：策略 A（日線 Keltner）＋影片策略 A/B/C
 
+> **2026-10-07 已停用並刪除程式碼**：改部署研究端的 S3／S1（docs/strategy-deploy-2026-10-06.md）。本文件留作紀錄。
+
 > 2026-10-03。規格來源：`C:\trading_stratage\docs\策略A_自動交易規格.md`、`影片策略_自動交易規格.md`；
 > 參考實作：同目錄 `engine.py`、`strategies.py`（keltner）、`scan.py`、`yt_strats.py`、`ict_engine.py`、`msnr.py`。
 > 使用者授權由 Claude 決定所有設計問題。

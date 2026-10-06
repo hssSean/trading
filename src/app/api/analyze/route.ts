@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
-import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange, fetchFundingHistory } from '@/api/binance';
-import { runF1Paper } from '@/lib/f1PaperRunner';
-import { runStrategyA, runVideo, dueJob } from '@/lib/paper/runner';
-import { binancePaperDeps } from '@/lib/paper/deps';
+import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange } from '@/api/binance';
+import { runPrep, runS3, runS1, dueS3S1Job } from '@/lib/s3s1/engine';
+import { binanceS3S1Deps } from '@/lib/s3s1/deps';
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import type { RejectedCandidate } from '@/analysis/signals';
@@ -104,6 +103,9 @@ const ALLOW_SHORT        = process.env.ALLOW_SHORT === '1';
 // （closedCandlesOnly）同一個原則。5m/15m 仍照常掃描、照常參與 confluence；被擋的候選
 // 落到 no_entry_tf 關卡，那一關有影子模擬，之後要翻案看得出來。ALLOW_LTF_ENTRY=1 可還原。
 const ALLOW_LTF_ENTRY    = process.env.ALLOW_LTF_ENTRY === '1';
+
+// 2026-10-07：改跑研究端的 S3-A／S3-B／S1（src/lib/s3s1/），舊策略預設停止開新倉。
+const LEGACY_SIGNALS_ENABLED = process.env.LEGACY_SIGNALS_ENABLED === '1';
 
 // 2026-10-01：每筆固定風險 %（見 suggestedRiskPct 那裡的說明）。tier B 仍是 0.5%。
 const FIXED_RISK_PCT = (() => {
@@ -2442,6 +2444,11 @@ export async function GET(req: NextRequest) {
   // Phase 6: event filter — blocks new signals ±30 min around scheduled events
   const eventFilter = await checkEventFilter();
 
+  // 2026-10-07（docs/strategy-deploy-2026-10-06.md §0.2）：舊策略停用＝停止開新倉。
+  // 不掃描就不會產生新推薦單（也就不會有新推播、live-runner 也不會再收到新單）；
+  // 已有的持倉不受影響——下面的 monitorActiveTrades 與 live-runner 照原本規則管理到出場。
+  // LEGACY_SIGNALS_ENABLED=1 可還原。
+  if (!LEGACY_SIGNALS_ENABLED) coins = [];
   for (const symbol of coins) {
     const allSignals: TradingSignal[] = [];
     let topScore  = 0;
@@ -3431,49 +3438,29 @@ export async function GET(req: NextRequest) {
   await processShadowTrades(shadowCandidates);
   timing.mark('processShadowTrades', tShadow);
 
-  // 2026-10-03：策略 A（日線 Keltner）與影片策略 A/B/C 的紙上追蹤——只記錄、不下單，四套分開存。
-  // 規則照 C:\trading_stratage 的 Python 參考實作移植並通過規格驗收（scripts/paper-acceptance.ts）。
-  // 每天 UTC 00:20 之後：第一次掃描跑 strategyA、下一次跑 video（分兩次分散負擔，各約 2～5 秒 I/O）。
-  // 只在 00:20～06:00 檢查，其餘時間不花 Redis 指令。設計見 docs/superpowers/specs/2026-10-03-paper-strategies-design.md。
+  // 2026-10-07：S3-A／S3-B／S1 三個模擬帳戶（docs/strategy-deploy-2026-10-06.md）。
+  // 取代 2026-09-28 的 F1 與 2026-10-03 的四套紙上追蹤（已停用，Redis 舊資料保留不刪）。
+  // 一次掃描最多跑一個工作（prep → s3 → s1），各約 1～10 秒；時間窗外不花 Redis 指令。
+  // S3-A 另外由 live-runner 在 testnet 真的下單（scripts/live-runner.ts）。
   {
-    const nowP = Date.now();
-    const sinceMidnight = nowP % 86_400_000;
-    const rp = getRedis();
-    if (rp && sinceMidnight >= 20 * 60_000 && sinceMidnight < 6 * 3_600_000) {
-      const tP = timing.begin();
+    const nowJ = Date.now();
+    const inDay = nowJ % 86_400_000, inHalf = nowJ % 43_200_000;
+    const rj = getRedis();
+    if (rj && (inDay < 4 * 3_600_000 || (inHalf >= 3_600_000 && inHalf < 4 * 3_600_000))) {
+      const tJ = timing.begin();
       try {
-        const metaP = (await rp.hgetall<Record<string, unknown>>('paper:meta')) ?? {};
-        const job = dueJob(metaP, nowP);
-        if (job && await claimPeriodicSlot(`paper-job:${job}`, 1800)) {
-          const s = job === 'strategyA' ? await runStrategyA(rp, binancePaperDeps, nowP) : await runVideo(rp, binancePaperDeps, nowP);
-          console.log(`[paper] ${job} new=${s.newRecords} finished=${s.finished} open=${s.open} errors=${s.errors}${s.initialized ? ' (initialized)' : ''}`);
+        const metaJ = (await rj.hgetall<Record<string, unknown>>('s3s1:meta')) ?? {};
+        const job = dueS3S1Job(metaJ, nowJ);
+        if (job && await claimPeriodicSlot(`s3s1-job:${job}`, 600)) {
+          const res = job === 'prep' ? await runPrep(rj, binanceS3S1Deps, nowJ)
+            : job === 's3' ? await runS3(rj, binanceS3S1Deps, nowJ)
+            : await runS1(rj, binanceS3S1Deps, nowJ);
+          console.log(`[s3s1] ${job} ${JSON.stringify(res).slice(0, 300)}`);
         }
       } catch (e) {
-        console.error('[paper] failed:', String(e).slice(0, 150));
+        console.error('[s3s1] failed:', String(e).slice(0, 200));
       }
-      timing.mark('paper', tP);
-    }
-  }
-
-  // 2026-09-28：F1「資金費率極端值反向」前向紙上追蹤——只記錄、不下單。
-  // 規則與回測共用 src/lib/f1Paper.ts；判準與背景見 docs/ANALYSIS-2026-09-27B-結構性資訊候選.md。
-  // 每小時最多一次；純 I/O（54 檔費率每 4 小時抓一次、到期單才抓 K 線），失敗不影響主流程。
-  {
-    const rf1 = getRedis();
-    if (rf1 && await claimPeriodicSlot('f1-paper', 3600)) {
-      const tF1 = timing.begin();
-      try {
-        const s = await runF1Paper(rf1, {
-          fetchFundingHistory: (sym, limit, start) => fetchFundingHistory(sym, limit, start),
-          fetch4h: (sym, limit, start) => fetchCandles(sym, '4h', limit, 2, start),
-        });
-        if (s.detected || s.resolved || s.voided || s.errors) {
-          console.log(`[f1-paper] detected=${s.detected} resolved=${s.resolved} voided=${s.voided} errors=${s.errors}`);
-        }
-      } catch (e) {
-        console.error('[f1-paper] failed:', String(e).slice(0, 150));
-      }
-      timing.mark('f1Paper', tF1);
+      timing.mark('s3s1', tJ);
     }
   }
 

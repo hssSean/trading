@@ -19,12 +19,29 @@
 - **快取/狀態**：Upstash Redis（訊號鎖、熔斷、ADX 遲滯狀態、拒絕漏斗、影子交易）
 - **行情來源**：Binance Futures 公開 REST API（免金鑰）
 
+### ⚠️ 2026-10-07 起交易策略已換成 S3／S1（舊的評分策略只剩出場管理）
+
+研究端《策略部署總整理》（`docs/strategy-deploy-2026-10-06.md`，驗收用參考交易 `docs/s3-reference-trades.csv`、`docs/s1-reference-trades.csv`）：
+
+| | 做什麼 | 跑在哪 | 紀錄 |
+|---|---|---|---|
+| **S3-A 真倉** | 日線唐奇安突破＋分數 = 2，每筆 4%、風險加總 ≤ 20%、上限 10 | live-runner（testnet 真下單），UTC 00:00:30～02:00 進場 | Redis `s3a-live:*`（pos／done／meta／signals） |
+| S3-A／S3-B／S1 模擬帳本 | 三個 100 USDT 的帳本，S3-B 有 1R 加碼、S1 是 12H Keltner | Vercel `/api/analyze`（prep 00:05、S3 01:05、S1 每個 12H 收盤 +1h05） | Redis `s3s1:*`（meta／<帳戶>:open／done／signals／prep:<日>） |
+
+- **規則只有一份：`src/lib/s3s1/rules.ts`**（帳本 `engine.ts`、真倉 `src/engine/s3aLive.ts` 都用它）。改規則前先跑 `npm run s3s1-acceptance`（S3 35 筆、S1 15 筆、廣度 50 天，誤差 1e-6，必須全過）。
+- **舊策略只停「開新倉」**（`LEGACY_SIGNALS_ENABLED` 預設關，設 `=1` 才恢復掃描）；舊的持倉照原規則由 route.ts／live-runner 管到出場。S3-A 遇到交易所上已有該幣持倉或掛單就不進場。
+- S3-A 真倉開關：live-runner 的 shell 設 `S3A_DRY_RUN=1` = 只印不下單；kill switch 也會擋新倉。試跑：`ENV_FILE=env.txt npm run s3a-dryrun [-- --at-open]`（讀線上狀態、不下單、不寫 Redis）。
+- **紙上登記（策略 A、影片 A/B/C）與 F1 前向追蹤已於 2026-10-07 停用並刪除程式碼**；Redis 的 `paper:*`、`f1p:*` 舊資料保留未刪。`src/lib/f1Paper.ts` 留著是因為 `structural-candidates` 回測還在用。
+- App：「設定 → 診斷 → 策略帳戶」（`/strategies`，API `/api/strategies`，統計在 `src/lib/s3s1/stats.ts`）。月報（文件 §7）：`ENV_FILE=env.txt npm run s3s1-report [-- YYYY-MM]` 寫到 `reports/`（不進版控）。手動補跑帳本：`npm run s3s1-run`。
+- 停用條件（文件 §8）程式會自己判、自己停開新倉：S3-A 回撤 > 35% 或連虧 7；S3-B > 40% 或連虧 15；S1 > 60% 或近 50 筆勝率 < 45%。
+- 誠實提醒：S3 的分數門檻是看過歷史資料後挑的（研究端自己也說新資料才驗得了），S1 標為實驗性。
+
 ### ⚠️ 兩條執行路徑（搞錯這個會誤診很多問題）
 
 | | Vercel `/api/analyze` | `scripts/live-runner.ts`（本機常駐） |
 |---|---|---|
 | 跑在哪 | Vercel cron，5 分鐘一輪 | 使用者本機 `npm run live-runner`，15 秒一輪 |
-| 做什麼 | 產生訊號 + **DB 模擬**監控 | **真的在幣安 testnet 下單**、監控、關單 |
+| 做什麼 | 產生訊號 + **DB 模擬**監控；S3／S1 模擬帳本 | **真的在幣安 testnet 下單**、監控、關單；S3-A 真倉 |
 | 對誰生效 | `live_trading_enabled=false` 的使用者 | `live_trading_enabled=true` 的那一位 |
 | 發哪些推播 | 新推薦單（**不受 live 影響，一律由這裡發**） | 進場成交／TP1／移動止損／出場／推薦單失效 |
 
@@ -119,8 +136,7 @@ npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的�
   - **2026-09-24 獲利驗證：扣成本後每筆 −0.055R（t=−2.40，12 個月 n=2079），策略 B −0.514R（t=−4.34）。** 毛邊際 ~+0.02R 小於成本 ~0.08R。詳見 `docs/ANALYSIS-2026-09-24-策略獲利能力驗證.md`。
   - **2026-09-27 決定：修改不換。策略 B 與做空預設關閉**（`ENABLE_STRATEGY_B=1`／`ALLOW_SHORT=1` 可開）。修改後 −0.007R/筆、CI 跨 0，仍測不出正邊際。另外 10 種趨勢跟隨候選在 4.7 年 × 30 檔上全部沒過事先訂的標準，純做多的獲利集中在 2023–24 牛市。**不要再試「另一組技術指標」**，詳見 `docs/ANALYSIS-2026-09-27-修改還是換策略.md`，重跑 `npm run strategy-candidates`。
   - **2026-10-01：只有 1h 能進場（`ALLOW_LTF_ENTRY` 預設關）。** 原本 ⚡15m 短線單與 Entry-TF fallback 會讓 5m/15m 頂替 1h 進場，這條路從沒被回測驗證過；當週 1h +73.6 USDT、5m/15m −89.7 USDT。5m/15m 仍掃描、仍參與 confluence。詳見 `docs/ANALYSIS-2026-10-01-週虧損檢查.md`。看某段期間的真實成交用 `real-trades-breakdown.ts --since=YYYY-MM-DD`。
-  - **2026-10-03 起紙上追蹤四套外部策略（不下單、分開記錄）**：策略 A（日線 Keltner 突破）、影片 A/B/C。規則照 `C:	rading_stratage` 的 Python 參考實作移植在 `src/lib/paper/`，改規則前先跑 `npm run paper-acceptance`（規格驗收 CSV 必須全過）。每天 UTC 00:20 後由 /api/analyze 觸發；報表 `ENV_FILE=env.txt npm run paper-report`，App 裡在「設定 → 診斷 → 紙上策略追蹤」（/paper，統計在 `src/lib/paper/stats.ts`）。設計見 `docs/superpowers/specs/2026-10-03-paper-strategies-design.md`。
-  - **F1 前向紙上追蹤（2026-09-28 起，不下單）**：`ENV_FILE=env.txt npm run f1-paper` 看進度；滿 6 個月且 n≥300 才判。規則只有一份 `src/lib/f1Paper.ts`。
+  - 2026-10-03 的紙上追蹤（策略 A、影片 A/B/C）與 2026-09-28 的 F1 前向追蹤已於 2026-10-07 停用（見上方「已換成 S3／S1」）。
   - **2026-09-27B 結構性資訊也測過了：** 資金費率極端值（F1）、費率橫向排序（F3）、爆倉急跌接多（L1）三個都沒過。F1 在 2 批幣 10 個年度都贏過無條件做多（有弱資訊），但第三批幣扣成本後 −0.013R，不能單獨上線。詳見 `docs/ANALYSIS-2026-09-27B-結構性資訊候選.md`。
   - **回測規則只有一份：`scripts/lib/liveReplica.ts`。** 不要再在腳本裡複製 regime／掛單／出場邏輯——2026-09-24 查出 backtest／exit-compare 的複製品九處跟線上分岔。
   - **訊號與 regime 只吃已收盤 K 棒**（`closedCandlesOnly`）。快取以最後一根 openTime 為 key，吃形成中 K 棒會把「開盤幾分鐘」的答案凍結整根（42% 時點訊號不同）。

@@ -192,7 +192,7 @@ export async function fetchFundingRate(symbol: string): Promise<number> {
 }
 
 /**
- * 已結算的資金費率歷史（依時間排序）。F1 前向紙上追蹤用（src/lib/f1PaperRunner.ts）。
+ * 已結算的資金費率歷史（依時間排序）。S3／S1 資金費過濾用（src/lib/s3s1/）。
  * 跟上面 fetchFundingRate 不同：那個回「最近一次」的單一值、失敗回 0；這個失敗就丟錯，
  * 讓呼叫端跳過這檔幣——拿 0 冒充歷史會讓百分位判斷整個錯掉。
  */
@@ -208,11 +208,11 @@ export async function fetchFundingHistory(
 }
 
 /**
- * 已收盤 K 線（含成交額 qv）。紙上策略用（src/lib/paper/runner.ts）。
+ * 已收盤 K 線（含成交額 qv）。S3／S1 幣池排名用（src/lib/s3s1/）。
  * 跟 fetchCandles 不同：會丟掉還在跑的最後一根——紙上策略的所有規則都只吃已收盤 K 棒。
  */
 export async function fetchClosedBars(
-  symbol: string, interval: '1h' | '4h' | '1d', limit: number, startTime?: number,
+  symbol: string, interval: '1h' | '4h' | '12h' | '1d', limit: number, startTime?: number,
 ): Promise<{ t: number; o: number; h: number; l: number; c: number; qv: number }[]> {
   const res = await client.get('/klines', {
     params: { symbol, interval, limit, ...(startTime !== undefined ? { startTime } : {}) },
@@ -293,4 +293,24 @@ export async function fetchTopCoinsByVolume(limit = 10): Promise<string[]> {
     .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
     .slice(0, limit)
     .map((t) => t.symbol);
+}
+
+/** 全部 USDT 本位永續（TRADING）與下單限制（S3／S1 帳戶模擬算數量用） */
+export async function fetchPerpFilters(): Promise<Map<string, { stepSize: number; minQty: number; minNotional: number }>> {
+  const res = await client.get('/exchangeInfo');
+  const out = new Map<string, { stepSize: number; minQty: number; minNotional: number }>();
+  for (const s of res.data.symbols as { symbol: string; status: string; contractType: string; quoteAsset: string; filters: { filterType: string; stepSize?: string; minQty?: string; notional?: string }[] }[]) {
+    if (s.status !== 'TRADING' || s.contractType !== 'PERPETUAL' || s.quoteAsset !== 'USDT') continue;
+    const lot = s.filters.find(f => f.filterType === 'LOT_SIZE');
+    const mn = s.filters.find(f => f.filterType === 'MIN_NOTIONAL');
+    out.set(s.symbol, { stepSize: +(lot?.stepSize ?? 0), minQty: +(lot?.minQty ?? 0), minNotional: +(mn?.notional ?? 0) });
+  }
+  return out;
+}
+
+/** 第一根 1H 的開盤時間（≈ 上市時間） */
+export async function fetchListingHour(symbol: string): Promise<number> {
+  const res = await client.get('/klines', { params: { symbol, interval: '1h', startTime: 0, limit: 1 } });
+  const k = res.data as unknown[][];
+  return k.length ? (k[0][0] as number) : 0;
 }

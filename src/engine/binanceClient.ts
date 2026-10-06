@@ -433,6 +433,12 @@ export class BinanceFuturesClient {
     return this.signedRequest('DELETE', '/v1/order', { symbol, orderId });
   }
 
+  /** 最新成交價（公開端點，不需簽名）。S3-A 用來估分數裡的進場價與判斷止損是否已被穿過。 */
+  async tickerPrice(symbol: string): Promise<number> {
+    const res = await this.http.get('/v1/ticker/price', { params: { symbol } });
+    return parseFloat((res.data as { price: string }).price);
+  }
+
   async cancelAllOpenOrders(symbol: string): Promise<{ code: number; msg: string }> {
     return this.signedRequest('DELETE', '/v1/allOpenOrders', { symbol });
   }

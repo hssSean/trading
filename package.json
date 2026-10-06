@@ -19,10 +19,11 @@
     "verify-strategy": "npx tsx scripts/verify-strategy.ts",
     "strategy-candidates": "npx tsx scripts/strategy-candidates.ts",
     "structural-candidates": "npx tsx scripts/structural-candidates.ts",
-    "f1-paper": "npx tsx scripts/f1-paper-report.ts",
-    "paper-report": "npx tsx scripts/paper-report.ts",
-    "paper-acceptance": "npx tsx scripts/paper-acceptance.ts",
-    "paper-run": "npx tsx scripts/paper-run.ts"
+    "s3s1-acceptance": "npx tsx scripts/s3s1-acceptance.ts",
+    "s3s1-dryrun": "npx tsx scripts/s3s1-dryrun.ts",
+    "s3s1-run": "npx tsx scripts/s3s1-run.ts",
+    "s3s1-report": "npx tsx scripts/s3s1-report.ts",
+    "s3a-dryrun": "npx tsx scripts/s3a-dryrun.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",
