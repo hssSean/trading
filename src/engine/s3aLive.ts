@@ -178,6 +178,14 @@ async function closeAll(ctx: S3aCtx, p: LivePos, qty: number, why: string) {
   await place(ctx, { symbol: p.symbol, side: 'SELL', type: 'MARKET', quantity: qty, reduceOnly: true, newClientOrderId: `s3a-x-${p.symbol}-${Math.floor(ctx.now / 1000)}`.slice(0, 36) });
 }
 
+/** testnet 錢包餘額與模式寫進 s3a-live:meta（給 App 看）。dryRun 也寫：s3a-dryrun 用的是記憶體 store */
+async function writeWallet(ctx: S3aCtx): Promise<void> {
+  try {
+    const bal = (await ctx.client.getBalance()).find(b => b.asset === 'USDT');
+    await ctx.store.hset('s3a-live:meta', { wallet: String(bal ? +bal.balance : 0), walletAt: String(ctx.now), mode: ctx.dryRun ? 'dry' : 'live' });
+  } catch (e) { ctx.log(`   S3-A：讀錢包餘額失敗（下小時再試）：${String(e).slice(0, 100)}`); }
+}
+
 /** 已平倉：從成交紀錄與資金費流水算結果 */
 async function finalize(ctx: S3aCtx, p: LivePos) {
   let pnl = 0, fee = 0, sellQty = 0, sellVal = 0, lastT = p.entryAt;
@@ -207,6 +215,7 @@ async function finalize(ctx: S3aCtx, p: LivePos) {
   const dd = base > 0 ? (peakR - realized) / (base + peakR) : 0;
   const halted = meta.halted ? String(meta.halted) : dd > 0.35 ? `回撤 ${(dd * 100).toFixed(0)}% > 35%` : streak >= 7 ? `連續虧損 ${streak} 筆` : '';
   await ctx.store.hset('s3a-live:meta', { realized: String(realized), peakRealized: String(peakR), lossStreak: String(streak), ...(halted ? { halted } : {}), [`lastExit:${p.symbol}`]: String(lastT) });
+  await writeWallet(ctx);
   ctx.log(`   ✅ ${p.symbol} 平倉：淨損益 ${net.toFixed(2)} USDT（${Number.isFinite(R) ? R.toFixed(2) : '?'}R）`);
   await ctx.notify(`S3-A 出場 ${p.symbol.replace(/USDT$/, '')}`, `淨損益 ${net >= 0 ? '+' : ''}${net.toFixed(2)} USDT（${Number.isFinite(R) ? `${R >= 0 ? '+' : ''}${R.toFixed(2)}R` : '—'}）${halted ? `｜⛔ 停用：${halted}` : ''}`);
 }
@@ -217,6 +226,8 @@ export async function runS3aLive(ctx: S3aCtx): Promise<void> {
   const posMap = new Map(Object.entries((await store.hgetall('s3a-live:pos')) ?? {}).map(([k, v]) => [k, parse<LivePos>(v)]));
   const meta = (await store.hgetall('s3a-live:meta')) ?? {};
   const daily = now - X >= 30_000 && Number(meta.lastDay ?? 0) < X;
+  // App 首頁顯示 testnet 錢包權益與模式：每小時寫一次（進出場後另外再寫）；放在早退之前，沒持倉時也會更新
+  if (now - Number(meta.walletAt ?? 0) >= 3_600_000) await writeWallet(ctx);
   if (!posMap.size && !daily) return;
 
   const risks = await client.getPositionRisk();
@@ -387,6 +398,7 @@ export async function runS3aLive(ctx: S3aCtx): Promise<void> {
         } catch (e) { ctx.log(`${tag}：掛止盈失敗，下一輪補掛：${String(e).slice(0, 150)}`); p.tpAlgoId = -2; }
       } else ctx.log(`${tag}：1/3 數量低於最小下單量，不掛分批止盈`);
       await save();
+      await writeWallet(ctx);
       await ctx.notify(`S3-A 進場 ${c.symbol.replace(/USDT$/, '')}`, `買進 ${qty0} @ ${fmt(E)}｜止損 ${fmt(c.stop)}｜+1R 平 1/3 @ ${fmt(E + (E - c.stop))}`);
     } catch (e) {
       log(`${tag}：下單失敗：${String(e).slice(0, 200)}`);
