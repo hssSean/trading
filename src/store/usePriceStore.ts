@@ -30,10 +30,13 @@ interface PriceState {
   lastTickAt: number;
   /** Set while backing off from a Binance 429/418. Surfaced as a UI hint. */
   rateLimited: boolean;
+  /** 不在自選清單、也不是舊策略持倉，但頁面需要即時價的幣（S3-A 真倉持倉，首頁設定） */
+  extraSymbols: string[];
 
   setPrices: (next: Map<string, number>) => void;
   setTickers24h: (next: Map<string, { price: number; priceChange: number; priceChangePercent: number }>) => void;
   setRateLimited: (v: boolean) => void;
+  setExtraSymbols: (symbols: string[]) => void;
 }
 
 const EMPTY: PriceTick = { price: 0, change24h: 0, changePct24h: 0, at: 0 };
@@ -42,6 +45,7 @@ export const usePriceStore = create<PriceState>()((set) => ({
   prices: {},
   lastTickAt: 0,
   rateLimited: false,
+  extraSymbols: [],
 
   setPrices: (next) =>
     set((s) => {
@@ -78,6 +82,7 @@ export const usePriceStore = create<PriceState>()((set) => ({
     }),
 
   setRateLimited: (v) => set({ rateLimited: v }),
+  setExtraSymbols: (symbols) => set((s) => (s.extraSymbols.join() === symbols.join() ? s : { extraSymbols: symbols })),
 }));
 
 // ── Read helpers ──────────────────────────────────────────────

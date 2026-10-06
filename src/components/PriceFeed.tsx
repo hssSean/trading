@@ -23,12 +23,14 @@ const SLOW_MS = 60_000;
 const BACKOFF_MS = 60_000;
 
 /** Symbols worth a price for: everything watched, plus any open trade's symbol
- *  (a coin can be removed from the watchlist while its position is still open). */
+ *  (a coin can be removed from the watchlist while its position is still open),
+ *  plus S3-A live positions (usePriceStore.extraSymbols, set by the home page). */
 function trackedSymbols(): string[] {
   const s = useStore.getState();
   const out = new Set<string>();
   for (const c of s.coins) out.add(c.symbol);
   for (const t of s.trades) if (!t.result) out.add(t.symbol);
+  for (const sym of usePriceStore.getState().extraSymbols) out.add(sym);
   return Array.from(out);
 }
 
