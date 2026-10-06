@@ -1,4 +1,5 @@
 'use client';
+import { StrategySection } from '@/components/s3/StrategySection';
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
@@ -412,10 +413,12 @@ export default function SettingsPage() {
     <div className="flex flex-col h-full">
       <div className="px-4 pt-14 pb-3 safe-top border-b border-white/[0.06]">
         <h1 className="text-text-p text-[15px] font-medium tracking-[0.05em]">設定</h1>
-        <p className="text-text-m text-xs mt-0.5">通知、分析週期、幣種管理</p>
+        <p className="text-text-m text-xs mt-0.5">策略狀態、推播、帳號</p>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pt-4 scroll-container space-y-4">
+
+        <StrategySection />
 
         {/* Account */}
         <Section title="帳號">
@@ -525,6 +528,87 @@ export default function SettingsPage() {
           </p>
         </Section>
 
+        {/* Cloud Sync */}
+        <Section title="雲端同步（Supabase）">
+          <div className="border border-up/20 rounded-[10px] px-4 py-3 mb-3">
+            <p className="text-up text-xs mb-1">自動同步已啟用</p>
+            <p className="text-text-m text-xs leading-5">
+              交易紀錄、自選幣種、通知設定均自動同步至 Supabase。<br />
+              任何裝置登入同一帳號，資料即時一致。
+            </p>
+          </div>
+          <p className="text-text-m text-xs leading-5">
+            同步時機：資料變動後 4 秒自動儲存，以及每 10 分鐘定期備份。<br />
+            首次登入新裝置時自動從雲端載入所有紀錄。
+          </p>
+        </Section>
+
+        {/* Data */}
+        <Section title="資料管理">
+          {/* Reset all signal notification locks */}
+          {resetMsg && (
+            <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
+              resetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
+            }`}>{resetMsg}</div>
+          )}
+          <button
+            onClick={handleResetAllLocks}
+            disabled={resetting}
+            className="w-full py-3 rounded-full border border-[#C99A2E]/30 text-[#C99A2E] text-sm mb-3 disabled:opacity-40"
+          >
+            {resetting ? '重置中…' : '重置所有推播鎖定'}
+          </button>
+          <p className="text-text-m text-xs mb-4 -mt-1">解除所有幣種的 24 小時推播鎖定，讓下次分析可以重新推播</p>
+          <button
+            onClick={() => { if (confirm('確定清除所有歷史信號？')) clearSignals(); }}
+            className="w-full py-3 rounded-full border border-down/30 text-down text-sm"
+          >
+            清除所有歷史信號
+          </button>
+
+          {/* Full atomic reset */}
+          <div className="mt-5 pt-4 border-t border-white/[0.06]">
+            {fullResetMsg && (
+              <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
+                fullResetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
+              }`}>{fullResetMsg}</div>
+            )}
+            <button
+              onClick={handleFullReset}
+              disabled={fullResetting}
+              className="w-full py-3 rounded-full border border-down/50 text-down text-sm disabled:opacity-40"
+            >
+              {fullResetting ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="w-4 h-4 border-2 border-down border-t-transparent rounded-full animate-spin" />
+                  重置中…
+                </span>
+              ) : '清空所有紀錄並重置'}
+            </button>
+            <p className="text-text-m text-xs mt-2 leading-5">
+              永久刪除全部交易紀錄、推薦單與 Redis 鎖定，所有裝置同步清空，無法復原
+            </p>
+          </div>
+
+          <p className="text-text-m text-xs mt-4 text-center leading-6">
+            行情：Binance 正式站公開資料・下單：Binance testnet<br />
+            策略：S3-A 真倉、S3-A／S3-B／S1 模擬帳本（研究端 2026-10-06 部署文件）<br />
+            <span className="text-down/70">本 App 僅供參考，不構成投資建議</span>
+          </p>
+        </Section>
+
+        {/* 2026-10-07：舊評分策略已停用（只剩出場管理），它的設定與診斷收在這裡，預設收合。 */}
+        <details className="group">
+          <summary className="list-none cursor-pointer bg-card-2 border border-white/[0.06] rounded-xl px-3.5 py-3 flex items-center justify-between">
+            <span className="tlabel">舊策略（已停用）</span>
+            <span className="text-text-m text-xs group-open:hidden">展開</span>
+            <span className="text-text-m text-xs hidden group-open:inline">收起</span>
+          </summary>
+          <div className="space-y-4 mt-4">
+            <p className="text-text-m text-xs leading-5 px-1">
+              2026-10-07 起改用 S3／S1。舊策略不再產生新推薦單（Vercel 設 LEGACY_SIGNALS_ENABLED=1 才恢復），
+              下面的設定只影響舊策略。
+            </p>
         {/* Monitor URL + Diag */}
         <Section title="自動監控設定">
           <div className="mb-3 flex items-end gap-2">
@@ -810,83 +894,13 @@ export default function SettingsPage() {
           )}
         </Section>
 
-        {/* Cloud Sync */}
-        <Section title="雲端同步（Supabase）">
-          <div className="border border-up/20 rounded-[10px] px-4 py-3 mb-3">
-            <p className="text-up text-xs mb-1">自動同步已啟用</p>
-            <p className="text-text-m text-xs leading-5">
-              交易紀錄、自選幣種、通知設定均自動同步至 Supabase。<br />
-              任何裝置登入同一帳號，資料即時一致。
-            </p>
-          </div>
-          <p className="text-text-m text-xs leading-5">
-            同步時機：資料變動後 4 秒自動儲存，以及每 10 分鐘定期備份。<br />
-            首次登入新裝置時自動從雲端載入所有紀錄。
-          </p>
-        </Section>
-
-        {/* Data */}
-        <Section title="資料管理">
-          {/* Reset all signal notification locks */}
-          {resetMsg && (
-            <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
-              resetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
-            }`}>{resetMsg}</div>
-          )}
-          <button
-            onClick={handleResetAllLocks}
-            disabled={resetting}
-            className="w-full py-3 rounded-full border border-[#C99A2E]/30 text-[#C99A2E] text-sm mb-3 disabled:opacity-40"
-          >
-            {resetting ? '重置中…' : '重置所有推播鎖定'}
-          </button>
-          <p className="text-text-m text-xs mb-4 -mt-1">解除所有幣種的 24 小時推播鎖定，讓下次分析可以重新推播</p>
-          <button
-            onClick={() => { if (confirm('確定清除所有歷史信號？')) clearSignals(); }}
-            className="w-full py-3 rounded-full border border-down/30 text-down text-sm"
-          >
-            清除所有歷史信號
-          </button>
-
-          {/* Full atomic reset */}
-          <div className="mt-5 pt-4 border-t border-white/[0.06]">
-            {fullResetMsg && (
-              <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
-                fullResetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
-              }`}>{fullResetMsg}</div>
-            )}
-            <button
-              onClick={handleFullReset}
-              disabled={fullResetting}
-              className="w-full py-3 rounded-full border border-down/50 text-down text-sm disabled:opacity-40"
-            >
-              {fullResetting ? (
-                <span className="flex items-center justify-center gap-2">
-                  <span className="w-4 h-4 border-2 border-down border-t-transparent rounded-full animate-spin" />
-                  重置中…
-                </span>
-              ) : '清空所有紀錄並重置'}
-            </button>
-            <p className="text-text-m text-xs mt-2 leading-5">
-              永久刪除全部交易紀錄、推薦單與 Redis 鎖定，所有裝置同步清空，無法復原
-            </p>
-          </div>
-
-          <p className="text-text-m text-xs mt-4 text-center leading-6">
-            資料來源：Binance API（僅讀取，不交易）<br />
-            分析引擎：SMC · SNR · RSI · MACD · EMA<br />
-            <span className="text-down/70">本 App 僅供參考，不構成投資建議</span>
-          </p>
-        </Section>
-
-        <Section title="診斷">
+        <Section title="舊策略頁面與診斷">
           <div className="space-y-2">
-            <button
-              onClick={() => router.push('/strategies')}
-              className="w-full py-3 rounded-full border border-accent/30 text-accent text-sm"
-            >
-              策略帳戶（S3-A 真倉・S3-A/S3-B/S1 模擬帳本）
-            </button>
+            {([['/legacy', '舊首頁（自選幣與本地分析）'], ['/legacy/signals', '舊策略信號'], ['/legacy/trades', '舊策略交易紀錄'], ['/health-check', '績效體檢（上傳交易紀錄）']] as const).map(([href, label]) => (
+              <button key={href} onClick={() => router.push(href)} className="w-full py-3 rounded-full border border-white/[0.08] text-text-s text-sm">
+                {label}
+              </button>
+            ))}
             <button
               onClick={() => router.push('/funnel')}
               className="w-full py-3 rounded-full border border-accent/30 text-accent text-sm"
@@ -901,6 +915,9 @@ export default function SettingsPage() {
             </button>
           </div>
         </Section>
+
+          </div>
+        </details>
 
         {/* Build version — a PWA tab can sit open on a stale bundle for days;
             this makes it obvious whether you're actually looking at the latest deploy. */}
