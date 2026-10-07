@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nextDecisionAt, haltProgress, unrealizedR, todaySummary } from '../src/lib/s3s1/view';
+import { nextDecisionAt, haltProgress, unrealizedR, legUnrealizedR, todaySummary } from '../src/lib/s3s1/view';
 
 const DAY = 86_400_000;
 const X = Date.UTC(2026, 9, 7);
@@ -48,5 +48,26 @@ describe('todaySummary', () => {
       { symbol: 'CUSDT', signalDay: X - 2 * DAY, decision: 'open' },
     ], X + 3_600_000);
     expect(s).toEqual({ X, ready: true, btcOk: true, breadth: 0.61, candidates: 2, opened: ['AUSDT'], blocked: [{ symbol: 'BUSDT', reason: '分數 1' }] });
+  });
+});
+
+describe('legUnrealizedR', () => {
+  const p = { entry: 10, stop0: 9, qty0: 50, partial: false, tpQty: 16,
+    legs: { A: { qty0: 30, tpQty: 10 }, B: { qty0: 20, tpQty: 6 } }, addQty: 30, addFilled: false };
+  it('沒有 legs 的舊紀錄：A 就是整個部位、B 沒有', () => {
+    expect(legUnrealizedR({ ...p, legs: undefined }, 11, 'A')).toBeCloseTo(1, 9);
+    expect(legUnrealizedR({ ...p, legs: undefined }, 11, 'B')).toBe(null);
+  });
+  it('B 加碼成交後：加上加碼份 30 × (12 − 11) ÷ (20 × 1R)', () => {
+    const b = legUnrealizedR({ ...p, partial: true, addFilled: true }, 12, 'B');
+    expect(b).toBeCloseTo(6 / 20 * 1 + 14 / 20 * 2 + 30 / 20, 9);
+    expect(legUnrealizedR({ ...p, partial: true, addFilled: true }, 12, 'A')).toBeCloseTo(10 / 30 + 20 / 30 * 2, 9);
+  });
+});
+
+describe('haltProgress（S3-B）', () => {
+  it('B 用 b. 前綴、門檻 40%／15 筆', () => {
+    const h = haltProgress({ 'b.baseEquity': '1000', 'b.realized': '-100', 'b.lossStreak': '4' }, 'B');
+    expect(h).toEqual({ ddPct: 10, ddLimit: 40, streak: 4, streakLimit: 15, halted: null });
   });
 });

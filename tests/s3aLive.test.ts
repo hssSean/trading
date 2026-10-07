@@ -52,8 +52,8 @@ describe('checkPosition', () => {
   it('部位歸零 → closed', () => {
     expect(checkPosition(pos(), 0, algos, 10)).toEqual({ kind: 'closed' });
   });
-  it('止盈單不見且部位少了 1/3 → partial_filled，止損拉到進場價', () => {
-    expect(checkPosition(pos(), 20, new Set([1]), 11)).toEqual({ kind: 'partial_filled', remaining: 20, newStop: 10 });
+  it('止盈單不見且部位少了 1/3 → fills（止盈），止損拉到進場價', () => {
+    expect(checkPosition(pos(), 20, new Set([1]), 11)).toEqual({ kind: 'fills', tp: true, add: false, newStop: 10 });
   });
   it('部位變小但止盈單還掛著（手動平倉）→ 不當成止盈', () => {
     expect(checkPosition(pos(), 20, algos, 10).kind).toBe('ok');
@@ -62,9 +62,10 @@ describe('checkPosition', () => {
     expect(checkPosition(pos(), 30, new Set([2]), 9.5)).toEqual({ kind: 'stop_missing', priceThrough: false });
     expect(checkPosition(pos(), 30, new Set([2]), 8.9)).toEqual({ kind: 'stop_missing', priceThrough: true });
   });
-  it('止盈單不見但部位沒變 → tp_missing（被拒絕）', () => {
-    expect(checkPosition(pos(), 30, new Set([1]), 10.5)).toEqual({ kind: 'tp_missing', priceThrough: false });
-    expect(checkPosition(pos(), 30, new Set([1]), 11.2)).toEqual({ kind: 'tp_missing', priceThrough: true });
+  it('止盈單不見但部位沒變 → 先等一輪，再當成被拒絕（tp_missing）', () => {
+    expect(checkPosition(pos(), 30, new Set([1]), 10.5)).toEqual({ kind: 'wait', which: 'tp' });
+    expect(checkPosition(pos({ miss: { tp: 1 } }), 30, new Set([1]), 10.5)).toEqual({ kind: 'tp_missing', priceThrough: false });
+    expect(checkPosition(pos({ miss: { tp: 1 } }), 30, new Set([1]), 11.2)).toEqual({ kind: 'tp_missing', priceThrough: true });
   });
   it('已平 1/3 後止盈單本來就不在，不算 tp_missing', () => {
     expect(checkPosition(pos({ partial: true, tpAlgoId: null }), 20, new Set([1]), 10).kind).toBe('ok');

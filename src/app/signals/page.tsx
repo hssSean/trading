@@ -9,11 +9,12 @@ import { reasonKey } from '@/lib/s3s1/stats';
 import { Card, Empty, ErrorBox, PageHeader, Seg, coin, fmtPx, fmtT } from '@/components/s3/ui';
 
 type Src = 'live' | 's3a' | 's3b' | 's1';
-const SRC_LABEL: Record<Src, string> = { live: '真倉 S3-A', s3a: '帳本 S3-A', s3b: '帳本 S3-B', s1: '帳本 S1' };
+const SRC_LABEL: Record<Src, string> = { live: '真倉 S3-A＋B', s3a: '帳本 S3-A', s3b: '帳本 S3-B', s1: '帳本 S1' };
 
 interface Item {
   src: Src; symbol: string; t: number; decision: 'open' | 'skip'; reason?: string;
   close: number; stop: number; score?: number; parts?: number[]; dist?: number;
+  legs?: Partial<Record<'A' | 'B', string>>;
 }
 
 const PART_LABEL = ['止損距離', 'BTC 強度', '7 日漲幅'];
@@ -31,6 +32,13 @@ function SignalItem({ s }: { s: Item }) {
         {s.score != null && <>・分數 {s.score}{s.parts ? `（${s.parts.map((v, i) => `${PART_LABEL[i]} ${v > 0 ? '+' : ''}${v}`).join('、')}）` : ''}</>}
       </p>
       {!open && s.reason && <p className="text-[10px] text-[#8A94A2] mt-0.5">{s.reason}</p>}
+      {s.legs && (
+        <p className="text-[10px] mt-0.5">
+          {(['A', 'B'] as const).filter(k => s.legs![k]).map(k => (
+            <span key={k} className={`mr-3 ${s.legs![k] === 'open' ? 'text-up' : 'text-[#565E6B]'}`}>S3-{k}：{s.legs![k] === 'open' ? '開倉' : s.legs![k]}</span>
+          ))}
+        </p>
+      )}
     </div>
   );
 }
@@ -43,7 +51,7 @@ export default function SignalsPage() {
   const items = useMemo<Item[]>(() => {
     if (!data) return [];
     const live: Item[] = data.live.map(s => ({ src: 'live', symbol: s.symbol, t: s.signalDay, decision: s.decision, reason: s.reason,
-      close: s.close, stop: s.stop, score: s.score, parts: s.scoreParts, dist: s.dist }));
+      close: s.close, stop: s.stop, score: s.score, parts: s.scoreParts, dist: s.dist, legs: s.legs }));
     const ledger: Item[] = data.ledger.map(s => ({ src: s.acct, symbol: s.symbol, t: s.signalT, decision: s.decision, reason: s.reason,
       close: s.close, stop: s.stop, score: s.score, parts: s.scoreParts, dist: s.dist }));
     return [...live, ...ledger].sort((a, b) => b.t - a.t);
@@ -61,7 +69,7 @@ export default function SignalsPage() {
     <div className="min-h-screen bg-[#0A0D11] text-[#E8ECF1]">
       <PageHeader title="訊號" sub={data ? `顯示 ${shown.length} 筆・開倉 ${opens}・擋掉 ${shown.length - opens}` : 'S3／S1 每一個突破訊號，含被擋掉的'} />
       <div className="px-3 py-3 space-y-2 pb-20">
-        <Seg value={src} onChange={setSrc} options={[['all', '全部'], ['live', '真倉 S3-A'], ['s3a', '帳本 S3-A'], ['s3b', '帳本 S3-B'], ['s1', '帳本 S1']]} />
+        <Seg value={src} onChange={setSrc} options={[['all', '全部'], ['live', '真倉'], ['s3a', '帳本 S3-A'], ['s3b', '帳本 S3-B'], ['s1', '帳本 S1']]} />
         <Seg value={dec} onChange={setDec} options={[['all', '全部'], ['open', '開倉'], ['skip', '擋掉']]} />
         {loading && !data && <p className="text-[#565E6B] text-xs text-center py-8">載入中…</p>}
         {error && <ErrorBox text={error} />}

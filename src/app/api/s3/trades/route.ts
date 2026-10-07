@@ -1,4 +1,4 @@
-// 紀錄頁用：S3-A 真倉的持倉與已平倉交易（含事件、滑價、手續費、資金費）。唯讀。
+// 紀錄頁用：S3-A＋S3-B 真倉（同帳戶分帳）的持倉與已平倉交易（含事件、滑價、手續費、資金費、分帳）。唯讀。
 import { NextRequest, NextResponse } from 'next/server';
 import { checkUserSession, getRedisOrNull, parseJson } from '@/lib/apiAuth';
 import type { LivePos } from '@/engine/s3aLive';
@@ -20,7 +20,7 @@ export async function GET(req: NextRequest) {
     const closed = Object.values(done ?? {}).map(v => parseJson<LivePos & LiveDone>(v)).sort((a, b) => b.exitAt - a.exitAt);
     return NextResponse.json({
       ok: true,
-      summary: summarizeLive(meta ?? {}, closed),
+      summaries: [summarizeLive(meta ?? {}, closed, 'A'), summarizeLive(meta ?? {}, closed, 'B')],
       open: Object.values(pos ?? {}).map(v => parseJson<LivePos>(v)).sort((a, b) => b.entryAt - a.entryAt),
       done: closed,
     });

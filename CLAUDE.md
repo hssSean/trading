@@ -25,15 +25,16 @@
 
 | | 做什麼 | 跑在哪 | 紀錄 |
 |---|---|---|---|
-| **S3-A 真倉** | 日線唐奇安突破＋分數 = 2，每筆 4%、風險加總 ≤ 20%、上限 10 | live-runner（testnet 真下單），UTC 00:00:30～02:00 進場 | Redis `s3a-live:*`（pos／done／meta／signals） |
+| **S3-A＋S3-B 真倉** | 日線唐奇安突破＋分數 = 2。A 每筆 4%；B 每筆 3%＋1R 加碼；各自風險加總 ≤ 20%。**同一個 testnet 帳戶、同幣合併成一個部位、內部分帳**（2026-10-07 使用者決定，設計 `docs/superpowers/specs/2026-10-07-s3b-live-shared-account-design.md`） | live-runner（testnet 真下單），UTC 00:00:30～02:00 進場 | Redis `s3a-live:*`（pos／done／meta／signals；meta 裡 A 無前綴、B 前綴 `b.`） |
 | S3-A／S3-B／S1 模擬帳本 | 三個 100 USDT 的帳本，S3-B 有 1R 加碼、S1 是 12H Keltner | Vercel `/api/analyze`（prep 00:05、S3 01:05、S1 每個 12H 收盤 +1h05） | Redis `s3s1:*`（meta／<帳戶>:open／done／signals／prep:<日>） |
 
 - **規則只有一份：`src/lib/s3s1/rules.ts`**（帳本 `engine.ts`、真倉 `src/engine/s3aLive.ts` 都用它）。改規則前先跑 `npm run s3s1-acceptance`（S3 35 筆、S1 15 筆、廣度 50 天，誤差 1e-6，必須全過）。
 - **舊策略只停「開新倉」**（`LEGACY_SIGNALS_ENABLED` 預設關，設 `=1` 才恢復掃描）；舊的持倉照原規則由 route.ts／live-runner 管到出場。S3-A 遇到交易所上已有該幣持倉或掛單就不進場。
-- S3-A 真倉開關：live-runner 的 shell 設 `S3A_DRY_RUN=1` = 只印不下單；kill switch 也會擋新倉。試跑：`ENV_FILE=env.txt npm run s3a-dryrun [-- --at-open]`（讀線上狀態、不下單、不寫 Redis）。
+- 真倉開關：live-runner 的 shell 設 `S3A_DRY_RUN=1` = 只印不下單（A、B 一起）；kill switch 也會擋新倉。試跑：`ENV_FILE=env.txt npm run s3a-dryrun [-- --at-open | --day=YYYY-MM-DD]`（讀線上狀態、不下單、不寫 Redis；`--day` 用 7 天內某天的訊號快照走一次進場）。
+- 真倉分帳的要點（`src/engine/s3aLive.ts`）：交易所上一個部位、一張止損（數量變了就先掛新再撤舊）、一張止盈（A、B 各 1/3）、一張 B 加碼 STOP_MARKET BUY（非 reduceOnly）。部位數量變了**只有「不見的條件單」能解釋時才當成成交**（`checkPosition`）；條件單不見但部位沒變要連續兩輪才當成被拒絕（避免觸發後市價單還在路上就重複下單）。出場依成交紀錄分帳（`splitResult`）。
 - **紙上登記（策略 A、影片 A/B/C）與 F1 前向追蹤已於 2026-10-07 停用並刪除程式碼**；Redis 的 `paper:*`、`f1p:*` 舊資料保留未刪。`src/lib/f1Paper.ts` 留著是因為 `structural-candidates` 回測還在用。
 - **App 2026-10-07 起以 S3 為主**（設計 `docs/superpowers/specs/2026-10-07-s3-app-redesign-design.md`）：首頁＝S3-A 真倉總覽、`/signals`＝S3／S1 訊號（含被擋掉的）、`/ledgers`＝三個帳本、`/trades`＝S3-A 真倉紀錄。資料走唯讀 API `/api/s3/{overview,signals,ledgers,trades}`（回應型別 `src/lib/s3s1/apiTypes.ts`，畫面計算 `src/lib/s3s1/view.ts`，統計 `src/lib/s3s1/stats.ts`）。舊策略的首頁／信號／紀錄搬到 `/legacy`、`/legacy/signals`、`/legacy/trades`，設定也收進設定頁最下方「舊策略（已停用）」；`/strategies` 轉址到 `/ledgers`。live-runner 每小時把 testnet 錢包權益與模式寫進 `s3a-live:meta`（`wallet`／`walletAt`／`mode`）。月報（文件 §7）：`ENV_FILE=env.txt npm run s3s1-report [-- YYYY-MM]` 寫到 `reports/`（不進版控）。手動補跑帳本：`npm run s3s1-run`。
-- 停用條件（文件 §8）程式會自己判、自己停開新倉：S3-A 回撤 > 35% 或連虧 7；S3-B > 40% 或連虧 15；S1 > 60% 或近 50 筆勝率 < 45%。
+- 停用條件（文件 §8）程式會自己判、自己停開新倉（真倉 A、B 各自判）：S3-A 回撤 > 35% 或連虧 7；S3-B > 40% 或連虧 15；S1 > 60% 或近 50 筆勝率 < 45%。
 - 誠實提醒：S3 的分數門檻是看過歷史資料後挑的（研究端自己也說新資料才驗得了），S1 標為實驗性。
 
 ### ⚠️ 兩條執行路徑（搞錯這個會誤診很多問題）

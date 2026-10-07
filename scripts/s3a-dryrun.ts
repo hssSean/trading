@@ -5,6 +5,7 @@
  *
  *   ENV_FILE=env.txt npm run s3a-dryrun              # 用現在的時間
  *   ENV_FILE=env.txt npm run s3a-dryrun -- --at-open  # 假裝現在是今天 UTC 00:01（看今天開盤會怎麼進場；價格仍是現價）
+ *   ENV_FILE=env.txt npm run s3a-dryrun -- --day=2026-10-06   # 用那天的訊號快照走一次進場（7 天內；價格仍是現價）
  */
 import { Redis } from '@upstash/redis';
 import { loadEnvFile, reportEnvLoad } from './loadEnvFile';
@@ -42,9 +43,12 @@ async function main(): Promise<void> {
   const bal = (await binance.getBalance()).find(b => b.asset === 'USDT');
   console.log(`testnet 錢包餘額 ${bal?.balance} USDT（可用 ${bal?.availableBalance}）；testnet 合約 ${filters.size} 檔`);
   const t0 = Date.now();
-  const atOpen = process.argv.includes('--at-open');
-  const now = atOpen ? Math.floor(t0 / 86_400_000) * 86_400_000 + 60_000 : t0;
-  if (atOpen) console.log('（--at-open：假裝現在是 UTC 00:01）');
+  const dayArg = process.argv.find(a => a.startsWith('--day='))?.slice(6);
+  const atOpen = process.argv.includes('--at-open') || !!dayArg;
+  const day0 = dayArg ? Date.parse(`${dayArg}T00:00:00Z`) : Math.floor(t0 / 86_400_000) * 86_400_000;
+  const now = atOpen ? day0 + 60_000 : t0;
+  // 今天如果已經處理過，記憶體裡把 lastDay 清掉，才會重跑一次每日決策（不會寫到線上）
+  if (atOpen) { console.log('（--at-open：假裝現在是 UTC 00:01）'); await store.hset('s3a-live:meta', { lastDay: '0' }); }
   await runS3aLive({
     client: binance, store, filters,
     mainnetDaily: s => fetchClosedBars(s, '1d', 499),

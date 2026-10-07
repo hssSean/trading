@@ -1,4 +1,5 @@
 // App 畫面用的 S3 計算（首頁、紀錄頁）。純函數，有單元測試（tests/s3View.test.ts）。
+import { LEGS, legMeta, type Leg } from '../../engine/s3aLive';
 const DAY = 86_400_000;
 const DECISION_OFFSET_MS = 30_000; // live-runner 在 UTC 00:00:30 之後做每日決策（s3aLive.ts）
 
@@ -11,17 +12,15 @@ export function nextDecisionAt(now: number): number {
   return now < today ? today : today + DAY;
 }
 
-/** 文件 §8 停用條件的進度；回撤口徑與 stats.summarizeLive 相同 */
-export function haltProgress(meta: Record<string, unknown>) {
-  const base = Number(meta.baseEquity ?? 0);
-  const realized = Number(meta.realized ?? 0);
-  const peak = Number(meta.peakRealized ?? 0);
+/** 文件 §8 停用條件的進度（A：35%／7 筆；B：40%／15 筆）；回撤口徑與 stats.summarizeLive 相同 */
+export function haltProgress(meta: Record<string, unknown>, leg: Leg = 'A') {
+  const m = legMeta(meta, leg);
   return {
-    ddPct: base > 0 ? (peak - realized) / (base + peak) * 100 : 0,
-    ddLimit: 35 as const,
-    streak: Number(meta.lossStreak ?? 0),
-    streakLimit: 7 as const,
-    halted: meta.halted ? String(meta.halted) : null,
+    ddPct: m.base > 0 ? (m.peak - m.realized) / (m.base + m.peak) * 100 : 0,
+    ddLimit: LEGS[leg].DD * 100,
+    streak: m.streak,
+    streakLimit: LEGS[leg].STREAK,
+    halted: m.halted,
   };
 }
 
@@ -36,6 +35,23 @@ export function unrealizedR(p: { entry: number; stop0: number; qty0: number; par
   if (!p.partial || !(p.qty0 > 0)) return r;
   const done = p.tpQty / p.qty0;
   return done * 1 + (1 - done) * r;
+}
+
+/**
+ * 合併部位裡某個策略那一份的浮動 R（以該策略原單的初始風險為 1R）。
+ * B 份另外加上加碼份的浮動損益（加碼價以觸發價 E＋1R 估）。沒有 legs 的舊紀錄 = 全部是 A。
+ */
+export function legUnrealizedR(
+  p: { entry: number; stop0: number; qty0: number; partial: boolean; tpQty: number; legs?: Partial<Record<Leg, { qty0: number; tpQty: number }>>; addQty?: number; addFilled?: boolean },
+  price: number, leg: Leg,
+): number | null {
+  const l = p.legs ? p.legs[leg] : leg === 'A' ? { qty0: p.qty0, tpQty: p.tpQty } : undefined;
+  if (!l || !(l.qty0 > 0)) return null;
+  const base = unrealizedR({ entry: p.entry, stop0: p.stop0, qty0: l.qty0, tpQty: l.tpQty, partial: p.partial }, price);
+  if (base == null || leg !== 'B' || !p.addFilled || !(p.addQty! > 0)) return base;
+  const r1 = p.entry - p.stop0;
+  const addPnl = p.addQty! * (price - (p.entry + r1));
+  return base + addPnl / (l.qty0 * r1);
 }
 
 export interface TodaySummary {

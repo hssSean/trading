@@ -1,5 +1,5 @@
 'use client';
-// 首頁：S3-A testnet 真倉總覽（2026-10-07 改版，docs/superpowers/specs/2026-10-07-s3-app-redesign-design.md）。
+// 首頁：S3-A＋S3-B testnet 真倉總覽（同帳戶分帳）（2026-10-07 改版，docs/superpowers/specs/2026-10-07-s3-app-redesign-design.md）。
 // 舊策略的自選幣首頁搬到 /legacy。資料來自 /api/s3/overview，每 30 秒更新。
 import { useEffect, useMemo } from 'react';
 import { useS3Api } from '@/lib/s3s1/useS3Api';
@@ -31,7 +31,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-[#0A0D11] text-[#E8ECF1]">
-      <PageHeader title="S3-A 趨勢策略" sub="日線唐奇安突破＋分數・testnet 真倉" />
+      <PageHeader title="S3 趨勢策略" sub="日線唐奇安突破＋分數・S3-A＋S3-B testnet 真倉" />
       <div className="px-3 py-3 space-y-2 pb-20">
         {loading && !data && <p className="text-[#565E6B] text-xs text-center py-8">載入中…</p>}
         {error && <ErrorBox text={error} />}

@@ -23,4 +23,4 @@ export interface LedgersResp {
 }
 
 export type LiveClosed = LivePos & LiveDone;
-export interface TradesResp { ok: boolean; reason?: string; summary: LiveSummary; open: LivePos[]; done: LiveClosed[] }
+export interface TradesResp { ok: boolean; reason?: string; summaries: LiveSummary[]; open: LivePos[]; done: LiveClosed[] }
