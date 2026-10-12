@@ -8,12 +8,15 @@
  * 停擺一週」這種事發生過不只一次（live-runner 整週沒監控持倉、
  * DB 模擬捏造出場把系統自己停掉）。
  *
- * 這支只讀 Supabase，**不需要 Redis**——刻意如此，因為 Redis 掛掉正是最
- * 需要看狀態的時候。
+ * 2026-10-12 起以 S3 為主：先印 S3 真倉（Redis s3a-live:* ＋交易所），判語在
+ * src/lib/s3s1/statusCheck.ts。**Redis 讀不到時照樣往下跑**——Redis 掛掉正是最需要
+ * 看狀態的時候，Supabase 心跳與交易所部位仍然印得出來。
+ * 舊策略（Supabase trades）只在還有未平倉、或加 --legacy 時才展開。
  *
- *   ENV_FILE=env.txt npm run status
+ *   ENV_FILE=env.txt npm run status [-- --legacy]
  *
- * 需要 NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / TRADING_USER_ID。
+ * 需要 NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / TRADING_USER_ID；
+ * S3 部分另外需要 UPSTASH_REDIS_REST_URL／TOKEN，交易所部分需要 BINANCE_TESTNET_API_KEY／SECRET。
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -28,6 +31,96 @@ const ago = (t: number | null | undefined): string => {
   if (d < 24 * H) return `${(d / H).toFixed(1)} 小時前`;
   return `${(d / (24 * H)).toFixed(1)} 天前`;
 };
+
+const DAYMS = 24 * H;
+const fmtDay = (t: number) => new Date(t).toISOString().slice(0, 10);
+const num = (v: unknown, d = 2) => (Number.isFinite(Number(v)) ? Number(v).toFixed(d) : '—');
+const parse = <T,>(v: unknown): T => (typeof v === 'string' ? JSON.parse(v) : v) as T;
+
+/** S3 真倉區塊。回傳 Redis 記著的持倉 symbol（給孤兒比對）；Redis 讀不到回 null。 */
+async function printS3(
+  exPos: { symbol: string; positionAmt: string }[] | null,
+  exAlgos: { symbol: string; algoId: number }[] | null,
+): Promise<string[] | null> {
+  const url = process.env.UPSTASH_REDIS_REST_URL, token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) { console.log('⚠ 缺 UPSTASH_REDIS_REST_URL／TOKEN，看不到 S3'); return null; }
+  const { Redis } = await import('@upstash/redis');
+  const { legMeta, LEGS, LEG_KEYS } = await import('../src/engine/s3aLive');
+  type LivePos = import('../src/engine/s3aLive').LivePos;
+  type LiveSignal = import('../src/engine/s3aLive').LiveSignal;
+  const { s3Findings } = await import('../src/lib/s3s1/statusCheck');
+  const { ACCTS } = await import('../src/lib/s3s1/engine');
+  const r = new Redis({ url, token });
+  const now = Date.now();
+  const X = Math.floor(now / DAYMS) * DAYMS, D = X - DAYMS;
+
+  let meta: Record<string, unknown>, posRaw: Record<string, unknown>, sigRaw: unknown[], xc: Record<string, unknown>, ledger: Record<string, unknown>;
+  try {
+    [meta, posRaw, sigRaw, xc, ledger] = await Promise.all([
+      r.hgetall<Record<string, unknown>>('s3a-live:meta').then(v => v ?? {}),
+      r.hgetall<Record<string, unknown>>('s3a-live:pos').then(v => v ?? {}),
+      r.lrange('s3a-live:signals', 0, 29),
+      r.hgetall<Record<string, unknown>>('s3s1:xcheck').then(v => v ?? {}),
+      r.hgetall<Record<string, unknown>>('s3s1:meta').then(v => v ?? {}),
+    ]);
+  } catch (e) {
+    console.log(`⚠ Redis 讀不到（${String(e).slice(0, 100)}）——S3 狀態看不到，以下只剩 Supabase 與交易所`);
+    return null;
+  }
+
+  const positions = Object.values(posRaw).map(v => parse<LivePos>(v));
+  const signals = sigRaw.map(v => parse<LiveSignal>(v));
+
+  console.log(`模式 ${meta.mode ?? '?'}｜testnet 錢包 ${num(meta.wallet)} USDT（${ago(meta.walletAt ? Number(meta.walletAt) : null)}）`);
+  for (const k of LEG_KEYS) {
+    const m = legMeta(meta, k);
+    console.log(`  ${LEGS[k].name}  權益 ${num(m.equity)}（起始 ${num(m.base)}、已實現 ${m.realized >= 0 ? '+' : ''}${num(m.realized)}）`
+      + `  連虧 ${m.streak}${m.halted ? `  ⛔ 停用：${m.halted}` : ''}`);
+  }
+
+  const today = signals.filter(s => s.signalDay === D);
+  console.log(`\n今天（決策日 ${fmtDay(X)}，訊號日 ${fmtDay(D)}）`
+    + `  最後決策日 ${meta.lastDay ? fmtDay(Number(meta.lastDay)) : '從未'}`);
+  if (today.length === 0) console.log('  沒有突破候選（或今天的決策還沒跑）');
+  for (const s of today) {
+    const legs = s.legs ? Object.entries(s.legs).map(([k, v]) => `${k}:${v}`).join(' ') : (s.reason ?? s.decision);
+    console.log(`  ${s.symbol.replace('USDT', '').padEnd(8)} 分數 ${s.score ?? '—'}  廣度 ${num(s.breadth, 3)}  BTC ${s.btcOk ? '✓' : '✗'}  → ${legs}`);
+  }
+
+  const qty = exPos ? Object.fromEntries(exPos.map(p => [p.symbol, Math.abs(parseFloat(p.positionAmt))])) : null;
+  console.log(`\n持倉 ${positions.length} 筆`);
+  for (const p of positions) {
+    const R = p.entry - p.stop0;
+    console.log(`  ${p.symbol.replace('USDT', '').padEnd(8)} 進場 ${p.entry}（${fmtDay(p.entryAt)}）  止損 ${p.stop}`
+      + `（${R > 0 ? `${((p.stop - p.entry) / R).toFixed(2)}R` : '—'}）  ${p.partial ? '止盈已成交' : '止盈未成交'}`
+      + `${p.addQty ? (p.addFilled ? '  B 已加碼' : '  B 加碼單掛著') : ''}`
+      + `${qty ? `  交易所 ${qty[p.symbol] ?? 0}` : ''}`);
+  }
+
+  const L = ACCTS;
+  const ledgerLine = (['s3a', 's3b', 's1'] as const).map(k => {
+    const st = ledger[`acct.${k}`] ? parse<{ equity: number; trades: number; halted: string | null }>(ledger[`acct.${k}`]) : null;
+    return `${L[k].name.split('｜')[0]} ${st ? `${num(st.equity)}（${st.trades} 筆）${st.halted ? '⛔' : ''}` : '—'}`;
+  }).join('  ');
+  console.log(`\n模擬帳本（各 100 起）  ${ledgerLine}`);
+
+  const xr = Object.values(xc).map(v => parse<{ X: number; day: string; ok: boolean; checkedAt: number }>(v));
+  const lastXc = xr.length ? Math.max(...xr.map(x => x.checkedAt)) : null;
+  const recentBad = xr.filter(x => !x.ok && x.X >= X - 7 * DAYMS).map(x => x.day).sort();
+  console.log(`每日對帳  最後 ${ago(lastXc)}，近 7 天 ${xr.filter(x => x.X >= X - 7 * DAYMS).length} 天已對、不一致 ${recentBad.length} 天`);
+
+  const findings = s3Findings({
+    now, lastDay: Number(meta.lastDay ?? 0), mode: meta.mode ? String(meta.mode) : null,
+    walletAt: meta.walletAt ? Number(meta.walletAt) : null,
+    legs: LEG_KEYS.map(k => ({ name: LEGS[k].name, halted: legMeta(meta, k).halted })),
+    positions: positions.map(p => ({ symbol: p.symbol, stopAlgoId: p.stopAlgoId, tpAlgoId: p.tpAlgoId, partial: p.partial })),
+    exchangeQty: qty, algos: exAlgos,
+    xcheck: { lastAt: lastXc, badDays: recentBad },
+  });
+  console.log('');
+  for (const f of findings) console.log(`${f.level === 'ok' ? '✅' : f.level === 'warn' ? '⚠ ' : '🔴'} ${f.msg}`);
+  return positions.map(p => p.symbol);
+}
 
 async function main() {
   reportEnvLoad(loadEnvFile());
@@ -51,20 +144,67 @@ async function main() {
   const last24 = rows.filter(r => (r.opened_at ?? 0) > Date.now() - 24 * H);
   const closed24 = rows.filter(r => (r.closed_at ?? 0) > Date.now() - 24 * H);
 
-  console.log(`\n${'='.repeat(60)}`);
+  const showLegacy = open.length > 0 || process.argv.includes('--legacy');
+  const ack = prof && 'drawdown_ack_at' in prof ? prof.drawdown_ack_at : undefined;
+  const hb  = prof && 'live_runner_heartbeat_at' in prof ? prof.live_runner_heartbeat_at : undefined;
+
+  // ── 交易所（帳戶級，S3 與舊策略共用一次查詢）──
+  let exPos: Awaited<ReturnType<import('../src/engine/binanceClient').BinanceFuturesClient['getPositionRisk']>> | null = null;
+  let exAlgos: Awaited<ReturnType<import('../src/engine/binanceClient').BinanceFuturesClient['getOpenAlgoOrders']>> | null = null;
+  if (process.env.BINANCE_TESTNET_API_KEY) {
+    try {
+      const { BinanceFuturesClient, loadBinanceConfigFromEnv } = await import('../src/engine/binanceClient');
+      const client = new BinanceFuturesClient(loadBinanceConfigFromEnv(true));
+      exPos = (await client.getPositionRisk()).filter(p => parseFloat(p.positionAmt) !== 0);
+      exAlgos = await client.getOpenAlgoOrders();
+    } catch (e) {
+      console.log(`⚠ 查不到交易所：${String(e).slice(0, 120)}`);
+    }
+  }
+
+  console.log(`\n${'='.repeat(60)}\nS3 真倉（testnet）`);
+  const s3Symbols = await printS3(exPos, exAlgos);
+
+  console.log(`\nlive-runner 心跳（Supabase） ${hb === undefined ? '⚠ 欄位不存在（migration 未跑）' : ago(hb as number)}`);
+  console.log(`live_trading_enabled         ${prof?.live_trading_enabled ?? '（讀不到）'}`);
+
+  // ── 孤兒部位：幣安上有，但 S3（Redis）與舊策略（DB）都不知道 ──
+  //
+  // 2026-09-01 ARBUSDT：限價單部分成交後被當成過期撤單，已成交那部分變成沒人管的裸倉。
+  // 孤兒部位不移動止損、不掛止盈、不計入風險額度，所以用帳戶級查詢反過來比對
+  // （拿交易所的部位去找紀錄，而不是拿紀錄去找部位）。
+  // 2026-10-12：S3 持倉記在 Redis 不在 trades 表，舊版會把每一筆 S3 持倉都報成孤兒。
+  if (exPos) {
+    const known = new Set([...open.map(o => o.symbol), ...(s3Symbols ?? [])]);
+    const orphans = exPos.filter(p => !known.has(p.symbol));
+    if (orphans.length > 0) {
+      console.log(`\n⚠⚠ 孤兒部位 ${orphans.length} 筆——幣安上有部位，但 S3 與舊策略都沒有對應的紀錄`);
+      for (const p of orphans) {
+        console.log(`  ${p.symbol.replace('USDT', '').padEnd(8)} ${p.positionAmt} @ ${p.entryPrice}`
+          + `  未實現 ${parseFloat(p.unRealizedProfit).toFixed(2)} USDT`);
+      }
+      console.log(s3Symbols == null
+        ? `  （Redis 讀不到，S3 持倉也會出現在這裡，不一定是孤兒）`
+        : `  這些部位沒有任何自動化在管。常見成因：手機 App 手動下單、限價單部分成交後被判定過期。`);
+    } else if (exPos.length > 0) {
+      console.log(`\n幣安上 ${exPos.length} 個部位全部對得上紀錄，無孤兒。`);
+    }
+  }
+
+  if (!showLegacy) {
+    console.log(`\n舊策略：0 筆未平倉，已停開新倉（它的回撤停機／沒訊號狀態與 S3 無關；加 --legacy 看細節）\n`);
+    return;
+  }
+
+  console.log(`\n${'='.repeat(60)}\n舊策略（已停開新倉，管到出場）`);
   console.log(`最後產生訊號    ${ago(lastOpened)}`);
   console.log(`過去 24h        新單 ${last24.length} 筆 / 平倉 ${closed24.length} 筆`);
   console.log(`目前未平倉      ${open.length} 筆`
     + (open.length > 0 ? `（${open.map(o => o.symbol.replace('USDT', '')).join(', ')}）` : ''));
   console.log(`  其中真倉      ${open.filter(o => o.exchange_entry_order_id != null).length} 筆`);
-
-  console.log(`\nlive_trading_enabled   ${prof?.live_trading_enabled ?? '（讀不到）'}`);
-  // 這兩個欄位需要 migration。讀不到就是還沒跑 ALTER TABLE——那代表回撤停機
-  // 在 Redis 掛掉時解除不了，是這輪最容易被漏掉的一步。
-  const ack = prof && 'drawdown_ack_at' in prof ? prof.drawdown_ack_at : undefined;
-  const hb  = prof && 'live_runner_heartbeat_at' in prof ? prof.live_runner_heartbeat_at : undefined;
-  console.log(`回撤停機確認時間        ${ack === undefined ? '⚠ 欄位不存在（migration 未跑）' : ago(ack as number)}`);
-  console.log(`live-runner 心跳        ${hb === undefined ? '⚠ 欄位不存在（migration 未跑）' : ago(hb as number)}`);
+  // 這個欄位需要 migration。讀不到就是還沒跑 ALTER TABLE——那代表回撤停機
+  // 在 Redis 掛掉時解除不了。
+  console.log(`回撤停機確認時間 ${ack === undefined ? '⚠ 欄位不存在（migration 未跑）' : ago(ack as number)}`);
 
   // ── trades 那邊的 migration（2026-09-07 補）────────────────────────────
   //
@@ -82,42 +222,8 @@ async function main() {
     console.log(`trades.${col.padEnd(22)} ${error ? `⚠ 不存在（migration 未跑）— ${why}` : '✅'}`);
   }
 
-  // 心跳「從未」不代表 live-runner 死了——舊版只寫 Redis，而 Redis 掛掉時
-  // 那筆寫入會失敗。真正該問的是「那些真倉現在有保護單嗎」，那個只有交易所
-  // 答得出來，而且是唯讀查詢。有倉沒止損 = 有錢在冒險而且沒人看著。
+  // 真正該問的是「那些真倉現在有保護單嗎」，那個只有交易所答得出來。
   const liveOpen = open.filter(o => o.exchange_entry_order_id != null);
-  if (process.env.BINANCE_TESTNET_API_KEY) {
-    const { BinanceFuturesClient, loadBinanceConfigFromEnv } = await import('../src/engine/binanceClient');
-    const client = new BinanceFuturesClient(loadBinanceConfigFromEnv(true));
-
-    // ── 孤兒部位：幣安上有，但 DB 不知道 ──
-    //
-    // 這一段補的是先前的盲點：舊版只檢查「DB 認為開著」的單的保護單，所以
-    // **「DB 不知道它存在」的部位完全查不到**。2026-09-01 實測撞到：ARBUSDT
-    // 在幣安有 1,123.2 顆，App 顯示「真倉進場單過期未成交（真實從未開倉）」
-    // ——限價單部分成交後被當成過期撤單，已成交那部分變成沒人管的裸倉。
-    //
-    // 孤兒部位是最危險的狀態：不移動止損、不掛 TP1、不時間止損、不計入
-    // 風險額度。所以要用**帳戶級**查詢（不帶 symbol），拿全部有部位的
-    // symbol 去比對 DB，而不是反過來。
-    const allPos = await client.getPositionRisk();
-    const livePos = allPos.filter(p => parseFloat(p.positionAmt) !== 0);
-    const knownSymbols = new Set(open.map(o => o.symbol));
-    const orphans = livePos.filter(p => !knownSymbols.has(p.symbol));
-
-    if (orphans.length > 0) {
-      console.log(`\n⚠⚠ 孤兒部位 ${orphans.length} 筆——幣安上有部位，但 DB 沒有對應的未平倉紀錄`);
-      for (const p of orphans) {
-        console.log(`  ${p.symbol.replace('USDT', '').padEnd(8)} ${p.positionAmt} @ ${p.entryPrice}`
-          + `  未實現 ${parseFloat(p.unRealizedProfit).toFixed(2)} USDT`);
-      }
-      console.log(`  這些部位沒有任何自動化在管（不移動止損、不掛 TP1、不時間止損、不計入風險額度）。`);
-      console.log(`  常見成因：限價單部分成交後被判定過期撤單，已成交部分被標成「從未開倉」。`);
-    } else if (livePos.length > 0) {
-      console.log(`\n幣安上 ${livePos.length} 個部位全部對得上 DB 紀錄，無孤兒。`);
-    }
-  }
-
   if (liveOpen.length > 0 && process.env.BINANCE_TESTNET_API_KEY) {
     console.log(`\n── 真倉的交易所保護單 ──`);
     const { BinanceFuturesClient, loadBinanceConfigFromEnv } = await import('../src/engine/binanceClient');
