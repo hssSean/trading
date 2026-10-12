@@ -46,13 +46,14 @@
 | | Vercel `/api/analyze` | `scripts/live-runner.ts`（AWS EC2 常駐） |
 |---|---|---|
 | 跑在哪 | Vercel cron，5 分鐘一輪 | AWS EC2 上 `npm run live-runner`，15 秒一輪 |
-| 做什麼 | 產生訊號 + **DB 模擬**監控；S3／S1 模擬帳本 | **真的在幣安 testnet 下單**、監控、關單；S3-A 真倉 |
+| 做什麼 | S3／S1 模擬帳本、分數影子、live-runner 停止告警、對帳告警（2026-10-12 起舊策略掃描與 DB 模擬已移除） | **真的在幣安 testnet 下單**、監控、關單；S3-A 真倉 |
 | 對誰生效 | `live_trading_enabled=false` 的使用者 | `live_trading_enabled=true` 的那一位 |
-| 發哪些推播 | 新推薦單（**不受 live 影響，一律由這裡發**） | 進場成交／TP1／移動止損／出場／推薦單失效 |
+| 發哪些推播 | live-runner 停止／恢復、S3 對帳不一致 | 進場成交／TP1／移動止損／出場／推薦單失效 |
 
-`live_trading_enabled=true` 時，route.ts 的**監控階段**會排除該使用者（訊號產生不受影響）。所以：
+2026-10-12 起 route.ts 不再監控任何持倉（舊策略的 DB 模擬已移除），所有真倉事件的推播都來自 live-runner。所以：
 
-- **「只收得到推薦單通知」= live-runner 那側的推播掛了**，不是推播機制壞掉。第一個要查的是 live-runner 的 shell 有沒有 VAPID 金鑰（2026-08-12 實測就是這個原因，已加啟動警告）。
+- **進出場推播收不到 = live-runner 那側的推播掛了**，不是推播機制壞掉。第一個要查的是 live-runner 的 shell 有沒有 VAPID 金鑰（2026-08-12 實測就是這個原因，已加啟動警告）。
+- 🔴 **`env.txt` 不是 shell 腳本，絕對不要 `source`／`. ./env.txt`**。裡面混了筆記與指令（含 `npm run live-runner`），2026-10-12 被 source 時真的在本機啟動了 live-runner（因缺變數立刻退出，沒下單），還把金鑰印到終端。要載入一律用 `ENV_FILE=env.txt` ＋ `scripts/loadEnvFile.ts`。
 - live-runner **不會載入 `.env`**（專案沒裝 dotenv），所有環境變數都得在啟動它的 shell 裡設好，清單見 `.env.local.example`。
 - live-runner 是常駐腳本，**改完 code 要使用者到 EC2 `git pull` 並重啟才生效**（Vercel 那側 push 完自動部署）。
 - live-runner 停止超過 10 分鐘，route.ts 會推播「⚠ live-runner 停止了」（`src/lib/liveRunnerAlert.ts`，2026-10-12）。route.ts 只接得了舊策略的 DB 模擬，**S3 真倉的移動止損／加碼／進場在 runner 停止期間沒人做**。
@@ -118,7 +119,7 @@ npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的�
 
 | 檔案 | 職責 |
 |---|---|
-| `src/app/api/analyze/route.ts` | 掃描主流程：regime 判定、風控關卡、DB 寫入、推播、持倉監控、漏斗與影子模擬 |
+| `src/app/api/analyze/route.ts` | cron 入口（約 300 行）：live-runner 停止告警、S3／S1 帳本工作、對帳告警。2026-10-12 前的舊策略主流程（3700 行）最後版本在 commit `c2070fc` |
 | `src/analysis/signals.ts` | v2.1 分組計分（基礎 40 + 五組上限）、tier 門檻（A/B 目前都是 65，B 已名存實亡）、策略 B 均值回歸 |
 | `src/analysis/indicators.ts` | EMA/RSI/MACD/ADX/BB/Donchian；`computeIndicators` 附帶前一根值（勿再算兩次） |
 | `src/lib/position.ts` | 倉位計畫（倉位/本金/槓桿），前後端共用，勿另寫倉位公式 |
