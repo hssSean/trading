@@ -3,6 +3,7 @@ import { Redis } from '@upstash/redis';
 import { fetchCandles, fetchTopCoinsByVolume, fetchFundingRate, fetchOpenInterestChange } from '@/api/binance';
 import { runPrep, runS3, runS1, dueS3S1Job } from '@/lib/s3s1/engine';
 import { binanceS3S1Deps } from '@/lib/s3s1/deps';
+import { decideXcheckAlert } from '@/lib/s3s1/xcheckAlert';
 import { calcAtrHistory, calcAtrPercentile, adx as calcAdx, ema as calcEma } from '@/analysis/indicators';
 import { generateSignals, generateMeanReversionSignals, unifySignalDirection } from '@/analysis/signals';
 import type { RejectedCandidate } from '@/analysis/signals';
@@ -3496,6 +3497,35 @@ export async function GET(req: NextRequest) {
         }
       } catch (e) {
         console.error('[s3s1] failed:', String(e).slice(0, 200));
+      }
+      // 研究端每日前向對帳（s3_xcheck.py，台灣 09:30 跑）的結果：每天約 UTC 02:00 看一次，
+      // 有新的不一致、或對帳超過 3 天沒跑就推播。見 src/lib/s3s1/xcheckAlert.ts。
+      if (profileId && inDay >= 2 * 3_600_000 && inDay < 4 * 3_600_000) {
+        try {
+          if (await claimPeriodicSlot('s3s1-xcheck-alert', 6 * 3600)) {
+            const hash = (await rj.hgetall<Record<string, unknown>>('s3s1:xcheck')) ?? {};
+            const notified = ((await rj.smembers('s3s1:xcheck:notified')) ?? []).map(String);
+            const alert = decideXcheckAlert(hash, notified, nowJ);
+            if (alert.bad.length) {
+              const first = alert.bad[0];
+              await sendWebPushToUser(profileId, {
+                title: `🔴 S3 對帳不一致（${alert.bad.map(b => b.day).join('、')}）`,
+                body: `${first.diffs.slice(0, 2).join('；')}${first.diffs.length > 2 ? ` 等 ${first.diffs.length} 處` : ''}。研究端重算與線上不同，詳見 trading_stratage/reports/xcheck。`,
+                tag: 's3-xcheck',
+              });
+              await rj.sadd('s3s1:xcheck:notified', ...alert.bad.map(b => String(b.X)) as [string, ...string[]]);
+              await rj.expire('s3s1:xcheck:notified', 30 * 86_400);
+            } else if (alert.stale) {
+              await sendWebPushToUser(profileId, {
+                title: '⚠ S3 對帳超過 3 天沒跑',
+                body: '研究端 s3_xcheck.py 沒有新結果（電腦沒開或排程壞了）。線上交易不受影響，但分岔不會被發現。',
+                tag: 's3-xcheck',
+              });
+            }
+          }
+        } catch (e) {
+          console.error('[s3s1] xcheck alert failed:', String(e).slice(0, 200));
+        }
       }
       timing.mark('s3s1', tJ);
     }
