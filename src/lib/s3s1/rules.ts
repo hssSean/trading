@@ -139,7 +139,11 @@ export function universeOn(all: Map<string, Bar[]>, dayD: number, topN: number):
   const rows: { symbol: string; vol: number }[] = [];
   for (const [symbol, bars] of Array.from(all.entries())) {
     if (isExcludedSymbol(symbol)) continue;
-    const i = idxOf(bars, dayD);
+    // 當天這根可能還沒收盤（prep 在 UTC 00:05 跑，只有到 D−1 的已收盤日線）：排名只用
+    // D−30～D−1，不需要 D 本身，所以最後一根是 D−1 時把 i 當成「下一根」。
+    // 2026-10-12 修：舊版要求 D 那根存在，uni[X] 永遠空的，S1 上線以來 0 候選。
+    let i = idxOf(bars, dayD);
+    if (i < 0 && bars.length && bars[bars.length - 1].t === dayD - DAY) i = bars.length;
     if (i < 30) continue; // age ≥ 30（當天這根之前至少 30 根）
     let s = 0, k = 0;
     for (let j = Math.max(0, i - 30); j < i; j++) if (bars[j].qv != null && Number.isFinite(bars[j].qv)) { s += bars[j].qv as number; k++; }

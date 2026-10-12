@@ -50,6 +50,30 @@ describe('universeOn', () => {
     expect(u.map(x => x.symbol)).toEqual(['BBBUSDT', 'AAAUSDT']);
     expect(universeOn(all, D, 1)).toHaveLength(1);
   });
+
+  // 2026-10-12：prep 在 UTC 00:05 跑，只有已收盤日線，當天 X 那根還不存在。舊版要求
+  // idxOf(bars, X) ≥ 0，於是 uni[X] 永遠是空的，S1 上線 5 天 10 個決策點全部 0 候選、
+  // 完全無聲。幣池只用 D−30～D−1（engine.universe_rank 的 shift(1)：當天開盤就已知），
+  // 不需要 D 那根本身。
+  it('當天那根還沒收盤（只到 D−1）：結果跟有 D 那根時完全相同', () => {
+    const D = T0 + 40 * DAY;
+    const full = new Map<string, Bar[]>([
+      ['AAAUSDT', days(41, () => 1, () => 100)],
+      ['BBBUSDT', days(41, () => 1, i => 200 + i)],
+      ['NEWUSDT', days(41, () => 1, () => 999).slice(10)],               // 當天之前剛好 30 根
+      ['YNGUSDT', days(41, () => 1, () => 999).slice(12)],               // 當天之前 28 根
+    ]);
+    const closedOnly = new Map(Array.from(full.entries()).map(([s, b]) => [s, b.slice(0, -1)] as [string, Bar[]]));
+    const want = universeOn(full, D, 10);
+    expect(want.map(x => x.symbol)).toEqual(['NEWUSDT', 'BBBUSDT', 'AAAUSDT']);
+    expect(universeOn(closedOnly, D, 10)).toEqual(want);
+  });
+
+  it('最後一根比 D−1 還舊（幣已停止交易）：不算', () => {
+    const D = T0 + 40 * DAY;
+    const stale = new Map<string, Bar[]>([['OLDUSDT', days(38, () => 1, () => 100)]]); // 最後一根是 D−3
+    expect(universeOn(stale, D, 10)).toEqual([]);
+  });
 });
 
 describe('breadthAt', () => {
