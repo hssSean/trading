@@ -46,9 +46,9 @@
 | | Vercel `/api/analyze` | `scripts/live-runner.ts`（AWS EC2 常駐） |
 |---|---|---|
 | 跑在哪 | Vercel cron，5 分鐘一輪 | AWS EC2 上 `npm run live-runner`，15 秒一輪 |
-| 做什麼 | S3／S1 模擬帳本、分數影子、live-runner 停止告警、對帳告警（2026-10-12 起舊策略掃描與 DB 模擬已移除） | **真的在幣安 testnet 下單**、監控、關單；S3-A 真倉 |
+| 做什麼 | S3／S1 模擬帳本、分數影子、live-runner 停止告警、對帳告警（2026-10-12 起舊策略掃描與 DB 模擬已移除） | **S3-A＋S3-B 真倉在幣安 testnet 下單**、管理、出場；心跳、kill switch、全帳戶殘留條件單清理（2026-10-12 起舊策略逐筆管理已移除） |
 | 對誰生效 | `live_trading_enabled=false` 的使用者 | `live_trading_enabled=true` 的那一位 |
-| 發哪些推播 | live-runner 停止／恢復、S3 對帳不一致 | 進場成交／TP1／移動止損／出場／推薦單失效 |
+| 發哪些推播 | live-runner 停止／恢復、S3 對帳不一致 | S3 進場／止盈／加碼／移動止損／出場 |
 
 2026-10-12 起 route.ts 不再監控任何持倉（舊策略的 DB 模擬已移除），所有真倉事件的推播都來自 live-runner。所以：
 
