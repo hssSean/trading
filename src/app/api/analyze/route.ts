@@ -18,6 +18,7 @@ import { startCancelShadow, advanceCancelShadow, type CancelShadow } from '@/lib
 import { shadowChanged, snapshot } from '@/lib/shadowWrite';
 import { unavailableSymbols, SYMBOL_UNAVAILABLE_REASON, SYMBOL_UNAVAILABLE_COOLDOWN_MS } from '@/lib/symbolAvailability';
 import { decideLiveRunnerHandoff } from '@/lib/liveRunnerHandoff';
+import { decideRunnerAlert } from '@/lib/liveRunnerAlert';
 import { ScanTiming } from '@/lib/scanTiming';
 import {
   activeCooldowns, cooldownKey, LOSS_COOLDOWN_MS,
@@ -453,13 +454,16 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
     }
 
     const now = Date.now();
+    const handoffs: { id: string; reason: ReturnType<typeof decideLiveRunnerHandoff>['reason']; dbAt: number | null | undefined }[] = [];
     liveTradingUserIds.forEach((id: string, i: number) => {
+      const dbAt = dbBeats ? (dbBeats.get(id) ?? null) : undefined;
       const decision = decideLiveRunnerHandoff({
         redisHeartbeat: redisBeats ? redisBeats[i] : undefined,
-        dbHeartbeatAt: dbBeats ? (dbBeats.get(id) ?? null) : undefined,
+        dbHeartbeatAt: dbAt,
         now,
         staleMs: LIVE_RUNNER_STALE_MS,
       });
+      handoffs.push({ id, reason: decision.reason, dbAt });
       if (decision.takeOver) {
         console.log(`[monitor] userId=${id.slice(0, 8)} 兩個心跳來源都判定 live-runner 已停止，這支重新接手監控`);
         return;
@@ -472,6 +476,39 @@ async function monitorActiveTrades(profileId: string, muteCancelPush: boolean) {
           + ' 維持不接手（避免兩邊搶著操作），但持倉可能完全沒人監控——請檢查 live-runner 與 Redis。');
       }
     });
+
+    // 2026-10-12：runner 掛了要推播。上面的「接手」只接得了舊策略的 DB 模擬，
+    // S3 真倉的移動止損／加碼／進場只有 live-runner 會做（見 liveRunnerAlert.ts）。
+    for (const h of handoffs) {
+      const alertKey = `live-runner:down-alert:${h.id}`;
+      let lastAlertAt: number | null | undefined;
+      if (heartbeatRedis) {
+        try { lastAlertAt = (await heartbeatRedis.get<number>(alertKey)) ?? null; } catch { lastAlertAt = undefined; }
+      }
+      const alert = decideRunnerAlert({ handoff: h.reason, dbHeartbeatAt: h.dbAt, lastAlertAt, now });
+      try {
+        if (alert.action === 'alert') {
+          const mins = alert.downMs === null ? null : Math.round(alert.downMs / 60_000);
+          await sendWebPushToUser(h.id, {
+            title: '⚠ live-runner 停止了',
+            body: (mins === null ? '心跳查不到，' : `已 ${mins} 分鐘沒有心跳，`)
+              + 'S3 真倉的移動止損、加碼與進場目前沒人執行（交易所硬止損仍在）。請檢查 EC2。',
+            tag: 'live-runner-down',
+          });
+          if (heartbeatRedis && lastAlertAt !== undefined) await heartbeatRedis.set(alertKey, now, { ex: 7 * 86_400 });
+          console.error(`[monitor] ⚠ userId=${h.id.slice(0, 8)} live-runner 停止，已推播告警`);
+        } else if (alert.action === 'recovered') {
+          await sendWebPushToUser(h.id, {
+            title: '✅ live-runner 恢復運作',
+            body: '心跳已恢復，S3 真倉監控重新開始。',
+            tag: 'live-runner-down',
+          });
+          if (heartbeatRedis) await heartbeatRedis.del(alertKey);
+        }
+      } catch (e) {
+        console.error(`[monitor] live-runner 告警推播失敗: ${String(e).slice(0, 150)}`);
+      }
+    }
   }
 
   // ── Fetch waiting and active trades separately ────────────────
