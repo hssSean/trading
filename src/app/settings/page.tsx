@@ -901,18 +901,6 @@ export default function SettingsPage() {
                 {label}
               </button>
             ))}
-            <button
-              onClick={() => router.push('/funnel')}
-              className="w-full py-3 rounded-full border border-accent/30 text-accent text-sm"
-            >
-              拒絕漏斗診斷（各關卡擋單統計 + 影子模擬淨R）
-            </button>
-            <button
-              onClick={() => router.push('/attribution')}
-              className="w-full py-3 rounded-full border border-accent/30 text-accent text-sm"
-            >
-              策略歸因分析（評分因子 vs 實際結果）
-            </button>
           </div>
         </Section>
 

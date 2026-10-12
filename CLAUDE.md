@@ -13,10 +13,10 @@
 
 ## 專案概觀
 
-加密貨幣永續合約訊號推薦系統（Crypto Trader）：Next.js 14 App Router PWA，部署於 Vercel（sin1），外部 cron 每 5 分鐘打 `/api/analyze` 掃描幣安成交量前 15 名，產生訊號後寫入 Supabase 並以 Web Push 推播。
+加密貨幣永續合約自動交易系統（Crypto Trader）：Next.js 14 App Router PWA，部署於 Vercel（sin1）。跑研究端交付的 S3／S1 策略：EC2 上的 live-runner 在幣安 testnet 真下單（S3-A＋S3-B），Vercel 的 `/api/analyze`（外部 cron）跑三個模擬帳本與告警，App 顯示真倉、訊號與帳本。
 
-- **資料庫**：Supabase PostgreSQL（`profiles`、`trades`、`push_subscriptions`）
-- **快取/狀態**：Upstash Redis（訊號鎖、熔斷、ADX 遲滯狀態、拒絕漏斗、影子交易）
+- **資料庫**：Supabase PostgreSQL（`profiles`、`push_subscriptions`；`trades` 只剩舊策略的歷史紀錄，`/legacy` 唯讀顯示）
+- **快取/狀態**：Upstash Redis（S3 真倉 `s3a-live:*`、模擬帳本與快照 `s3s1:*`、心跳、kill switch）
 - **行情來源**：Binance Futures 公開 REST API（免金鑰）
 
 ### ⚠️ 2026-10-07 起交易策略已換成 S3／S1（舊的評分策略只剩出場管理）
@@ -29,10 +29,10 @@
 | S3-A／S3-B／S1 模擬帳本 | 三個 100 USDT 的帳本，S3-B 有 1R 加碼、S1 是 12H Keltner | Vercel `/api/analyze`（prep 00:05、S3 01:05、S1 每個 12H 收盤 +1h05） | Redis `s3s1:*`（meta／<帳戶>:open／done／signals／prep:<日>） |
 
 - **規則只有一份：`src/lib/s3s1/rules.ts`**（帳本 `engine.ts`、真倉 `src/engine/s3aLive.ts` 都用它）。改規則前先跑 `npm run s3s1-acceptance`（S3 35 筆、S1 15 筆、廣度 50 天，誤差 1e-6，必須全過）。
-- **舊策略只停「開新倉」**（`LEGACY_SIGNALS_ENABLED` 預設關，設 `=1` 才恢復掃描）；舊的持倉照原規則由 route.ts／live-runner 管到出場。S3-A 遇到交易所上已有該幣持倉或掛單就不進場。
+- **舊 v2.1 評分策略 2026-10-12 已整個移除**（掃描、DB 模擬監控、live-runner 逐筆管理、回測與稽核腳本、`/funnel`／`/attribution` 診斷頁；移除前確認持倉、掛單、未平倉紀錄全為 0）。最後的完整程式在 git tag **`legacy-v2.1-final`**，找回單一檔案：`git checkout legacy-v2.1-final -- <路徑>`。`/legacy` 三頁與 `/analysis` 保留唯讀。S3-A 遇到交易所上已有該幣持倉或掛單（例如手動單）就不進場。
 - 真倉開關：live-runner 的 shell 設 `S3A_DRY_RUN=1` = 只印不下單（A、B 一起）；kill switch 也會擋新倉。試跑：`ENV_FILE=env.txt npm run s3a-dryrun [-- --at-open | --day=YYYY-MM-DD]`（讀線上狀態、不下單、不寫 Redis；`--day` 用 7 天內某天的訊號快照走一次進場）。
 - 真倉分帳的要點（`src/engine/s3aLive.ts`）：交易所上一個部位、一張止損（數量變了就先掛新再撤舊）、一張止盈（A、B 各 1/3）、一張 B 加碼 STOP_MARKET BUY（非 reduceOnly）。部位數量變了**只有「不見的條件單」能解釋時才當成成交**（`checkPosition`）；條件單不見但部位沒變要連續兩輪才當成被拒絕（避免觸發後市價單還在路上就重複下單）。出場依成交紀錄分帳（`splitResult`）。
-- **紙上登記（策略 A、影片 A/B/C）與 F1 前向追蹤已於 2026-10-07 停用並刪除程式碼**；Redis 的 `paper:*`、`f1p:*` 舊資料保留未刪。`src/lib/f1Paper.ts` 留著是因為 `structural-candidates` 回測還在用。
+- **紙上登記（策略 A、影片 A/B/C）與 F1 前向追蹤已於 2026-10-07 停用並刪除程式碼**；Redis 的 `paper:*`、`f1p:*` 舊資料保留未刪。
 - **App 2026-10-07 起以 S3 為主**（設計 `docs/superpowers/specs/2026-10-07-s3-app-redesign-design.md`）：首頁＝S3-A 真倉總覽、`/signals`＝S3／S1 訊號（含被擋掉的）、`/ledgers`＝三個帳本、`/trades`＝S3-A 真倉紀錄。資料走唯讀 API `/api/s3/{overview,signals,ledgers,trades}`（回應型別 `src/lib/s3s1/apiTypes.ts`，畫面計算 `src/lib/s3s1/view.ts`，統計 `src/lib/s3s1/stats.ts`）。舊策略的首頁／信號／紀錄搬到 `/legacy`、`/legacy/signals`、`/legacy/trades`，設定也收進設定頁最下方「舊策略（已停用）」；`/strategies` 轉址到 `/ledgers`。live-runner 每小時把 testnet 錢包權益與模式寫進 `s3a-live:meta`（`wallet`／`walletAt`／`mode`）。月報（文件 §7）：`ENV_FILE=env.txt npm run s3s1-report [-- YYYY-MM]` 寫到 `reports/`（不進版控）。手動補跑帳本：`npm run s3s1-run`。
 - **每日前向對帳**（2026-10-12）：研究端 `C:\trading_stratage\s3_xcheck.py` 用研究端自己的函數重算最近 7 天的 S3（廣度、BTC 條件、D 與 X 兩天的幣池前 100、突破候選、分數、資金費）與 S1 候選（12H Keltner 突破、止損），跟 `s3s1:prep:<X>`／`s3s1:signals` 比對，結果寫 Redis `s3s1:xcheck`。使用者電腦的工作排程器「S3 每日對帳」每天 09:30 跑（錯過會在開機後補）。route.ts 每天約 UTC 02:00 讀結果，有不一致或超過 3 天沒跑就推播（`src/lib/s3s1/xcheckAlert.ts`）。改 `rules.ts` 後若這支開始報不一致，先確認研究端是否同步改了。
 - **2026-10-12 S1 空幣池事故**：prep 在 UTC 00:05 只有已收盤日線，`universeOn(raw, X)` 卻要求 X 那根存在 → 快照 `uni[X]` 永遠空的，S1 上線 5 天 10 個決策點 0 候選、完全無聲。驗收測試用完整歷史資料所以抓不到。已修（`6c5106b`），快照重建、S1 從追蹤起點重播（`scripts/s1-replay-2026-10-12.ts`，舊快照備份在 `reports/`）。**教訓：「線上當下」與「歷史回放」的資料可得性不同，驗收全過不代表線上對；每日對帳要比線上實際讀的那一份。**
@@ -56,7 +56,7 @@
 - 🔴 **`env.txt` 不是 shell 腳本，絕對不要 `source`／`. ./env.txt`**。裡面混了筆記與指令（含 `npm run live-runner`），2026-10-12 被 source 時真的在本機啟動了 live-runner（因缺變數立刻退出，沒下單），還把金鑰印到終端。要載入一律用 `ENV_FILE=env.txt` ＋ `scripts/loadEnvFile.ts`。
 - live-runner **不會載入 `.env`**（專案沒裝 dotenv），所有環境變數都得在啟動它的 shell 裡設好，清單見 `.env.local.example`。
 - live-runner 是常駐腳本，**改完 code 要使用者到 EC2 `git pull` 並重啟才生效**（Vercel 那側 push 完自動部署）。
-- live-runner 停止超過 10 分鐘，route.ts 會推播「⚠ live-runner 停止了」（`src/lib/liveRunnerAlert.ts`，2026-10-12）。route.ts 只接得了舊策略的 DB 模擬，**S3 真倉的移動止損／加碼／進場在 runner 停止期間沒人做**。
+- live-runner 停止超過 10 分鐘，route.ts 會推播「⚠ live-runner 停止了」（`src/lib/liveRunnerAlert.ts`，2026-10-12）。沒有任何東西能接手：**S3 真倉的移動止損／加碼／進場在 runner 停止期間沒人做**（交易所上的硬止損仍在）。重啟要避開台灣 08:00～10:00（S3 進場窗口）。
 
 ## 常用指令
 
@@ -65,105 +65,66 @@ npm run dev          # 本機開發（localhost:3000）
 npx tsc --noEmit     # 型別檢查（改完程式必跑）
 npm test             # vitest 全套（= npx vitest run）
 npx next build       # production build（push 前的最後檢查）
-npm run live-runner  # 真倉常駐腳本（testnet，會真的下單）
-npm run backtest     # 回測
-npm run testnet-reconcile   # testnet 交易所介面煙霧測試（會真的下單）
-curl -s "http://localhost:3000/api/analyze"   # 本機無 WEBHOOK_SECRET 時可直接跑真實掃描
+npm run live-runner  # 真倉常駐腳本（testnet，會真的下單）——只在 EC2 跑，本機不要開（會跟 EC2 搶同一個帳戶）
+npm run s3s1-acceptance   # 改 rules.ts 前後必跑：S3 35 筆、S1 15 筆、廣度 50 天，誤差 1e-6
+ENV_FILE=env.txt npm run s3a-dryrun [-- --at-open | --day=YYYY-MM-DD]   # S3 真倉試跑（讀線上狀態、不下單、不寫 Redis）
+ENV_FILE=env.txt npm run s3s1-report [-- YYYY-MM]   # 月報（文件 §7），寫到 reports/
+npm run s3s1-run     # 手動補跑帳本工作（prep → s3 → s1）
 ```
 
-### 診斷工具（2026-08/09 新增，全部唯讀）
+### 診斷
 
-**回答「現在到底怎麼了」之前先跑這些，不要靠猜或開一堆網頁。** 這個專案發生過
-多次「靜默停擺一週才發現」（live-runner 整週沒監控持倉、DB 模擬捏造出場把系統
-自己停掉），成因都是狀態分散在 Vercel／Supabase／Upstash／幣安四個地方。
+**回答「現在到底怎麼了」之前先跑這個，不要靠猜或開一堆網頁。** 這個專案發生過多次
+「靜默停擺好幾天才發現」（live-runner 整週沒監控持倉、S1 五天 0 候選），成因都是狀態
+分散在 Vercel／Supabase／Upstash／幣安四個地方。
 
 ```bash
-npm run status          # 系統活著嗎：最後訊號時間、持倉、保護單、回撤、心跳
-npm run audit-invariants   # trades 表自己跟自己矛盾的地方（純 Supabase，快）
-npm run audit-exits     # 拿幣安真實成交對帳 DB 的損益紀錄
-npm run audit-close-fills  # 止損止盈觸發後「真的平乾淨了嗎」（平過頭／沒平乾淨）
-npm run funnel-verdict  # 各風控濾網到底在保護還是在害（含悲觀覆蓋率把關）
-npm run verify-strategy [月數] [幣數]   # 策略扣成本後能不能賺錢；先驗回測工具與線上是否分岔
-
-npx tsx scripts/drawdown-threshold.ts   # 用 bootstrap 訂回撤門檻
-npx tsx scripts/apply-audit-marks.ts <報告.json> [--apply]   # 標記髒資料，預設試跑
-npx tsx scripts/reset-shadow-pess.ts [--apply]   # 清掉影子單上捏造的悲觀值，預設試跑
+ENV_FILE=env.txt npm run status   # S3 真倉（模式、權益、今天的決策、持倉與交易所止損止盈單）、
+                                  # 模擬帳本、分數影子、每日對帳、心跳、孤兒部位
 ```
 
-金鑰放 `.env.local`，或用 `ENV_FILE=env.txt` 指定別的檔案。載入器只印變數名
-不印值（`scripts/loadEnvFile.ts`）。
+它最後會印判語（✅／⚠／🔴，邏輯在 `src/lib/s3s1/statusCheck.ts`）。Redis 讀不到時照樣印
+Supabase 心跳與交易所部位。舊策略只在還有未平倉時展開（`-- --legacy` 強制展開）。
 
-**`npm run status` 是排查任何「為什麼沒訊號／為什麼沒平倉」的第一步**——它會
-直接算出回撤、列出每筆真倉的止損止盈單，並分辨「TP1 已觸發」與「TP1 單根本
-沒掛上」。後者是 2026-08-23 那次「打到 TP1 卻沒出 50%」的形狀。
+另一道防線是研究端的**每日前向對帳**（`C:\trading_stratage\s3_xcheck.py`，見上方），
+它回答 status 回答不了的問題：「線上算出來的東西跟研究端一不一樣」。
 
-**`npm run audit-invariants` 問的是另一個方向的問題**：上面幾支都在對帳
-「DB 跟外部事實（幣安）對不對得上」，只有這支在問「DB 自己內部一致嗎」。
-這個專案咬人的 bug 有一大類是後者——`route.ts`（DB 模擬）與 `live-runner`
-（真倉）兩個寫入者對同一張表的欄位語意認知不一致，寫出來的列單看都合理，
-合起來才矛盾。2026-09-19 第一次跑就抓到「`status='tp1_hit'` 卻 `result=NULL`」，
-下游代價是虧損冷卻整個漏擋（`activeCooldowns` 判 `result==='LOSS'`）。
-它不打交易所所以很快，有 🔴 時離開碼 1。詳見
-`docs/AUDIT-2026-09-19-策略與程式碼全面體檢.md`。
-
-**`npm run audit-close-fills` 補的是 status 看不到的那一面**：status 只看「現在」
-有沒有保護單，這支看「每一張觸發過的條件單有沒有真的把部位平乾淨」。2026-09-06
-的 UNI 翻倉事故（止損連續四次平錯數量、最後把多單翻成沒有保護的空單）在 status
-上完全看不出來，因為每一輪的當下狀態都很正常。
+金鑰放 `.env.local`，或用 `ENV_FILE=env.txt` 指定別的檔案。載入器只印變數名不印值
+（`scripts/loadEnvFile.ts`）。**`env.txt` 絕對不要 source**（見上方）。
 
 ## 部署流程
 
-`git push origin main` → Vercel 自動部署（1-2 分鐘）。使用者已授權直接 push main；破壞性操作（force push、改歷史）仍須先確認。
+`git push origin main` → Vercel 自動部署（1-2 分鐘）。live-runner 要使用者到 EC2 `git pull` 並重啟。使用者已授權直接 push main；破壞性操作（force push、改歷史）仍須先確認。
 
 ## 關鍵檔案
 
 | 檔案 | 職責 |
 |---|---|
-| `src/app/api/analyze/route.ts` | cron 入口（約 300 行）：live-runner 停止告警、S3／S1 帳本工作、對帳告警。2026-10-12 前的舊策略主流程（3700 行）最後版本在 commit `c2070fc` |
-| `src/analysis/signals.ts` | v2.1 分組計分（基礎 40 + 五組上限）、tier 門檻（A/B 目前都是 65，B 已名存實亡）、策略 B 均值回歸 |
-| `src/analysis/indicators.ts` | EMA/RSI/MACD/ADX/BB/Donchian；`computeIndicators` 附帶前一根值（勿再算兩次） |
-| `src/lib/position.ts` | 倉位計畫（倉位/本金/槓桿），前後端共用，勿另寫倉位公式 |
-| `src/lib/monitorMath.ts` | 監控純數學：TP1 部分停利、滑價模型、MFE/MAE、`walkTpSl`（三個影子模擬共用） |
-| `src/store/useStore.ts` | Zustand + localStorage persist + Supabase 同步 |
-| `scripts/live-runner.ts` | 真倉常駐迴圈（testnet）。檔頭註解是這支「現在實際做什麼」最準的來源 |
-| `src/engine/tradeBridge.ts` | 真倉決策純函數（該下單／該撤單／該關倉），live-runner 的大腦 |
-| `src/lib/dailyLossCap.ts` | 日虧損上限。**唯一用「錢」而不是 R 衡量、也是唯一 fail-closed 的關卡**，兩個性質都跟專案其餘部分相反，改之前先讀檔頭 |
-| `src/lib/exitAudit.ts` | 對帳配對（幣安成交 ↔ 我們的 trade），判語分硬/軟證據兩級 |
+| `src/lib/s3s1/rules.ts` | S3／S1 規則（訊號、分數、幣池、廣度、出場模擬）——**唯一一份**，帳本與真倉都用它 |
+| `src/lib/s3s1/engine.ts` | 三個模擬帳本（prep／s3／s1 工作）＋分數影子 `runS3Shadow` |
+| `src/engine/s3aLive.ts` | S3-A＋S3-B 真倉：進場、分帳、止損／止盈／加碼條件單、出場結算 |
+| `scripts/live-runner.ts` | EC2 常駐迴圈：心跳、kill switch、全帳戶殘留條件單清理、S3 真倉。檔頭註解是這支「現在實際做什麼」最準的來源 |
+| `src/app/api/analyze/route.ts` | cron 入口（約 300 行）：live-runner 停止告警、S3／S1 帳本工作、對帳告警 |
+| `src/app/api/s3/*` | App 用的唯讀 API（overview／signals／ledgers／trades） |
+| `scripts/status.ts` | 診斷第一步（見上） |
+| `src/engine/binanceClient.ts`、`precision.ts` | 幣安 API 與數量／價格取整 |
+| `docs/strategy-deploy-2026-10-06.md` | 研究端交付的 S3／S1 部署規格 |
+| `docs/LEGACY-v2.1-教訓.md` | 舊策略測過、沒用的東西與量測陷阱 |
 | `docs/TODO.md` | 待辦與優先級。已完成的搬到 `docs/TODO-archive.md` |
-| `docs/ANALYSIS-*.md` | 歷次策略體檢；**調參前先讀最新那份**，很多「看起來該改」的東西已經驗證過無效 |
-| `加密貨幣合約推薦單系統-策略規格書-v2.1.md`（使用者 Downloads） | 策略規格書；調參前先讀 |
 
 ## 專案慣例
 
-- **調參紀律（規格書 §4）**：一次只動一個濾網，先看拒絕漏斗與影子模擬的淨 R 數據再決定放寬或收緊；淨 R ≤ 0 的關卡代表擋得對，不要動。
-  - **看漏斗淨 R 之前先看悲觀覆蓋率**（`npm run funnel-verdict` 會自動把關）。`29b2499` 之前結案的影子單永遠沒有悲觀值，`netRPess` 是 0，而 0 會讓「兩端同號」的判斷失效——樂觀 +24 配悲觀 0 看起來像跨零，實際上只是沒算。2026-09-01 實測八道關卡只有 `circuit_breaker` 覆蓋率達標。
-    - **⚠ 2026-09-20 發現：那一整個月的悲觀值本身就是假的，不要相信 2026-09-20 之前的任何漏斗判語。** `SHADOW_PESSIMISTIC` 於 2026-08-26 因 CPU 改成預設關閉，但 `simulateShadow` 關閉時**仍然會寫 `pessResult`**——樂觀軌跡結案時直接複製過去。於是 `netRPess ≡ netR`，「兩端同號」永遠成立，把關等於不存在。報表上 `circuit_breaker` −7.08／−7.08、`btc_direction` −7.00／−7.00 兩端完全同值就是這個簽名：**同值不是「結論穩健」，是「根本沒算」**。
-    - 已修（`src/lib/shadowSim.ts`）：悲觀軌跡改預設開啟（成本是對已抓回的 K 線多跑一次純比較迴圈，微秒級；貴的是 `fetchCandles` 的 I/O，兩條軌跡本來就共用）；關閉時一個欄位都不寫，寧可覆蓋率 0 也不要假數字；`EXPIRED` 補上 pess 欄位（兩邊 R 都是 0，本來就該算進覆蓋率，`score_gate` 只有 49% 主因是這個）。Redis 既有的 75 筆假值已用 `scripts/reset-shadow-pess.ts --apply` 清掉。
-    - **覆蓋率要約兩週才會重建。在那之前任何濾網都不要動。**
-  - **2026-09-24 獲利驗證：扣成本後每筆 −0.055R（t=−2.40，12 個月 n=2079），策略 B −0.514R（t=−4.34）。** 毛邊際 ~+0.02R 小於成本 ~0.08R。詳見 `docs/ANALYSIS-2026-09-24-策略獲利能力驗證.md`。
-  - **2026-09-27 決定：修改不換。策略 B 與做空預設關閉**（`ENABLE_STRATEGY_B=1`／`ALLOW_SHORT=1` 可開）。修改後 −0.007R/筆、CI 跨 0，仍測不出正邊際。另外 10 種趨勢跟隨候選在 4.7 年 × 30 檔上全部沒過事先訂的標準，純做多的獲利集中在 2023–24 牛市。**不要再試「另一組技術指標」**，詳見 `docs/ANALYSIS-2026-09-27-修改還是換策略.md`，重跑 `npm run strategy-candidates`。
-  - **2026-10-01：只有 1h 能進場（`ALLOW_LTF_ENTRY` 預設關）。** 原本 ⚡15m 短線單與 Entry-TF fallback 會讓 5m/15m 頂替 1h 進場，這條路從沒被回測驗證過；當週 1h +73.6 USDT、5m/15m −89.7 USDT。5m/15m 仍掃描、仍參與 confluence。詳見 `docs/ANALYSIS-2026-10-01-週虧損檢查.md`。看某段期間的真實成交用 `real-trades-breakdown.ts --since=YYYY-MM-DD`。
-  - 2026-10-03 的紙上追蹤（策略 A、影片 A/B/C）與 2026-09-28 的 F1 前向追蹤已於 2026-10-07 停用（見上方「已換成 S3／S1」）。
-  - **2026-09-27B 結構性資訊也測過了：** 資金費率極端值（F1）、費率橫向排序（F3）、爆倉急跌接多（L1）三個都沒過。F1 在 2 批幣 10 個年度都贏過無條件做多（有弱資訊），但第三批幣扣成本後 −0.013R，不能單獨上線。詳見 `docs/ANALYSIS-2026-09-27B-結構性資訊候選.md`。
-  - **回測規則只有一份：`scripts/lib/liveReplica.ts`。** 不要再在腳本裡複製 regime／掛單／出場邏輯——2026-09-24 查出 backtest／exit-compare 的複製品九處跟線上分岔。
-  - **訊號與 regime 只吃已收盤 K 棒**（`closedCandlesOnly`）。快取以最後一根 openTime 為 key，吃形成中 K 棒會把「開盤幾分鐘」的答案凍結整根（42% 時點訊號不同）。
-  - **目前狀態：不要調參。** 真實成交 n=78 每筆 −0.081R、t=−0.55，跟三層模擬結論一致（測不出邊際）。檢定力 sd=1.31，偵測 +0.1R/筆 需 n≈680。詳見 `docs/ANALYSIS-2026-08-30-真實成交對帳.md`。
-  - **止損距離下限也測過了，無效（2026-09-07）。** 策略 B 沒有下限、止損可以近到 0.103%，看起來很像該修——但 clamp／skip 兩種修法各四個門檻全部 `|t| < 1`，而且 3個月×8檔時最強的變體 t=2.59，6個月×15檔重跑後掉到 t=−0.02 且符號翻面。要動之前先讀 `docs/ANALYSIS-2026-09-07-止損距離下限.md`；那份也記了一個容易誤讀的陷阱：報表的 `n=1473` 是假的，真正受影響的只有 22–77 筆（其餘訊號對成對差異貢獻 0，同時放大 n 又縮小 sd，t 值反而不動）。
-  - **S/R 阻力位測不出資訊量，TP1 那段夾持不用救（2026-09-07B）。** `buildSignalLevels` 的「TP1 被最近阻力夾住」對 1h/4h/1d 是**死碼**——swing 分支的 `tp1Max` 與 `MIN_RR_SWING` 同為 2.0R，`max(min(阻力,2R),2R) ≡ 2R`，而系統 98% 的單是 1h。看起來很該修，但置換檢定（n=85，洗牌 3000 次）三個指標 p = 0.74／0.20／0.14 全不顯著，觸及率真實值還**低於**隨機。詳見 `docs/ANALYSIS-2026-09-07B-阻力位資訊量.md`，重跑 `ENV_FILE=env.txt npx tsx scripts/sr-mechanism.ts`。**這關掉了第五個參數家族。**
-    - 那份示範了一個省時間的做法：**先用置換檢定問「機制存不存在」，過了才排隊跑走K線模擬**。機制檢定吃現成的 MFE 資料、幾分鐘就好；模擬要十幾分鐘，而且會把「結構有用」跟「目標變近」混在一起分不開。
-    - 陷阱備忘：報表裡「TP1 夾到阻力觸及率 36.4% vs 維持 2R 的 20.8%」看起來像重大發現，其實是**目標從 2.0R 挪到 1.16R 的機械效果**——隨機給一個阻力位也做得到同樣的事。觸及率變高 ≠ 淨 R 變高。
-  - **「手續費占 R」不是統計問題，是算術**（`費率% ÷ 止損距離%`）。要分清楚「這筆成本高」與「改了會比較好」——前者除法就能證明，後者得實測，而實測通常是測不出來。
-- **倉位的絕對金額要另外把關**：所有風控上限都是 R 或百分比，唯獨 `dailyLossCap` 與 `calcPositionPlan` 的名目上限是用「錢」衡量的。名目 = 風險金額 ÷ 止損距離，**止損距離趨近 0 時名目會爆炸，而每一道 R 上限都不會有反應**（那個部位「就是 1R 風險」）。`checkLiquidationSafety` 也攔不到——槓桿 10 倍時強平距離約 10%，極近的止損確實會先觸發，它會判定通過。
-- **平倉數量取整不能留灰塵**：2026-09-06 把保護單從 `closePosition=true` 改成 `quantity + reduceOnly`（UNI 翻倉的修法）之後，出場量才開始經過 `roundToStepSize`，而它原本的 `Math.floor(qty / stepSize)` 會被浮點誤差削掉一整格（`16.24 / 0.01 = 1623.9999999999998`；step 0.01 有 9.1%、step 0.001 有 12.9% 的合法數量會中）。少平一格 = 部位永遠不歸零，**下游全部跟著錯**：殘渣被判成 TP1（假的 `tp1_hit` + 假的 TP1 推播）、灰塵帶著止損繼續跑十幾小時、最後把保本出場記成完整 −1R。2026-09-08 已修（`precision.ts` 補 1e-9 容差、`didTp1PartialFill` 補 25% 下界），但**任何新的「算數量」路徑都要記得這件事**。
-- **風控查詢要排除「有 `result` 但不是交易結果」的列。** `CANCELLED`（掛單到期撤銷，實測佔 trades 表一半以上）與未平倉的 `tp1_hit`（`result='WIN_TP1'`、`closed_at=NULL`，而 Postgres `ORDER BY ... DESC` 預設 **NULLS FIRST**，會排到最前面）兩種都會擠掉真正的交易紀錄。2026-09-20 實測有三處中招且全部 fail-open：`checkStratBPaused` 的連兩敗、熔斷的連敗 streak、以及回撤／熔斷吃到 `audit_verdict≠OK` 的捏造損益。判定一律抽成純函數（`tradeCooldown.isStratBPaused`、`circuitBreaker.*`、`cleanPeriod.isAuditClean`），**函數自己再過濾一次、自己重排，不依賴呼叫端的 SQL 有沒有寫對**。
-- **條件單「觸發」不等於「成交」**：幣安條件單觸發後可能被拒絕（`algoStatus=REJECTED`，`rejectReason` 見 `getAlgoOrderHistory`）。2026-09-20~23 UNI 一檔被 `Reduce only reject` 拒絕 13 次（止損、TP1、TP2 都有），另有 PERCENT_PRICE（testnet 流動性薄）。被拒絕的單會從 openAlgoOrders 消失，但 DB 的 algoId 還在——**「不見了」要當成「可能被拒絕」處理**，不能當成「已成交」或「不用管」。2026-09-23 起 `decideTradeAction` 會補救（止損補在最後已知價位、價格已穿過就市價平倉；TP1/TP2 重掛），`npm run audit-close-fills` 會列出所有 REJECTED。
-- **`place_initial_stop` 不只在剛成交時發生**，止損被拒絕後的補掛也走這條。任何寫在那裡的「成交副作用」（`markFilled`）都必須冪等，否則每補一次就重設 `filled_at`（時間止損永遠不觸發）、把 `tp1_hit` 改回 `active`（重複推播假 TP1）。
-- **「部位變小」不等於「TP1 發生」**：手動平倉（這個帳戶會用手機 App 直接下單）、ADL、部分強平、取整灰塵都會讓部位變小。判準統一走 `tradeBridge.didTp1PartialFill`，別在別處重寫 `positionQty < entryQty * 0.99`。
-- **損益一律用 R 倍數**（損益% ÷ 止損距離%）與帳戶實際損益衡量，不用原始價格 %——ATR 止損的原始 % 會嚴重誤導（熔斷曾因此誤鎖整天）。
+- **舊 v2.1 評分策略的調參史與實作教訓搬到 `docs/LEGACY-v2.1-教訓.md`**（2026-10-12）。要對 S3／S1 加濾網、調止損、看拒絕統計之前先讀——很多「看起來該改」的已驗證無效，量測陷阱（假的悲觀值、被灌水的 n、目標變近冒充發現）同樣適用。**不要再試「另一組技術指標」**（`docs/ANALYSIS-2026-09-27-修改還是換策略.md`）；新策略研究一律在研究端 `C:\trading_stratage` 做，並先登記到它的 `docs/試驗登記表.md`。
+- **損益一律用 R 倍數**（損益 ÷ 1R 風險）與帳戶實際損益衡量，不用原始價格 %——ATR 止損的原始 % 會嚴重誤導（舊策略熔斷曾因此誤鎖整天）。
+- **倉位的絕對金額要另外把關**：名目 = 風險金額 ÷ 止損距離，止損距離趨近 0 時名目會爆炸，而每一道 R／百分比上限都不會有反應。
+- **數量取整不能留灰塵**：`Math.floor(qty / step)` 會被浮點誤差削掉一整格（`16.24 / 0.01 = 1623.9999…`），少平一格 = 部位永遠不歸零、下游全錯（2026-09-08 舊策略實測）。一律走 `precision.ts`／`engine.ts` 的 `floorStep`（帶 1e-9 容差），**任何新的「算數量」路徑都要記得**。
+- **條件單「觸發」不等於「成交」**：幣安條件單觸發後可能被拒絕（`algoStatus=REJECTED`，例：`Reduce only reject`、testnet 流動性薄的 PERCENT_PRICE），被拒絕的單會從 openAlgoOrders 消失。**「不見了」要當成「可能被拒絕」**，不能當成「已成交」——S3 的 `checkPosition` 就是照這條設計的（部位數量變了才算成交，條件單不見但部位沒變連兩輪才算被拒絕）。
+- **「部位變小」不等於「止盈發生」**：手動平倉（這個帳戶會用手機 App 直接下單）、ADL、部分強平、取整灰塵都會讓部位變小。
+- **「線上當下」與「歷史回放」的資料可得性不同**（2026-10-12 S1 空幣池事故）：驗收用完整歷史資料全過，不代表線上 00:05 那一刻拿得到同樣的東西。新規則要用「線上實際讀的那一份」驗。
 - **Supabase 缺欄位**：insert 對 `42703`/`PGRST204` 有兩段式 fallback；新增欄位時要同步更新 fallback 剝除清單並提醒使用者跑 `ALTER TABLE`。
-- **Redis 指令數要省**：批次讀寫（hash/hgetall、單次 lpush 多值），避免迴圈內逐鍵操作；Upstash 免費額度有限。
-- **CPU 要省**：外部 cron 頻率不可控，只能砍每次呼叫的計算量；只算需要的指標（如只要 ADX 就別跑 `computeIndicators`）。
-- 改完程式：`npx tsc --noEmit` → 有 UI 變更盡量預覽驗證 → `npx next build` → commit（訊息附 Co-Authored-By）→ push。
+- **Redis 指令數要省**：批次讀寫（hash/hgetall、單次 lpush 多值），避免迴圈內逐鍵操作；Upstash 免費額度有限（2026-08-23 真的燒完過）。
+- **CPU 要省**：外部 cron 每 60 秒打一次（`scan-run-lock` TTL 240 秒節流），只能砍每次呼叫的計算量。
+- 改完程式：`npx tsc --noEmit` → `npx vitest run` → 有 UI 變更盡量預覽驗證 → `npx next build` → commit（訊息附 Co-Authored-By）→ push。
 - 本機預覽的登入需真實 Supabase session，placeholder 環境會卡在載入 spinner；純函數改用 node 單元測試驗證。
 
 ## 工具規定
