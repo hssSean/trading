@@ -1,86 +1,42 @@
 #!/usr/bin/env npx tsx
 /**
- * 常駐執行迴圈 entrypoint —— runner.ts 頭部註解寫明「刻意不接 Next.js route/
- * cron」的那個獨立 process，就是這支。Vercel 撐不住這種活：沒有固定 IP、
- * function 會被中途砍斷、5 分鐘 cron 間隔對移動止損維護太粗糙。
+ * 常駐執行迴圈（跑在 AWS EC2）——Vercel 撐不住這種活：沒有固定 IP、function 會被中途砍斷、
+ * cron 間隔對移動止損維護太粗糙。
  *
  * 用法：
  *   npm run live-runner            # testnet，預設
- *   npm run live-runner -- --live  # 正式帳戶（目前不會走到這裡，見下方說明）
+ *   npm run live-runner -- --live  # 正式帳戶（目前刻意 exit(1) 拒絕，見下方）
  *
- * 環境變數（不要貼在 chat 裡，只設在主機/本機上）：
+ * 環境變數（只設在主機上，不要貼在 chat 裡；這支不會載入 .env）：
  *   BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET
- *   UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN（跟 Vercel 專案同一個
- *     Upstash 執行個體 —— kill switch 是共用狀態，Vercel 那邊的 /api/analyze
- *     跟這支 process 要看到同一個開關）
- *   NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY（跟 Vercel 專案同一個
- *     Supabase 專案，走 service role 不是 anon key，跟 route.ts 對 DB 的權限
- *     一致）
- *   TRADING_USER_ID：Supabase 的 profiles.id（UUID）——這支只服務單一使用者，
- *     不走完整的登入流程，直接指定要監控誰的 trades
- *   NEXT_PUBLIC_VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY（Web Push 推播用，跟
- *     Vercel 專案同一組金鑰——換一組會讓手機上既有的推播訂閱全部失效）。
- *     2026-08-12 補上這一行：先前這裡漏列，導致使用者照文件設好其餘變數後
- *     「進場/出場通知全部收不到、只收得到推薦單」（推薦單是 Vercel 發的，
- *     不受影響）。沒設不會擋住交易，但啟動時會印出明顯警告，見 main()。
+ *   UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN（跟 Vercel 同一個 Upstash——kill switch 與
+ *     S3 狀態 s3a-live:* 是共用的）
+ *   NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY（只用來寫心跳 profiles.live_runner_heartbeat_at）
+ *   TRADING_USER_ID：Supabase profiles.id（心跳與推播對象）
+ *   NEXT_PUBLIC_VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY（Web Push；必須跟 Vercel 同一組）
+ *   S3A_DRY_RUN=1（選用）：S3 只印出會做的動作、不下單
  *
- * ── 這版本做的事 ────────────────────────────────────────────────────────
- * 1. Kill switch 檢查（fail closed）——啟動中就整輪跳過，不做任何下單/改單。
- * 2. 全帳戶對帳（watchdog.reconcilePositionsAndOrders）——涵蓋所有 symbol，
- *    不只 DB 追蹤範圍內的，抓「DB 寫入失敗導致行方不明」這類 DB 追蹤不到的
- *    裸倉異常。純觀察 log，不在這裡自動修復（不知道該修哪個 trade_id）。
- * 3. 逐筆處理 Supabase 裡這個使用者所有還沒結束的 trades：組出交易所快照
- *    （倉位/掛單/條件單/現價，需要時才查 ATR/歷史成交）→ decideTradeAction
- *    決定該做什麼（含時間止損／盤整停滯）→ executeTradeAction 真的送出去
- *    + 寫回 DB → TP1 部分平倉/最終出場時推播 Web Push 通知。
+ * ── 每 15 秒一輪做的事 ──────────────────────────────────────────────────
+ * 1. 心跳：雙寫 Redis＋Supabase。Vercel 的 /api/analyze 用它判斷這支停了沒，停超過 10 分鐘推播告警。
+ * 2. Kill switch（fail closed）：啟動中整輪不做任何下單／改單。
+ * 3. 全帳戶對帳：撤掉「沒有對應持倉的條件單」（S3 出場後殘留的止盈／加碼單也靠這個清），
+ *    以及舊策略格式 `trade-…-entry` 的殘留進場單；「有倉沒止損」只記 log。
+ * 4. S3-A＋S3-B 真倉（src/engine/s3aLive.ts）：每天 UTC 00:00:30～02:00 進場、每輪管理持倉。
  *
- * 2026-08-09：使用者一旦設定 profiles.live_trading_enabled=true，route.ts
- * 的 DB 模擬監控會完全排除這個使用者（見 route.ts 頂部說明），包括它原本
- * 的推播邏輯——這支必須自己補上通知，不然使用者完全不會知道 TP1/關單發生
- * 過（實測撞到：使用者是自己開 App 才發現 TP2 已經達標，不是被動收到推播）。
+ * 2026-10-12：舊的 v2.1 評分策略（逐筆管理 Supabase trades：進場、TP1、移動止損、時間止損、
+ * 裸倉看門狗、日虧損上限、回撤停機）已移除——2026-10-07 起停開新倉，持倉與掛單已歸零。
+ * 舊版最後的完整程式在 commit 684fed6。
  *
- * 2026-08-10：這支每輪會寫一個 Redis 心跳（TTL 90秒）。route.ts 用這個
- * 心跳判斷「live_trading_enabled=true 是不是還有對應的 process 真的在
- * 跑」——使用者可能把這支關掉卻忘記把那個欄位改回 false，沒有心跳的話
- * route.ts 會自動接手，不然兩邊都不管，比使用者根本沒開自動交易還危險。
- *
- * 2026-08-10：TP1 從「輪詢比價、觸價才送 MARKET 單」改成「一有止損就順便
- * 預掛 TAKE_PROFIT_MARKET 條件單」——輪詢式如果價格插針式碰到 tp1 又馬上
- * 彈回去（兩輪之間 15 秒），下一輪就再也偵測不到，TP1 部分平倉的機會真的
- * 會錯過；改成掛在交易所端，觸發跟止損一樣即時，不怕插針。詳見
- * src/engine/orderLifecycle.ts 的 decideTp1OrderPlacement 說明。
- *
- * --live 旗標刻意 exit(1) 拒絕——這是本次改動唯一保留的安全閥，確保這支
- * 腳本目前只會碰 testnet 帳戶，不會不小心連到正式帳戶。
+ * --live 旗標刻意 exit(1)：確保這支目前只會碰 testnet 帳戶。
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Redis } from '@upstash/redis';
-import {
-  BinanceFuturesClient, loadBinanceConfigFromEnv, MarginBracket,
-} from '../src/engine/binanceClient';
+import { BinanceFuturesClient, loadBinanceConfigFromEnv } from '../src/engine/binanceClient';
 import { getKillSwitchState, type KillSwitchState } from '../src/engine/killSwitch';
 import { reconcilePositionsAndOrders } from '../src/engine/watchdog';
-import { findMarginBracket } from '../src/engine/liquidation';
-import { SymbolFilters, parseSymbolFilters } from '../src/engine/precision';
-import {
-  decideTradeAction, deriveLiveCloseReason, calcTotalOpenRisk, didTp1PartialFill,
-  BridgeTradeRow, BridgeExchangeSnapshot, RiskCheckInput, TradeAction,
-} from '../src/engine/tradeBridge';
-import { extractBinanceErrorCode } from '../src/engine/pendingOrderLifecycle';
-import {
-  evaluateNakedPosition, NakedPositionState,
-} from '../src/engine/nakedPositionWatchdog';
-import { TimeStopCloseReason } from '../src/engine/timeStop';
-import { executeTradeAction, TradeExecutorClient, TradePersistence } from '../src/engine/tradeExecutor';
-import { calcSimpleAtr, TP1_PARTIAL_FRACTION, updateMfeMae } from '../src/lib/monitorMath';
-import { calcPositionPlan, MAX_TOTAL_RISK_PCT } from '../src/lib/position';
-import { readDailyLossCapFromEnv, sumTradingIncome, utcDayStart } from '../src/lib/dailyLossCap';
-import { evaluateDrawdownHalt, readMaxDrawdownR } from '../src/lib/drawdownHalt';
-import { tp1MarkPayload, tp1RollbackPayload } from '../src/lib/tp1Mark';
-import { currentStopToSync } from '../src/lib/stopSync';
+import { parseSymbolFilters } from '../src/engine/precision';
 import { findOrphanEntryOrders } from '../src/lib/orphanEntry';
-import { fetchCandles, fetchCurrentPrice } from '../src/api/binance';
 import { sendWebPushToUser } from '../src/lib/webpush';
 import { runS3aLive } from '../src/engine/s3aLive';
 import { runPrep } from '../src/lib/s3s1/engine';
@@ -93,644 +49,49 @@ if (isLive) {
   process.exit(1);
 }
 
-const CYCLE_MS = 15_000; // 15 秒一輪，比 Vercel 5 分鐘 cron 細很多
-const DEFAULT_MAX_LEVERAGE = 10;
-// route.ts 用同一個 key 前綴判斷這支還活著沒有。
-//
-// 2026-08-23：TTL 90→240 秒、寫入頻率 15→60 秒。原本每輪（15秒）寫一次而
-// TTL 只有 90 秒，是 6 倍過取樣；加上同樣每輪一次的 kill switch 讀取，這支
-// 常駐腳本一天吃掉 11,520 次 Redis 指令（34.6 萬/月），佔 Upstash 免費額度
-// 的 69%——而額度真的被燒完了。稽核時我一開始只看 src/、漏掉這支腳本，
-// 因此誤判成主要是 Vercel 掃描在燒。
-//
-// TTL 拉長不影響實際接手速度：route.ts 是 5 分鐘一次的 cron 才會去看這個
-// 心跳，90 秒和 240 秒對「多久後被接手」幾乎沒差，但把「單輪延遲就被誤判成
-// process 已死、兩邊同時碰同一批 trades」的風險降低了。
+const CYCLE_MS = 15_000;
+// 2026-08-23：TTL 240 秒、60 秒寫一次（原本每 15 秒寫、TTL 90 秒，一天吃掉 11,520 次 Redis 指令，
+// 佔 Upstash 免費額度 69%，額度真的被燒完過）。
 const HEARTBEAT_KEY_PREFIX = 'live-runner:heartbeat:';
 const HEARTBEAT_TTL_SEC = 240;
 const HEARTBEAT_WRITE_MS = 60_000;
-// kill switch 是人工緊急開關，不需要 15 秒級反應。快取 60 秒代表按下後最多
-// 60 秒生效——換掉 4,320 次/天的 Redis 讀取，這個交換划算。
+// kill switch 是人工緊急開關，快取 60 秒（按下後最多 60 秒生效），換掉每天 4,320 次 Redis 讀取。
 const KILLSWITCH_POLL_MS = 60_000;
-
-// 這些幣安錯誤代碼代表「這筆單本質上就不可能成功」——不是網路抖動、不是
-// 暫時性 rate limit，重試沒有意義，只會每輪浪費一次 API 呼叫、洗版 log。
-// 見到就把這筆推薦單標記取消，不要無限重試。
-//   -4141 Symbol is closed（這個交易對目前不接受新單，2026-08-09 實測
-//         MMTUSDT 在 demo trading 撞到）
-//   -1121 Invalid symbol（symbol 打錯或這個交易對根本不存在）
-const NON_RETRYABLE_BINANCE_CODES = new Set([-4141, -1121]);
-
-// finalizeClosed 用來判斷 row.close_reason 是不是 markForceCloseReason 先寫
-// 進去的合法 pending 值（見該函式說明），不是隨便什麼字串都當真。
-const PENDING_CLOSE_REASONS = new Set<string>(['time_stop_stall', 'time_stop_expiry', 'time_stop_expiry_post_tp1']);
-
-// 推播標題用的關單原因文案。跟 trades/page.tsx 的 CLOSE_REASON_LABEL 是
-// 兩套刻意分開的東西：那邊是紀錄頁的完整敘述（「時間止損（盤面停滯）」），
-// 這邊要塞進推播標題跟 symbol 併排，得短。共用同一組 key 值以免對不上。
-const CLOSE_REASON_PUSH_LABEL: Record<string, string> = {
-  time_stop_stall:           '⏱ 盤整停滯平倉',
-  time_stop_expiry:          '⏱ 到期平倉',
-  time_stop_expiry_post_tp1: '⏱ 到期平倉(TP1已達標)',
-};
 
 function nowStr(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
 
-interface DbTradeRow {
-  id: string;
-  symbol: string;
-  direction: 'LONG' | 'SHORT';
-  entry: number;
-  stop_loss: number;
-  tp1: number;
-  tp2: number;
-  strategy: string | null;
-  timeframe: string | null;
-  status: string;
-  suggested_risk_pct: number | null;
-  filled_at: number | null;
-  opened_at: number;
-  entry_qty: number | null;
-  exchange_entry_order_id: number | null;
-  exchange_stop_algo_id: number | null;
-  exchange_tp1_algo_id: number | null;
-  exchange_tp2_algo_id?: number | null;
-  mfe_price: number | null;
-  mae_price: number | null;
-  close_reason: string | null;
-  current_stop: number | string | null;
+// axios 錯誤的 String(e) 只有泛用訊息，幣安真正的錯誤代碼在 err.response.data。
+function describeError(e: unknown): string {
+  const resp = (e as { response?: { data?: { code?: number; msg?: string } } })?.response;
+  if (resp?.data) return `幣安回應 [${resp.data.code}] ${resp.data.msg}`;
+  return String(e).slice(0, 200);
 }
 
-const VALID_TIMEFRAMES = new Set(['5m', '15m', '1h', '4h', '1d']);
-
-// 裸倉看門狗的狀態（每筆 trade 一份），存在記憶體、重啟歸零——理由見
-// src/engine/nakedPositionWatchdog.ts。
-const nakedState = new Map<string, NakedPositionState>();
-
-function toBridgeTradeRow(row: DbTradeRow): BridgeTradeRow {
-  return {
-    id: row.id,
-    symbol: row.symbol,
-    isLong: row.direction === 'LONG',
-    entry: row.entry,
-    stopLoss: row.stop_loss,
-    tp1: row.tp1,
-    tp2: row.tp2,
-    strategy: row.strategy === 'B' ? 'B' : 'A',
-    // 資料庫欄位是自由字串，時間止損只認得這五種——不認得的一律當 1h
-    // （route.ts tfBarMinutes 的 default 分支同一個處理方式，不是另外發明的）。
-    timeframe: (VALID_TIMEFRAMES.has(row.timeframe ?? '') ? row.timeframe : '1h') as BridgeTradeRow['timeframe'],
-    filledAt: row.filled_at ?? row.opened_at ?? null,
-    openedAt: row.opened_at,
-    entryQty: row.entry_qty,
-    exchangeEntryOrderId: row.exchange_entry_order_id,
-    exchangeStopAlgoId: row.exchange_stop_algo_id,
-    exchangeTp1AlgoId: row.exchange_tp1_algo_id,
-    exchangeTp2AlgoId: row.exchange_tp2_algo_id ?? null,
-    // 「價格到底有沒有到過 TP1」的證據，給 didTp1PartialFill 用（2026-09-09）。
-    mfePrice: row.mfe_price,
-    // 止損被拒絕後補掛用（2026-09-23）。numeric 欄位可能回字串，轉成數字。
-    lastKnownStop: row.current_stop != null && Number.isFinite(Number(row.current_stop))
-      ? Number(row.current_stop) : null,
-  };
-}
-
-// 每筆 trade 各自建立一個 persistence——比共用一個全域物件簡單，執行層本來
-// 就是逐筆呼叫，不需要跨 trade 共享狀態。
-function makePersistence(supabase: SupabaseClient, row: DbTradeRow): TradePersistence {
-  const logErr = (op: string, error: { code?: string; message: string } | null) => {
-    if (error) console.error(`[persist] ${op} ${row.id} 失敗: [${error.code}] ${error.message}`);
-  };
-  return {
-    async setEntryOrderId(tradeId, orderId) {
-      const { error } = await supabase.from('trades').update({ exchange_entry_order_id: orderId }).eq('id', tradeId);
-      logErr('setEntryOrderId', error);
-    },
-    async setStopAlgoId(tradeId, algoId) {
-      const { error } = await supabase.from('trades').update({ exchange_stop_algo_id: algoId }).eq('id', tradeId);
-      logErr('setStopAlgoId', error);
-    },
-    async setTp1AlgoId(tradeId, algoId) {
-      const { error } = await supabase.from('trades').update({ exchange_tp1_algo_id: algoId }).eq('id', tradeId);
-      logErr('setTp1AlgoId', error);
-    },
-    async setTp2AlgoId(tradeId, algoId) {
-      const { error } = await supabase.from('trades').update({ exchange_tp2_algo_id: algoId }).eq('id', tradeId);
-      // 42703/PGRST204 = 還沒跑 migration。講清楚要執行什麼，不要靜默——
-      // 欄位不存在會讓每一輪都重掛一次 TP2（幣安端靠 newClientOrderId 擋住
-      // 重複，不會變成兩張單，但 log 會一直洗）。
-      if (error && (error.code === '42703' || error.code === 'PGRST204')) {
-        console.error(`[${nowStr()}] ⚠ trades.exchange_tp2_algo_id 不存在，TP2 條件單無法記錄。`
-          + ` 請執行：ALTER TABLE trades ADD COLUMN IF NOT EXISTS exchange_tp2_algo_id BIGINT;`);
-      } else {
-        logErr('setTp2AlgoId', error);
-      }
-    },
-    async markTp1Hit(tradeId) {
-      // status 與 result 一起寫。2026-09-19 之前這裡只寫 status，而 route.ts
-      // 關一筆 tp1_hit 的單時刻意不覆寫 result（它假設標記端已經寫過），
-      // 於是「live-runner 標記、route.ts 關單」的那些單 result 永遠是 NULL
-      // ——虧損冷卻（activeCooldowns 判 result==='LOSS'）整個漏擋。
-      // 欄位組合的唯一定義處在 src/lib/tp1Mark.ts。
-      const { error } = await supabase.from('trades').update(tp1MarkPayload()).eq('id', tradeId);
-      logErr('markTp1Hit', error);
-    },
-    async markActive(tradeId) {
-      // 回滾要連 result 一起清——markTp1Hit 現在會寫 result，只退 status 會
-      // 留下一筆「還在跑、卻已經記成 WIN_TP1」的活單。exit_price/pnl_percent
-      // 真倉路徑本來就不在標記時寫，沒有被這個誤判污染。
-      const { error } = await supabase.from('trades')
-        .update(tp1RollbackPayload()).eq('id', tradeId).eq('status', 'tp1_hit');
-      logErr('markActive', error);
-    },
-    async finalizeClosed(tradeId, result) {
-      // pnl_percent 維持跟 DB 模擬版同一個計算基礎（價格百分比，不是保證金
-      // ROI）——CLAUDE.md「損益一律用 R 倍數」，R = pnl_percent ÷ 止損距離%，
-      // 這個換算全站通用，這裡如果改用 realizedPnl/margin 算出來的 ROI%，
-      // 下游所有 R 倍數計算會全部跟著失真。realizedPnl（真實 USDT 金額）
-      // 另外沒有欄位可存，先不寫，之後要看要不要加欄位。
-      const pnlPercent = row.direction === 'LONG'
-        ? (result.exitPrice - row.entry) / row.entry * 100
-        : (row.entry - result.exitPrice) / row.entry * 100;
-      // 2026-08-12：close_reason 原本無論如何都硬寫 'live_auto_sync'，看不出
-      // 真倉是被止損掃到還是時間止損強制平倉——row.close_reason 如果已經是
-      // markForceCloseReason 先寫進去的 pending 值，代表是我們自己主動關的，
-      // 直接採用；不是的話（包含舊資料殘留的非預期字串，防呆用 Set 檢查）
-      // 才退回 deriveLiveCloseReason 用既有事實（策略/輸贏）推論，見
-      // tradeBridge.ts 該函式的說明——不是用出場價猜。
-      const pending = row.close_reason !== null && PENDING_CLOSE_REASONS.has(row.close_reason)
-        ? row.close_reason as TimeStopCloseReason
-        : null;
-      const closeReason = deriveLiveCloseReason({
-        pendingCloseReason: pending, strategy: row.strategy === 'B' ? 'B' : 'A', result: result.result,
-        entry: row.entry, stopLoss: row.stop_loss, avgExitPrice: result.exitPrice,
-      });
-      const { error } = await supabase.from('trades').update({
-        result: result.result,
-        exit_price: result.exitPrice,
-        pnl_percent: parseFloat(pnlPercent.toFixed(2)),
-        closed_at: Date.now(),
-        close_reason: closeReason,
-      }).eq('id', tradeId);
-      logErr('finalizeClosed', error);
-    },
-    async markForceCloseReason(tradeId, reason) {
-      const { error } = await supabase.from('trades').update({ close_reason: reason }).eq('id', tradeId);
-      logErr('markForceCloseReason', error);
-    },
-    async markEntryNeverFilled(tradeId) {
-      // 進場單消失但查無任何成交紀錄——從未真的開過倉，result 用
-      // CANCELLED（既有 enum 值，跟 route.ts 的「掛單過期」同一個語意），
-      // 不用 WIN_TP1/LOSS（那兩個是「真的開過倉」才有意義的分類）。
-      const { error } = await supabase.from('trades').update({
-        status: 'cancelled', result: 'CANCELLED', closed_at: Date.now(), close_reason: 'live_entry_expired',
-      }).eq('id', tradeId);
-      logErr('markEntryNeverFilled', error);
-    },
-    async markFilled(tradeId, filledAt) {
-      // status='active' 是 trades/page.tsx 判斷「已經進場、脫離等待進場」
-      // 的欄位——跟 route.ts 的 Phase 1 fill-detection 寫的是同一個值，
-      // filled_at 也是同一個欄位，全站對「進場了沒」的判斷方式維持一致。
-      // 2026-09-23：只改還在 'waiting' 的列。place_initial_stop 也是「止損被
-      // 交易所拒絕後補掛」的路徑，原本每補一次就把 filled_at 重設成現在
-      // （時間止損的計時歸零）、把 tp1_hit 改回 active（下一輪又重新標 TP1、
-      // 再發一次假的 TP1 推播）——UNI 9/23 12:39 就是這樣。第一次成交的
-      // waiting→active 本來就由主迴圈的自我修復先做掉，這裡只是保險。
-      const { error } = await supabase.from('trades').update({
-        status: 'active', filled_at: filledAt,
-      }).eq('id', tradeId).eq('status', 'waiting');
-      logErr('markFilled', error);
-    },
-    async setEntryQty(tradeId, entryQty) {
-      const { error } = await supabase.from('trades').update({ entry_qty: entryQty }).eq('id', tradeId);
-      logErr('setEntryQty', error);
-    },
-  };
-}
-
-async function buildSnapshot(
-  binance: BinanceFuturesClient,
-  row: DbTradeRow,
-  filters: SymbolFilters,
-): Promise<BridgeExchangeSnapshot> {
-  // 2026-08-18 實測撞到：getOpenAlgoOrders(symbol) 帶 symbol 參數查詢，COTIUSDT
-  // 明明在幣安端有兩張條件單，這裡卻一直查到空——但帳戶級 watchdog 用
-  // getOpenAlgoOrders() 不帶 symbol 反而查得到（見 -4130 自我修復那段的診斷
-  // log）。這個端點的 symbol 篩選參數不可信，這裡是真正卡死迴圈的根源：
-  // DB 的 exchange_stop_algo_id 就算已經被自我修復寫對，這裡還是查不到對應
-  // 的訂單，currentStop 永遠是 null，decideTradeAction 每輪都還是會想再下
-  // 一張止損單，撞回 -4130。改成不帶 symbol 查全帳戶後自己篩，跟自我修復
-  // 那段用同一個做法。
-  const [positions, openOrders, allAlgoOrders, markPrice] = await Promise.all([
-    binance.getPositionRisk(row.symbol),
-    binance.getOpenOrders(row.symbol),
-    binance.getOpenAlgoOrders(),
-    fetchCurrentPrice(row.symbol),
-  ]);
-  const openAlgoOrders = allAlgoOrders.filter(a => a.symbol === row.symbol);
-
-  // 2026-09-06：**保留符號**再另外算絕對值。原本這裡直接 Math.abs()，決策層
-  // 因此完全沒有能力分辨多空——UNIUSDT 的 DB 記 LONG、幣安實際是 -39 空單，
-  // 程式照 DB 掛 SELL 止損被幣安 -4509 拒絕，每 15 秒重試一次，而那個部位
-  // 一張止損都沒有。見 tradeBridge.ts 的 positionQtySigned。
-  //
-  // 2026-09-09：明確用 `.symbol` 比對，不再靠 `positions[0]` 的順序。這個
-  // 專案已經有兩個「幣安端點的 symbol 篩選不可信」的前例（上面那段的
-  // getOpenAlgoOrders、getUserTrades 的時間窗），而拿錯 symbol 的部位量會
-  // 直接變成止損單和平倉單的數量。實測這個端點目前是好的（帶 symbol 回 1
-  // 列、不帶回全帳戶 736 列），所以這是防禦不是修 bug。
-  const pos = positions.find(p => p.symbol === row.symbol);
-  const positionQtySigned = pos ? parseFloat(pos.positionAmt) : 0;
-  const positionQty = Math.abs(positionQtySigned);
-  const entryOrderStillOpen = row.exchange_entry_order_id !== null
-    && openOrders.some(o => o.orderId === row.exchange_entry_order_id);
-
-  const stopOrder = row.exchange_stop_algo_id !== null
-    ? openAlgoOrders.find(a => a.algoId === row.exchange_stop_algo_id)
-    : undefined;
-  const currentStop = stopOrder
-    ? { algoId: stopOrder.algoId, triggerPrice: parseFloat(stopOrder.triggerPrice) }
-    : null;
-
-  // TP1 條件單還掛著 ⇒ 它一定還沒成交（2026-09-09，見 tradeBridge.ts
-  // didTp1PartialFill）。跟 currentStop 讀同一份 openAlgoOrders，沒有額外
-  // API 呼叫。exchange_tp1_algo_id 是 null（從沒掛過）時也回 false——沒掛過
-  // 的單同樣不可能成交，讓判斷退回「要有價格證據」那條路。
-  const tp1OrderStillOpen = row.exchange_tp1_algo_id !== null
-    && openAlgoOrders.some(a => a.algoId === row.exchange_tp1_algo_id);
-  // TP2 同一份清單（2026-09-23）：部位還在而 TP2 不見 = 被拒絕/撤銷，要重掛。
-  // 從沒掛過（null）時給 undefined＝不知道，不觸發任何重掛判斷。
-  const tp2OrderStillOpen = row.exchange_tp2_algo_id != null
-    ? openAlgoOrders.some(a => a.algoId === row.exchange_tp2_algo_id)
-    : undefined;
-
-  // ATR 只有「策略A + 已經過 TP1」需要（移動止損棘輪）——其他情況不用多打
-  //一次 K 線請求。
-  let atr1h: number | undefined;
-  if (row.status === 'tp1_hit' && (row.strategy ?? 'A') === 'A') {
-    try {
-      const candles = await fetchCandles(row.symbol, '1h', 20);
-      atr1h = calcSimpleAtr(candles, 14);
-    } catch (e) {
-      console.error(`[snapshot] ${row.symbol} ATR 抓取失敗，這輪移動止損跳過: ${String(e).slice(0, 150)}`);
-    }
-  }
-
-  // recentTrades 只在「部位消失、需要對帳」那一刻才查——用 filled_at（沒有
-  // 就退回 opened_at）當時間下限，避免抓到同一個 symbol 更早、不相關的
-  // 歷史成交（trades 表有 one-open-per-symbol 限制，但關閉後同 symbol 可能
-  // 再開新單）。
-  let recentTrades;
-  if (positionQty === 0 && !entryOrderStillOpen && row.exchange_entry_order_id !== null) {
-    try {
-      const startTime = row.filled_at ?? row.opened_at;
-      recentTrades = await binance.getUserTrades(row.symbol, { startTime });
-      // 2026-08-17：needs_reconcile 卡死時完全看不出是「查詢本身失敗/沒資料」
-      // 還是「summarizeClosingTrades 濾方向濾掉全部」——兩種原因會走到同一句
-      // reason 文字（見 tradeBridge.ts 該分支），log 上分不出來。印出查回來
-      // 幾筆、各自 side 分布，跟 DB 記的 direction 對照，一眼就能看出是不是
-      // 方向記錄跟真實成交對不上（例如 DB 存 LONG 但實際成交是 SELL 開倉）。
-      if (recentTrades.length > 0) {
-        const sides = recentTrades.reduce<Record<string, number>>((acc, t) => {
-          acc[t.side] = (acc[t.side] ?? 0) + 1;
-          return acc;
-        }, {});
-        // 2026-08-18：XRPUSDT 實測——幣安網頁的歷史成交明明有一筆 8/17 15:33
-        // 的平倉 BUY，這裡帶 startTime（≈8/16 07:35）查卻只回 52 筆 SELL，
-        // 平倉那筆完全沒出現。查詢窗口涵蓋得到卻查不到，跟 getOpenAlgoOrders
-        // 帶 symbol 查不到是同一類的端點行為問題。印出「查詢起點」跟「實際
-        // 回傳的時間範圍」，下一輪就能判定是不是窗口被截斷（回傳最後一筆
-        // 遠早於現在＝確實被截）還是根本沒這筆資料。
-        const times = recentTrades.map(t => t.time).sort((a, b) => a - b);
-        const fmt = (ms: number) => new Date(ms).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
-        console.log(`[snapshot] ${row.symbol}（${row.id}）對帳查到 ${recentTrades.length} 筆成交，方向分布 ${JSON.stringify(sides)}，DB記錄 direction=${row.direction}`);
-        console.log(`[snapshot]   查詢起點 startTime=${fmt(startTime)}／回傳範圍 ${fmt(times[0])} ~ ${fmt(times[times.length - 1])}`);
-      }
-    } catch (e) {
-      console.error(`[snapshot] ${row.symbol} getUserTrades 失敗，這輪標記需要對帳: ${String(e).slice(0, 150)}`);
-    }
-  }
-
-  // 這個 symbol 上所有還掛著的條件單張數（止損＋止盈，含使用者手動掛的）。
-  // 只給「方向不符」那道判斷用：0 代表那個部位真的沒有人在管，才會自動平掉。
-  // 見 tradeBridge.ts 的 protectiveOrderCount。
-  const protectiveOrderCount = openAlgoOrders.length;
-
-  return { positionQty, positionQtySigned, protectiveOrderCount, entryOrderStillOpen, currentStop, tp1OrderStillOpen, tp2OrderStillOpen, markPrice, filters, recentTrades, atr1h, now: Date.now() };
-}
-
-async function buildRiskInput(
-  binance: BinanceFuturesClient,
-  row: DbTradeRow,
-  totalOpenRiskPct: number,
-  daily: { realizedUsdt: number | null; capUsdt: number | null } = { realizedUsdt: null, capUsdt: null },
-  haltedReason: string | null = null,
-): Promise<(RiskCheckInput & { leverage: number }) | null> {
-  const balances = await binance.getBalance();
-  const usdt = balances.find(b => b.asset === 'USDT');
-  const accountEquity = usdt ? parseFloat(usdt.availableBalance) : 0;
-  const riskPct = row.suggested_risk_pct ?? 1;
-
-  const plan = calcPositionPlan(accountEquity, riskPct, row.entry, row.stop_loss, DEFAULT_MAX_LEVERAGE);
-  const positionUSDT = plan?.positionUSDT ?? 0;
-  const marginUSDT = plan?.marginUSDT ?? 0;
-  // checkLiquidationSafety（下面呼叫端）用這個 marginUSDT 當 isolatedMarginUSDT
-  // 去預測強平價，這個預測只有在幣安帳戶端真的用同一個槓桿倍數下單時才成立
-  // ——leverage 帶出去讓呼叫端在真的送出第一張進場單前呼叫 setLeverage 對齊。
-  const leverage = plan?.leverage ?? 1;
-
-  // 倉位被名目上限縮小過就講出來。不印的話這件事完全靜默——使用者只會看到
-  // 「倉位怎麼比推播寫的小」，而推播的數字是 route.ts 用同一個函式算的，
-  // 兩邊會一致，更難察覺。止損距離一併印，那是唯一會觸發上限的原因。
-  if (plan?.notionalCapped) {
-    const slPct = Math.abs(row.entry - row.stop_loss) / row.entry * 100;
-    console.log(`[${nowStr()}] ${row.symbol} 止損距離只有 ${slPct.toFixed(3)}%，`
-      + `名目撞到上限被縮小到 ${positionUSDT}U（本金 ${marginUSDT}U ≈ 帳戶 20%）。`
-      + `實際風險 ${plan.riskUSDT}U，低於設定的 ${riskPct}%。`);
-  }
-
-  const bracketsRes = await binance.getLeverageBrackets(row.symbol);
-  const brackets: MarginBracket[] = bracketsRes[0]?.brackets ?? [];
-  if (brackets.length === 0) {
-    // 抓不到分級資料時寧可整個跳過這筆（下一輪重試），不要用 0 或任何猜測值
-    // 硬填——maintMarginRatio 填低了會讓 checkLiquidationSafety 算出的強平價
-    // 比實際更寬鬆（誤判成更安全），這是危險方向的錯誤，比「這筆晚一輪才
-    // 進場」嚴重得多。
-    console.error(`[risk] ${row.symbol} 抓不到 leverageBrackets 分級資料，這輪跳過進場判斷`);
-    return null;
-  }
-  const bracket = findMarginBracket(brackets, positionUSDT);
-
-  return {
-    positionUSDT,
-    totalOpenRiskPct,
-    thisTradeRiskPct: riskPct,
-    liquidation: {
-      isolatedMarginUSDT: marginUSDT,
-      maintMarginRatio: bracket.maintMarginRatio,
-      maintAmount: bracket.cum,
-    },
-    dailyRealizedUsdt: daily.realizedUsdt,
-    dailyLossCapUsdt: daily.capUsdt,
-    haltedReason,
-    leverage,
-  };
-}
-
-// route.ts 沒了這個使用者之後不會再推播——見檔案頂部說明。只有兩個時刻值得
-// 通知：TP1 達標（第一次獲利了結）、最終出場（sync_closed_position，這時候
-// 才有真實成交價/損益可以講，close_full_position 本身只是送出關單，還不
-// 知道最終結果，不在那個分支推播）。
-//
-// 2026-08-10：TP1 改成預掛條件單後，「TP1 達標」不再是某個 action 執行完
-// 當下就知道的事（見 tradeBridge.ts 第5步說明）——是主迴圈自我修復偵測到
-// 部位變小才發現，通知呼叫點跟著搬到那裡，這裡只保留 sync_closed_position。
-// 2026-08-10：實測撞到——使用者開了 live_trading_enabled 後完全收不到任何
-// 推播。route.ts 的「掛單成交」通知（第 562 行附近）因為這個使用者被
-// excludeLiveUsers 排除而不會跑；這支原本只補了 TP1 達標跟最終出場兩個
-// 時機，漏掉「進場成交」這個最先觸發、使用者最常見到的通知——如果一筆單
-// 進場後還沒到 TP1、也還沒出場，使用者會覺得「開了自動交易後什麼通知都
-// 沒有」，其實是這個時機點沒補上，不是推播機制本身壞了。
-async function notifyFilled(userId: string, row: DbTradeRow, fillPrice: number): Promise<void> {
-  const sym = row.symbol.replace('USDT', '/USDT');
-  const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
-  await sendWebPushToUser(userId, {
-    title: `✅ 掛單成交 ${sym}`,
-    body: `${dir} 成交價 $${fillPrice} ｜ TP1 $${row.tp1} ｜ SL $${row.stop_loss}`,
-    tag: `fill-${row.id}`,
-  });
-}
-
-async function notifyTp1Hit(userId: string, row: DbTradeRow): Promise<void> {
-  const sym = row.symbol.replace('USDT', '/USDT');
-  const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
-  await sendWebPushToUser(userId, {
-    title: `🎯 TP1 達標 ${sym}`,
-    body: `${dir} 部分平倉已成交，剩餘倉位交給 live-runner 自動管理移動止損`,
-    tag: `tp1-${row.id}`,
-  });
-}
-
-// 2026-08-10：使用者要求「跟開自動交易之前一樣，每個通知都要有」——盤點
-// route.ts 原本對這個使用者發過的所有推播時機，逐一補齊，不是只挑「看起來
-// 重要」的兩三個。route.ts 的六個推播點：①掛單成交②推薦單失效（掛單過期）
-// ③移動止損上移④TP1達標⑤最終出場⑥新訊號通知。⑥完全不受
-// excludeLiveUsers 影響（新訊號推播跟這筆使用者是不是交給 live-runner 無
-// 關），一直都在；①④已經補了（notifyFilled/notifyTp1Hit）；這裡補②③。
-//
-// prevStopTriggerPrice：只有 update_trailing_stop 用得到——算「這次移動
-// 鎖住了多少 R」要跟移動前的止損價比較，這個值只存在於呼叫端手上的
-// snapshot（action 本身沒有帶舊止損價），所以用參數傳進來而不是塞進
-// TradeAction 型別（那個型別是 tradeBridge.ts 的純決策輸出，不該為了
-// 通知這種副作用需求污染它的形狀）。
-async function notifyIfNeeded(
-  userId: string, row: DbTradeRow, action: TradeAction, prevStopTriggerPrice: number | null,
-): Promise<void> {
-  const sym = row.symbol.replace('USDT', '/USDT');
-  const dir = row.direction === 'LONG' ? '▲ 做多' : '▼ 做空';
-
-  if (action.kind === 'entry_never_filled') {
-    await sendWebPushToUser(userId, {
-      title: `推薦單失效 ${sym}`,
-      body: `${dir} 未進場，掛單已取消（非持倉）`,
-      tag: `cancel-${row.id}`,
-    });
-    return;
-  }
-
-  // 2026-09-06：方向不符且零保護單的部位被系統自動平掉。這則一定要推播——
-  // 上一次同樣的狀況只印在 EC2 的 log 裡，那個裸倉掛了十小時才被人發現。
-  // 文案刻意講「交易所實際部位」而不是 DB 的方向：DB 那筆本來就是錯的。
-  if (action.kind === 'flatten_unmanaged_position') {
-    await sendWebPushToUser(userId, {
-      title: `⚠ ${sym} 部位方向不符，已強制平倉`,
-      body: `交易所實際部位與紀錄相反且沒有任何止損保護，系統已市價平掉`
-        + `（${action.order.side} ${action.order.quantity}）。請人工確認這個部位怎麼來的。`,
-      tag: `unmanaged-${row.id}`,
-    });
-    return;
-  }
-
-  if (action.kind === 'update_trailing_stop') {
-    // route.ts 同款節流：只在鎖住的 R 提升 ≥0.15 才推播，避免棘輪每輪
-    // 微幅移動就洗版（見 route.ts:851 同一道門檻，數字照抄不是重新設計）。
-    const isLong = row.direction === 'LONG';
-    const riskDist = Math.abs(row.entry - row.stop_loss);
-    if (riskDist > 0 && prevStopTriggerPrice !== null) {
-      const rOf = (stop: number) => (isLong ? stop - row.entry : row.entry - stop) / riskDist;
-      const prevR = rOf(prevStopTriggerPrice);
-      const newR = rOf(action.place.stopPrice as number);
-      if (newR > prevR + 0.15) {
-        await sendWebPushToUser(userId, {
-          title: `🛡 ${sym} 移動止損上移`,
-          body: `${dir} 止損上移至 $${action.place.stopPrice}（鎖 +${newR.toFixed(1)}R），續抱等出場`,
-          tag: `trail-${row.id}`,
-        });
-      }
-    }
-    return;
-  }
-
-  // 2026-08-13：以下三種 action 之前全部落到最後那行 `return`，一則通知都
-  // 不會發——使用者實測回報「時間止損、時間取消掛單都收不到」，根因就是
-  // 這裡。notifyIfNeeded 是對「所有已執行的 action」呼叫的（主迴圈
-  // result.executed 分支），但函式本身只認得 3 種 kind，其餘靜默略過。
-
-  // ① 掛單超過 4 根 K 線未成交，我方主動撤單（2026-08-11 新增的 action，
-  //    當時只補了執行與清理，漏了通知）。跟 entry_never_filled 語意相同
-  //    （從未開倉）但成因不同：那個是掛單在交易所端自己消失，這個是我們
-  //    依規格 §3-A 主動撤掉的，文案要分得出來。
-  if (action.kind === 'cancel_stale_entry') {
-    await sendWebPushToUser(userId, {
-      title: `⏱ 掛單逾期取消 ${sym}`,
-      body: `${dir} 掛單超過 4 根 K 線未成交，已主動撤單（未進場，非持倉）`,
-      tag: `stale-${row.id}`,
-    });
-    return;
-  }
-
-  // ② 時間止損／盤整停滯／到期平倉——我方主動送出 MARKET 平倉單的那一刻。
-  //    這裡發的是「為什麼關」，下一輪 sync_closed_position 才有實際成交價與
-  //    損益（MARKET 單 ACK 不保證帶精確成交價，見 tradeExecutor.ts 說明），
-  //    兩則各自有用，不是重複：使用者需要立刻知道系統主動關了倉。
-  if (action.kind === 'close_full_position') {
-    // closeReason=null（2026-09-23）：止損／TP2 條件單被交易所拒絕，價格已經
-    // 走到它該成交的位置，系統代替它市價出場。
-    await sendWebPushToUser(userId, {
-      title: action.closeReason === null
-        ? `🛑 ${sym} 保護單被交易所拒絕，系統代為市價平倉`
-        : `${CLOSE_REASON_PUSH_LABEL[action.closeReason] ?? '⏱ 系統平倉'} ${sym}`,
-      body: `${dir} 系統主動平倉中，成交結果稍後回報`,
-      tag: `forceclose-${row.id}`,
-    });
-    return;
-  }
-
-  if (action.kind !== 'sync_closed_position') return;
-
-  // ③ 出場通知原本只用損益正負分「出場獲利 / 止損出場」，時間止損關掉的單
-  //    因此被標成「❌ 止損出場」——使用者看到會以為是價格碰到止損價，分不出
-  //    是系統主動關的。2026-08-12 起 markForceCloseReason 會把真正的關單原因
-  //    先寫進 DB，而 row 是每輪重新查的（select 已含 close_reason），所以這裡
-  //    讀得到那個 pending 值，可以標對。讀不到才退回原本的損益正負判斷。
-  const pending = row.close_reason !== null && PENDING_CLOSE_REASONS.has(row.close_reason)
-    ? row.close_reason as TimeStopCloseReason
-    : null;
-  const label = pending
-    ? (CLOSE_REASON_PUSH_LABEL[pending] ?? '⏱ 系統平倉')
-    : (action.result === 'WIN_TP1' ? '✅ 出場獲利' : '❌ 止損出場');
-  const pnlStr = `${action.realizedPnl >= 0 ? '+' : ''}${action.realizedPnl.toFixed(2)} USDT`;
-  await sendWebPushToUser(userId, {
-    title: `${label} ${sym}`,
-    body: `${dir} 出場 $${action.avgExitPrice.toFixed(4)} ｜ 實現損益 ${pnlStr}`,
-    tag: `close-${row.id}`,
-  });
-}
-
-// 2026-08-11：實測撞到兩個「善後沒收尾」的問題——①時間止損／到期平倉
-// (close_full_position 送出 MARKET 單) 後，原本掛著的止盈/止損條件單
-// 完全沒被撤銷，殘留在交易所端；使用者截圖看到 BTCUSDT/ZECUSDT/BNBUSDT
-// 都還掛著「市價止盈」，即使部位早就不在了——這些殘留的 reduceOnly 條件
-// 單如果同一個 symbol 之後又開新倉，觸價時會拿新倉位的部位去執行，等於
-// 平白無故被意外減倉。②route.ts 的 tlock:{symbol} 是全站共用的 Redis
-// 鎖（不分使用者），insert 新訊號時 setLock，正常應該在關單時
-// unlockSymbol——但這支從沒實作過對應的解鎖邏輯，route.ts 排除了這個
-// 使用者的 trades 之後（見 excludeLiveUsers），沒有任何一方會釋放這把
-// 鎖，導致 symbol 永遠卡在「持倉中」，即使 live-runner 這邊早就平倉了
-// （使用者截圖：幣種監控清單 BTC/SOL/PUMP 顯示「跳過—持倉中(LONG)」，
-// 但這幾個 symbol 根本沒有真實部位）。
-//
-// 兩個清理動作合併成一個函式，在「這筆 trade 確定結束」的兩個時間點
-// （sync_closed_position 真的平倉過、entry_never_filled 從未成交）都要
-// 呼叫——解鎖不看是不是曾經真的開過倉，只要這筆 trade 的生命週期正式
-// 結束就該放手；撤條件單只有真的開過倉的情況需要（entry_never_filled
-// 從未成交，不會有掛著的條件單）。
-//
-// 撤單/解鎖都是清理性質，失敗只記 log 不中斷——訂單可能已經因為觸發而
-// 自然消失（比如止損被打到才走到這個分支），撤一個不存在的訂單本來就
-// 該失敗，那不是需要处理的錯誤。
-//
-// 2026-08-11：同一輪順手補上另一個對照 route.ts 才發現的遺漏——
-// route.ts 的 Phase 2（LOSS 結果或時間止損觸發）都會 setLossCooldown
-// （同 symbol+方向 24 小時內不再進場，避免連續在同一個爛 setup 上重複
-// 虧損），但這支真倉止損出場後從沒做過這件事。route.ts 的新訊號產生
-// 流程本來就會查 loss_cd:{symbol}:{direction} 這個 key（isOnLossCooldown），
-// 只要這裡把 key 寫進去，下一次 route.ts 想對這個 symbol/方向重新出訊號
-// 就會被正確擋下——不需要 live-runner 自己也去檢查這個 key（它從不主動
-// 產生新訊號，只執行 DB 裡已經有的 trade）。
-async function cleanupAfterTradeClosed(
-  binance: BinanceFuturesClient, redis: Redis, row: DbTradeRow, cancelOrders: boolean, lossResult: boolean,
-): Promise<void> {
-  if (cancelOrders) {
-    // 2026-09-06：TP2 一併撤。漏掉的話關單後會留下一張沒有對應持倉的條件單
-    // ——那正是先前 XRPUSDT 孤兒 TAKE_PROFIT_MARKET 每 15 秒被重複回報一整天
-    // 的形狀，而且下次這個 symbol 再開倉時會撞到既有單。
-    for (const algoId of [row.exchange_stop_algo_id, row.exchange_tp1_algo_id, row.exchange_tp2_algo_id]) {
-      if (algoId == null) continue;
-      try {
-        await binance.cancelOrder(row.symbol, algoId, true);
-      } catch (e) {
-        console.error(`[cleanup] ${row.symbol} 撤條件單 algoId=${algoId} 失敗(可能已觸發/已撤銷,可忽略): ${String(e).slice(0, 120)}`);
-      }
-    }
-  }
-  try {
-    const key = `tlock:${row.symbol}`;
-    const entry = await redis.get<{ sentAt: number; candleBucket: number; direction: string; locked: boolean }>(key);
-    if (entry) await redis.set(key, { ...entry, locked: false }, { ex: 24 * 3600 });
-  } catch (e) {
-    console.error(`[cleanup] ${row.symbol} 解鎖 tlock 失敗: ${String(e).slice(0, 120)}`);
-  }
-  if (lossResult) {
-    try {
-      await redis.set(`loss_cd:${row.symbol}:${row.direction}`, '1', { ex: 24 * 3600 });
-    } catch (e) {
-      console.error(`[cleanup] ${row.symbol} setLossCooldown 失敗: ${String(e).slice(0, 120)}`);
-    }
-  }
-}
-
-// 不管 kill switch 有沒有啟動、這輪有沒有真的做任何動作，只要 process
-// 還活著就要回報心跳——kill switch 啟動中不代表「process 死了」，這兩件
-// 事不能混在一起判斷，不然 route.ts 會在 kill switch 啟動期間誤判成
-// live-runner 已經停止、搶著接手，兩邊同時碰同一批 trades。
+// ── 心跳 ─────────────────────────────────────────────────────────────
+// kill switch 啟動中也要寫（「暫停交易」不等於「process 死了」）。
+// 2026-08-26 起雙寫 Redis＋Supabase：8/23 Upstash 額度用盡時只靠 Redis 一個來源，
+// 整整三天沒有任何東西在監控持倉，而且完全無聲。兩個來源獨立失敗才會判斷不了。
 let lastHeartbeatAt = 0;
 let dbHeartbeatColumnMissing = false;
-
-// 2026-08-26：心跳雙寫 Redis + Supabase。
-//
-// 8/23-8/26 的無聲空窗就是因為交接判斷只有 Redis 一個來源：Upstash 額度用盡
-// → route.ts 查不到心跳 → 保守假設 live-runner 還活著、整批排除不接手；
-// 而 live-runner 同時也因為 Redis 掛掉每輪中斷 → **沒有任何東西在監控持倉**，
-// TP1 條件單從沒掛上，完全沒有錯誤訊息。
-//
-// Redis 仍然是主要來源（有 TTL、自動過期、便宜）；Supabase 是它掛掉時的
-// 第二意見。兩個來源獨立失敗才會回到「無法判斷」。
 async function writeHeartbeat(redis: Redis, supabase: SupabaseClient, userId: string): Promise<void> {
   if (Date.now() - lastHeartbeatAt < HEARTBEAT_WRITE_MS) return;
   const at = Date.now();
   let redisOk = false;
-
   try {
     await redis.set(`${HEARTBEAT_KEY_PREFIX}${userId}`, at, { ex: HEARTBEAT_TTL_SEC });
     redisOk = true;
   } catch (e) {
     console.error(`[heartbeat] Redis 寫入失敗: ${String(e).slice(0, 150)}`);
   }
-
   let dbOk = false;
   if (!dbHeartbeatColumnMissing) {
-    const { error } = await supabase
-      .from('profiles').update({ live_runner_heartbeat_at: at }).eq('id', userId);
+    const { error } = await supabase.from('profiles').update({ live_runner_heartbeat_at: at }).eq('id', userId);
     if (error) {
-      // 42703 / PGRST204 ＝ 欄位還沒 ALTER TABLE。只提醒一次就閉嘴，但要講清楚
-      // 後果——沒有這個欄位，Redis 掛掉時就退回單一來源，8/23 那種空窗會重演。
       if (error.code === '42703' || error.code === 'PGRST204') {
         dbHeartbeatColumnMissing = true;
-        console.error('⚠  profiles.live_runner_heartbeat_at 欄位不存在——Redis 掛掉時無法判斷 live-runner 死活，');
-        console.error('⚠  route.ts 會退回「假設還活著」而不接手，等於沒有任何東西在監控持倉（2026-08-23 實際發生過）。');
+        console.error('⚠  profiles.live_runner_heartbeat_at 欄位不存在——Redis 掛掉時 Vercel 判斷不了這支死活。');
         console.error('⚠  請執行：ALTER TABLE profiles ADD COLUMN IF NOT EXISTS live_runner_heartbeat_at BIGINT;');
       } else {
         console.error(`[heartbeat] Supabase 寫入失敗: [${error.code}] ${error.message}`);
@@ -739,14 +100,12 @@ async function writeHeartbeat(redis: Redis, supabase: SupabaseClient, userId: st
       dbOk = true;
     }
   }
-
-  // 任一邊寫成功就推進節流時戳；兩邊都失敗時下一輪立刻重試，不讓心跳靜默
-  // 斷掉——那會讓 route.ts 誤判成 process 已死並搶著接手同一批 trades。
+  // 任一邊成功才推進節流時戳；兩邊都失敗時下一輪立刻重試，不讓心跳靜默斷掉。
   if (redisOk || dbOk) lastHeartbeatAt = at;
 }
 
-// kill switch 快取。Redis 讀不到時（例如額度用盡）保留上一次讀到的值，
-// 沒讀過就當作未啟動——見 killSwitch.ts 對這個取捨的說明。
+// ── kill switch ─────────────────────────────────────────────────────
+// Redis 讀不到時保留上一次讀到的值，沒讀過就當作未啟動（見 killSwitch.ts 對這個取捨的說明）。
 let lastKsAt = 0;
 let cachedKs: KillSwitchState = { active: false, reason: null, activatedAt: null, readable: false };
 let ksWarnedAt = 0;
@@ -757,22 +116,61 @@ async function pollKillSwitch(redis: Redis): Promise<KillSwitchState> {
   if (ks.readable) {
     cachedKs = ks;
   } else if (Date.now() - ksWarnedAt > 10 * 60_000) {
-    // 每 10 分鐘吼一次就好，不要每輪洗版蓋掉其他有用的 log。
     ksWarnedAt = Date.now();
     console.error(`[killswitch] ⚠ 讀取失敗（Redis 異常）——當作未啟動，持倉監控照常進行。`);
   }
   return cachedKs;
 }
 
+// ── 全帳戶對帳 ───────────────────────────────────────────────────────
+// 涵蓋所有 symbol（不分策略、也看得到手機 App 手動下的單），抓「交易所上有、但沒人在管」的殘留。
+//   - orphan_stop_order：沒有持倉的條件單。2026-08-18 XRPUSDT 一張殘留的止盈單被重複回報一整天——
+//     等那個幣下次進場，它會用舊價位把新部位平掉。撤掉不會讓任何部位失去保護（定義上沒有持倉）。
+//   - 舊策略的殘留進場單（clientOrderId `trade-…-entry`）：2026-09-23 SOL/ZEC 兩張從 09-01 掛到 09-23，
+//     成交就是沒人管的裸倉。舊策略已移除，這種格式的單一律是孤兒。手動下的單格式不同，不碰。
+//   - position_without_stop：只記 log（S3 自己會補止損；手動部位不該被自動處理）。
+async function runAccountWatch(binance: BinanceFuturesClient, redis: Redis, supabase: SupabaseClient, userId: string): Promise<void> {
+  await writeHeartbeat(redis, supabase, userId);
+  const ks = await pollKillSwitch(redis);
+  if (ks.active) {
+    console.log(`[${nowStr()}] kill switch 啟動中（${ks.reason ?? '無原因記錄'}）— 跳過整輪`);
+    return;
+  }
+  const [positions, openOrders, openAlgoOrders] = await Promise.all([
+    binance.getPositionRisk(), binance.getOpenOrders(), binance.getOpenAlgoOrders(),
+  ]);
+  const anomalies = reconcilePositionsAndOrders(positions, openOrders, openAlgoOrders);
+  if (anomalies.length > 0) {
+    console.log(`[${nowStr()}] ⚠ 全帳戶對帳異常 ${anomalies.length} 筆:`);
+    for (const a of anomalies) console.log(`   ${JSON.stringify(a)}`);
+    for (const a of anomalies) {
+      if (a.kind !== 'orphan_stop_order' || a.orderId === undefined) continue;
+      try {
+        await binance.cancelOrder(a.symbol, a.orderId, true);
+        console.log(`[${nowStr()}] 🧹 已撤銷孤兒條件單 ${a.symbol} orderId=${a.orderId}（沒有對應持倉）`);
+      } catch (e) {
+        console.error(`[${nowStr()}] 撤銷孤兒條件單 ${a.symbol} orderId=${a.orderId} 失敗（下輪會再試）: ${describeError(e)}`);
+      }
+    }
+  }
+  for (const o of findOrphanEntryOrders(openOrders, new Set())) {
+    try {
+      await binance.cancelOrder(o.symbol, o.orderId, false);
+      console.log(`[${nowStr()}] 🧹 已撤銷舊策略殘留進場單 ${o.symbol} orderId=${o.orderId}（${o.tradeId}）`);
+    } catch (e) {
+      console.error(`[${nowStr()}] 撤銷殘留進場單 ${o.symbol} orderId=${o.orderId} 失敗（下輪會再試）: ${describeError(e)}`);
+    }
+  }
+}
+
 // ── S3-A＋S3-B（研究端 2026-10-06 部署文件；同一個 testnet 帳戶真的下單、內部分帳）──────────────────
-// 跟舊策略的 runCycle 完全分開：舊策略的單在 Supabase trades，S3 的單在 Redis s3a-live:*。
-// S3A_DRY_RUN=1：只印出會做的動作、不下單（第一次在雲端機器上跑時可以先開）。
+// S3 的單在 Redis s3a-live:*。S3A_DRY_RUN=1：只印出會做的動作、不下單。
 let s3aFilters: Map<string, { stepSize: number; tickSize: number; minNotional: number; minQty?: number }> | null = null;
 let s3aFiltersAt = 0;
 let s3aPrepTriedAt = 0;
 async function runS3aCycle(binance: BinanceFuturesClient, redis: Redis, userId: string): Promise<void> {
   const ks = await pollKillSwitch(redis);
-  if (ks.active) return; // 跟舊策略一致：kill switch 啟動中不做任何下單／改單
+  if (ks.active) return; // kill switch 啟動中不做任何下單／改單
   if (!s3aFilters || Date.now() - s3aFiltersAt > 3_600_000) {
     s3aFilters = parseSymbolFilters(await binance.getExchangeInfo() as Parameters<typeof parseSymbolFilters>[0]);
     s3aFiltersAt = Date.now();
@@ -799,607 +197,6 @@ async function runS3aCycle(binance: BinanceFuturesClient, redis: Redis, userId: 
   });
 }
 
-async function runCycle(
-  supabase: SupabaseClient,
-  binance: BinanceFuturesClient,
-  redis: Redis,
-  userId: string,
-): Promise<void> {
-  await writeHeartbeat(redis, supabase, userId);
-
-  const ks = await pollKillSwitch(redis);
-  if (ks.active) {
-    console.log(`[${nowStr()}] kill switch 啟動中（${ks.reason ?? '無原因記錄'}）— 跳過整輪`);
-    return;
-  }
-
-  // 全帳戶對帳——涵蓋所有 symbol，抓 DB 追蹤不到的異常（見檔案頂部說明）。
-  // accountOpenOrders 留給下面「孤兒進場單」那一步用（要等 open trades 讀完）。
-  let accountOpenOrders: Awaited<ReturnType<BinanceFuturesClient['getOpenOrders']>> | null = null;
-  try {
-    const [positions, openOrders, openAlgoOrders] = await Promise.all([
-      binance.getPositionRisk(),
-      binance.getOpenOrders(),
-      binance.getOpenAlgoOrders(),
-    ]);
-    accountOpenOrders = openOrders;
-    const anomalies = reconcilePositionsAndOrders(positions, openOrders, openAlgoOrders);
-    if (anomalies.length > 0) {
-      console.log(`[${nowStr()}] ⚠ 全帳戶對帳異常 ${anomalies.length} 筆:`);
-      for (const a of anomalies) console.log(`   ${JSON.stringify(a)}`);
-
-      // 2026-08-18：孤兒條件單原本只印出來、沒人善後——XRPUSDT 那張
-      // TAKE_PROFIT_MARKET（1000000168510717）就這樣每 15 秒被重複回報超過
-      // 一整天。「沒有對應持倉的條件單」不只是雜訊：等這個 symbol 下次再
-      // 進場，這張殘留的止盈單會立刻用舊價位把新部位平掉。cleanupAfterTradeClosed
-      // 只能處理 DB 還追蹤得到的單，這裡補的是「DB 已經失去追蹤」那一類。
-      //
-      // 只撤 orphan_stop_order（定義上就是沒有持倉可保護的條件單，撤掉不會
-      // 讓任何部位失去保護）；position_without_stop 是相反的問題，交給
-      // decideTradeAction 第 4 步補掛，不在這裡處理。
-      for (const a of anomalies) {
-        if (a.kind !== 'orphan_stop_order' || a.orderId === undefined) continue;
-        try {
-          await binance.cancelOrder(a.symbol, a.orderId, true);
-          console.log(`[${nowStr()}] 🧹 已撤銷孤兒條件單 ${a.symbol} orderId=${a.orderId}（沒有對應持倉）`);
-        } catch (e) {
-          console.error(`[${nowStr()}] 撤銷孤兒條件單 ${a.symbol} orderId=${a.orderId} 失敗（下輪會再試）: ${describeError(e)}`);
-        }
-      }
-    }
-  } catch (e) {
-    console.error(`[${nowStr()}] 全帳戶對帳讀取失敗: ${String(e).slice(0, 150)}`);
-  }
-
-  // 2026-09-06：`exchange_tp2_algo_id` 需要 migration。**直接放進 select 會讓
-  // 還沒跑 migration 的環境整個查詢失敗，live-runner 完全停擺**——這是真錢
-  // 路徑，不能為了一個新欄位冒這種風險。照專案既有的兩段式 fallback 慣例：
-  // 42703/PGRST204 就退回不含該欄位的查詢，功能降級但不中斷。
-  const BASE_COLS = 'id,symbol,direction,entry,stop_loss,tp1,tp2,strategy,timeframe,status,'
-    + 'suggested_risk_pct,filled_at,opened_at,entry_qty,exchange_entry_order_id,'
-    + 'exchange_stop_algo_id,exchange_tp1_algo_id,mfe_price,mae_price,close_reason,current_stop';
-
-  const selectOpen = (cols: string) => supabase
-    .from('trades').select(cols).eq('user_id', userId).is('closed_at', null);
-
-  let res = await selectOpen(`${BASE_COLS},exchange_tp2_algo_id`);
-  if (res.error && (res.error.code === '42703' || res.error.code === 'PGRST204')) {
-    console.error(`[${nowStr()}] ⚠ trades.exchange_tp2_algo_id 不存在，TP2 條件單功能停用。`
-      + ` 請執行：ALTER TABLE trades ADD COLUMN IF NOT EXISTS exchange_tp2_algo_id BIGINT;`);
-    res = await selectOpen(BASE_COLS);
-  }
-
-  const { data: rows, error } = res;
-  if (error) {
-    console.error(`[${nowStr()}] 讀取 open trades 失敗: [${error.code}] ${error.message}`);
-    return;
-  }
-  // 經過 unknown：兩段式 fallback 讓 supabase-js 推不出單一列型別（兩次查詢
-  // 的欄位集不同），這裡的 shape 由 DbTradeRow 保證，不是靠推導。
-  const openTrades = (rows ?? []) as unknown as DbTradeRow[];
-
-  // 2026-09-23：孤兒進場單——DB 已結案、交易所上卻還掛著的 LIMIT 進場單。
-  // 實測 SOL/ZEC 兩張從 09-01 掛到 09-23，成交就是一個沒人管的裸倉。
-  // 放在「沒有 open trades 就 return」之前：那種情況下我們的進場單全都是孤兒。
-  if (accountOpenOrders) {
-    const orphans = findOrphanEntryOrders(accountOpenOrders, new Set(openTrades.map(t => t.id)));
-    for (const o of orphans) {
-      try {
-        await binance.cancelOrder(o.symbol, o.orderId, false);
-        console.log(`[${nowStr()}] 🧹 已撤銷孤兒進場單 ${o.symbol} orderId=${o.orderId}（${o.tradeId} 在 DB 已結案）`);
-      } catch (e) {
-        console.error(`[${nowStr()}] 撤銷孤兒進場單 ${o.symbol} orderId=${o.orderId} 失敗（下輪會再試）: ${describeError(e)}`);
-      }
-    }
-  }
-
-  if (openTrades.length === 0) {
-    console.log(`[${nowStr()}] OK，目前沒有開著的推薦單`);
-    return;
-  }
-
-  // 2026-08-20：只加總「真的送到交易所」的單——從沒送出的 waiting 推薦單
-  // 不佔曝險，卻會把額度吃光造成四張單互相擋住的死結（詳見 calcTotalOpenRisk）。
-  const totalOpenRiskPct = calcTotalOpenRisk(openTrades.map(t => ({
-    exchangeEntryOrderId: t.exchange_entry_order_id,
-    suggestedRiskPct: t.suggested_risk_pct,
-  })));
-
-  // 日虧損上限（MAX_DAILY_LOSS_USDT）。每輪查一次帳戶級的 income 流水，所有
-  // trade 共用——不是每筆單各查一次。
-  //
-  // 用交易所的帳而不是我們的 trades 表：2026-08-30 對帳證明 DB 記的損益有
-  // 統計顯著的系統性偏誤（z=2.91）。詳見 src/lib/dailyLossCap.ts 檔頭。
-  const dailyLossCapUsdt = readDailyLossCapFromEnv();
-  let dailyRealizedUsdt: number | null = null;
-  if (dailyLossCapUsdt !== null) {
-    const dayStart = utcDayStart(Date.now());
-    try {
-      const income = await binance.getIncome({ startTime: dayStart, limit: 1000 });
-      dailyRealizedUsdt = sumTradingIncome(income, dayStart);
-      console.log(`[${nowStr()}] 今日已實現損益 ${dailyRealizedUsdt.toFixed(2)} USDT`
-        + `（上限 ${dailyLossCapUsdt}）`);
-    } catch (e) {
-      // 刻意留 null —— evaluateDailyLossCap 會 fail-closed 擋掉新倉。這道關卡
-      // 跟其餘關卡相反，理由見 dailyLossCap.ts：fail-open 的下檔是無上限虧損。
-      console.error(`[${nowStr()}] ⚠ 查不到今日 income，日虧損上限無法驗證，`
-        + `這輪不開新倉：${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  // 跨日權益回撤停機。2026-09-06 補：這道原本**只存在於 route.ts**（產生訊號
-  // 那側），這裡完全沒有。訊號在停機之前產生、停機之後才輪到這支處理的話，
-  // 那筆單照樣會被送出去——排隊窗口實測可達三天（UNIUSDT 09-01 掛、09-04 成交）。
-  //
-  // 從 Supabase 推導，不依賴 Redis，也不依賴 route.ts 有沒有在跑
-  // （見 src/lib/drawdownHalt.ts 檔頭）。要跟 route.ts 算出同一個答案，
-  // 就必須用同樣的基準：只看「回撤確認時間之後」平倉的單。
-  let haltedReason: string | null = null;
-  try {
-    const limitR = readMaxDrawdownR();
-    if (limitR > 0) {
-      const { data: prof } = await supabase.from('profiles')
-        .select('drawdown_ack_at').eq('id', userId).single();
-      const ackAt = Number((prof as { drawdown_ack_at?: number | null } | null)?.drawdown_ack_at ?? 0) || 0;
-
-      // audit_verdict：對帳異常的列 pnl_percent 是捏造的，evaluateDrawdownHalt
-      // 會自己把它們濾掉（src/lib/cleanPeriod.ts），但欄位要撈出來才濾得到。
-      let q = supabase.from('trades').select('closed_at, pnl_percent, entry, stop_loss, tier, audit_verdict')
-        .eq('user_id', userId).not('closed_at', 'is', null).not('result', 'is', null);
-      if (ackAt > 0) q = q.gt('closed_at', ackAt);
-      const { data: closedRows } = await q;
-
-      const dd = evaluateDrawdownHalt(closedRows ?? [], limitR);
-      if (dd.halted) {
-        haltedReason = dd.reason;
-        console.log(`[${nowStr()}] ⚠ ${dd.reason}（納入 ${dd.n} 筆）— 這輪不開新倉，既有部位照常管理`);
-      }
-    }
-  } catch (e) {
-    // 查詢失敗**不擋單**。這道關卡的意義是「策略可能失效，停下來讓人檢查」
-    // ——沒有資料就沒有失效的證據，因為查詢失敗就凍住系統是錯的方向。
-    // （日虧損上限刻意相反，那道是最後一道防線，見 dailyLossCap.ts。）
-    console.error(`[${nowStr()}] 回撤停機查詢失敗，這輪不套用：${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  const client: TradeExecutorClient = {
-    placeOrder: (params) => binance.placeOrder(params),
-    cancelOrder: (symbol, orderId, isAlgoOrder) => binance.cancelOrder(symbol, orderId, isAlgoOrder),
-    // 整單平倉後驗證部位歸零用的即時查詢（見 tradeExecutor.ts 該分支）。
-    // 明確比對 `.symbol` 不靠回傳順序，理由同 buildSnapshot。
-    getPositionQty: async (symbol) => {
-      const p = (await binance.getPositionRisk(symbol)).find(x => x.symbol === symbol);
-      return p ? parseFloat(p.positionAmt) : 0;
-    },
-  };
-
-  // exchangeInfo 是全市場共用的靜態精度資料，同一輪所有 trade 共用一份，
-  // 不用每筆各打一次。
-  const exchangeInfo = await binance.getExchangeInfo();
-  const filtersMap = parseSymbolFilters(exchangeInfo as Parameters<typeof parseSymbolFilters>[0]);
-
-  for (const row of openTrades) {
-    try {
-      const filters = filtersMap.get(row.symbol);
-      if (!filters) {
-        console.error(`[${nowStr()}] ${row.symbol} 找不到 exchangeInfo 精度設定，跳過這筆`);
-        continue;
-      }
-
-      const snapshot = await buildSnapshot(binance, row, filters);
-      const trade = toBridgeTradeRow(row);
-      const persist = makePersistence(supabase, row);
-
-      // 裸倉看門狗（2026-09-09）。決策層本來就會在沒止損時補掛，但「補掛失敗」
-      // 這件事以前完全沒有出口：UNIUSDT trade-1788833416973-drr88 的止損單被
-      // 幣安以 "Reduce only reject" 連續拒絕 15 小時，每 15 秒重掛一次，log 上
-      // 看起來跟正常補掛一模一樣，使用者手機也沒有任何提示，價格早就穿過止損
-      // 價 0.27% 卻沒出場。這段不參與決策，只負責讓「一直補不上」發得出聲音。
-      {
-        const verdict = evaluateNakedPosition({
-          positionQty: snapshot.positionQty,
-          hasStop: snapshot.currentStop !== null,
-          now: snapshot.now,
-          state: nakedState.get(row.id) ?? { nakedSince: null, lastAlertAt: null },
-        });
-        nakedState.set(row.id, verdict.state);
-        if (verdict.alert) {
-          const mins = Math.round(verdict.nakedForMs / 60_000);
-          const sym = row.symbol.replace('USDT', '/USDT');
-          console.error(`[${nowStr()}] 🔴 ${row.symbol}（${row.id}）有 ${snapshot.positionQty} 張部位，`
-            + `但交易所上找不到止損單，已經 ${mins} 分鐘——補掛一直沒成功，需要人工確認。`);
-          await sendWebPushToUser(userId, {
-            title: `🔴 ${sym} 沒有止損`,
-            body: `${snapshot.positionQty} 張部位已裸奔 ${mins} 分鐘，系統補掛止損一直失敗，請人工確認`,
-            tag: `naked-${row.id}`,
-          });
-        }
-      }
-
-      // 自我修復：真的有部位（交易所端確認）但 DB 的 status 還停在
-      // 'waiting'，同步一次。不是只靠 place_initial_stop 那一次性時機——
-      // 那個時機點在這次修復上線前就已經發生過的舊資料（實測撞到
-      // ACEUSDT），永遠不會再觸發，只能靠這種「發現不一致就修」的機制
-      // 補回來，之後任何原因造成的同類不一致（比如 DB 寫入當下失敗）也
-      // 一併自我修復，不用每種情況各寫一次特殊處理。
-      if (snapshot.positionQty > 0 && row.status === 'waiting') {
-        await persist.markFilled(row.id, row.filled_at ?? Date.now());
-        row.status = 'active'; // 這一輪剩下的邏輯（例如 ATR 抓取判斷）跟著用新狀態
-        await notifyFilled(userId, row, snapshot.markPrice);
-      }
-
-      // 自我修復：entry_qty 是 tradeBridge.ts 判斷「TP1 是否已發生」的基準
-      // 值（部位比這個值小才算數），null 代表還沒記過——涵蓋兩種情況：這筆
-      // 剛確認成交（上面那段自我修復第一次跑），或者是這次改動上線前就已經
-      // active 的舊資料（永遠不會再進 status==='waiting' 那個分支）。
-      //
-      // 舊資料裡如果止損已經不是原始值（trailingStop !== stop_loss），代表
-      // 舊邏輯下 TP1 早就發生過、部位已經打折——這種情況直接用目前部位反推
-      // 回「打折前」的量（÷(1-50%)），讓 tp1Happened 立刻判定為 true，避免
-      // 誤判成「還沒發生」而重新掛一次 TP1 條件單：如果之後價格真的又碰到
-      // tp1，用打折後的部位再算一次 50% 會變成部位只剩 25%，跟移動止損棘輪
-      // 的語意（TP1 後只剩「棘輪保護」不再減倉）互相打架。
-      if (snapshot.positionQty > 0 && row.entry_qty === null) {
-        const stopAlreadyMoved = snapshot.currentStop !== null
-          && Math.abs(snapshot.currentStop.triggerPrice - row.stop_loss) > 1e-8;
-        const entryQty = stopAlreadyMoved
-          ? snapshot.positionQty / (1 - TP1_PARTIAL_FRACTION)
-          : snapshot.positionQty;
-        await persist.setEntryQty(row.id, entryQty);
-        row.entry_qty = entryQty;
-      }
-
-      // 自我修復：TP1 的部分停利真的發生了但 DB 還沒標記——跟上面
-      // waiting→active 同一種模式，不依賴「我們自己主動下單」這個時機點，
-      // 只要事實跟記錄不一致就修正。
-      //
-      // 判準跟 decideTradeAction 共用同一個 didTp1PartialFill（2026-09-08）：
-      // 這兩處各寫一份 `< entry_qty * 0.99` 的時候，任何「部位只是變小」的
-      // 原因都會同時觸發假的 tp1_hit 標記與假的 TP1 推播——使用者收到「TP1
-      // 已達標」而價格離 TP1 還有 1R，就是這麼來的。
-      //
-      // 2026-09-09：策略B（tp1 === tp2，觸價整單了結）根本沒有「部分停利」
-      // 這個狀態，卻跟策略A共用這段自我修復——XRPUSDT trade-1788884429051
-      // 就是這樣被標成 tp1_hit 的（策略B、價格離 TP1 還有 6.6R）。
-      // decideTradeAction 對策略B是硬寫 isTp1Hit=false 的，這裡補齊。
-      if (
-        snapshot.positionQty > 0 && row.status !== 'tp1_hit'
-        && (row.strategy ?? 'A') !== 'B'
-        && didTp1PartialFill({
-          entryQty: row.entry_qty, positionQty: snapshot.positionQty,
-          tp1OrderStillOpen: snapshot.tp1OrderStillOpen,
-          mfePrice: row.mfe_price, markPrice: snapshot.markPrice,
-          tp1: row.tp1, isLong: row.direction === 'LONG',
-        })
-      ) {
-        await persist.markTp1Hit(row.id);
-        row.status = 'tp1_hit';
-        await notifyTp1Hit(userId, row);
-      }
-
-      // 反向自我修復（2026-09-09）：DB 說 tp1_hit，但那張 TP1 條件單此刻還
-      // 掛在交易所上——**還掛著就代表它沒成交**，這個方向的推論是嚴謹的，
-      // 所以這是「已知標錯」而不是「猜它標錯」，可以直接改回 active。
-      //
-      // 沒有這段的話，上面判準修好也只防未來：已經被標髒的單不會自己好，
-      // 卡片會一直顯示「TP1 已達標，建議把止損移到成本」直到那筆平倉。
-      // UNIUSDT trade-1788833416973-drr88 就卡在這個狀態（TP1 掛在 7.372，
-      // 價格最高只到 7.196）。
-      if (
-        snapshot.positionQty > 0 && row.status === 'tp1_hit'
-        && snapshot.tp1OrderStillOpen === true
-      ) {
-        await persist.markActive(row.id);
-        console.log(`[${nowStr()}] ${row.symbol}（${row.id}）DB 標成 tp1_hit，`
-          + `但 TP1 條件單還掛在交易所上（沒成交）——改回 active。`);
-        row.status = 'active';
-      }
-
-      // MFE/MAE（2026-08-12）：真倉監控從來沒記過——DB 模擬版（route.ts）
-      // 早就在記，理由同一個：只看出場價分不出「衝到 +1.8R 才拉回 +0.2R
-      // 出場」跟「從沒衝過 +0.3R」，這兩種是完全不同的問題（TP1 太遠 vs.
-      // 進場當下的判斷本身就不成立），CSV 診斷 8/11 三筆止損時發現這個
-      // 缺口——沒有 MFE 就看不出這幾筆是曾經浮盈又跌回去，還是直接反向。
-      // 用 updateMfeMae 同一個純函數（src/lib/monitorMath.ts），只是這裡
-      // 沒有 K 線陣列，只有輪詢到的單一 markPrice——包成 high=low=markPrice
-      // 的單根「K線」餵進去，跟 route.ts 用真實高低價比起來會略低估振幅，
-      // 但這支輪詢頻率（15秒）比 route.ts 的 5 分鐘 cron 密集得多，足夠打平。
-      // 純被動量測，不是交易決策，跟下面 decideTradeAction 的判斷完全獨立，
-      // 失敗也不能擋到正常監控——同 route.ts 的 try/catch 防護。
-      if (snapshot.positionQty > 0) {
-        try {
-          const mm = updateMfeMae(
-            [{ high: snapshot.markPrice, low: snapshot.markPrice }],
-            row.direction === 'LONG',
-            row.mfe_price,
-            row.mae_price,
-          );
-          if (mm.changed) {
-            const { error } = await supabase.from('trades')
-              .update({ mfe_price: mm.mfePrice, mae_price: mm.maePrice })
-              .eq('id', row.id);
-            if (error) console.error(`[mfe/mae] ${row.symbol} 更新失敗: [${error.code}] ${error.message}`);
-            else { row.mfe_price = mm.mfePrice; row.mae_price = mm.maePrice; }
-          }
-        } catch (e) {
-          console.error(`[mfe/mae] ${row.symbol} 計算失敗: ${String(e).slice(0, 150)}`);
-        }
-      }
-
-      // 2026-09-23：把交易所上「現在實際的止損價」對帳回 trades.current_stop。
-      // 移動止損只換幣安條件單、從沒寫這個欄位，App 卡片於是永遠顯示寫死的
-      // 「建議將止損移至成本」——AVAX 那筆幣安止損 10.973、App 叫人移到 9.5551。
-      // 用對帳而不是在 update_trailing_stop 順手寫，理由見 src/lib/stopSync.ts。
-      // 只在價格變了才寫一次；失敗只 log，不擋監控。
-      if (snapshot.positionQty > 0) {
-        const stopToWrite = currentStopToSync(row.current_stop, snapshot.currentStop?.triggerPrice);
-        if (stopToWrite !== null) {
-          const { error } = await supabase.from('trades').update({ current_stop: stopToWrite }).eq('id', row.id);
-          if (error) console.error(`[current_stop] ${row.symbol} 更新失敗: [${error.code}] ${error.message}`);
-          else row.current_stop = stopToWrite;
-        }
-      }
-
-      // 風險輸入只有「還沒下過進場單」才需要（余額/槓桿分級都是額外的 API
-      // 呼叫，其他狀態下這筆單不會走到 decideTradeAction 的風險檢查分支）。
-      let risk: RiskCheckInput & { leverage: number };
-      if (row.exchange_entry_order_id === null) {
-        // 這個分支只在「還沒送過進場單」時走，而 calcTotalOpenRisk 已經把這種
-        // 單排除掉了——這筆自己本來就不在 totalOpenRiskPct 裡，不能再減一次
-        // （減了會少算，把上限放寬）。直接傳總和＝「其他已掛單/持倉的風險」。
-        const built = await buildRiskInput(binance, row, totalOpenRiskPct,
-          { realizedUsdt: dailyRealizedUsdt, capUsdt: dailyLossCapUsdt }, haltedReason);
-        if (!built) continue; // 抓不到分級資料，這輪跳過，見 buildRiskInput 說明
-        risk = built;
-      } else {
-        // leverage 只有 place_entry 分支會用到（見下方），這裡永遠不會走到
-        // 那個分支（exchangeEntryOrderId !== null 代表已經下過進場單），
-        // 1 只是型別要求的佔位值。
-        risk = { positionUSDT: 0, totalOpenRiskPct: 0, thisTradeRiskPct: 0, liquidation: { isolatedMarginUSDT: 0, maintMarginRatio: 0, maintAmount: 0 }, leverage: 1 };
-      }
-
-      // 方向不符是「我們對這個部位的認知是錯的」，嚴重度等同裸倉——決策層
-      // 對「有保護單」的情況回傳 hold，而 hold 在下面是**完全靜默**的
-      // （只有 result.executed 為 true 才印）。這種等級的異常不能靠沉默，
-      // 所以在這裡明確印出來。零保護單那條會走 flatten_unmanaged_position，
-      // 下面的 executed 分支會印，但這裡先印一行說明為什麼要動它。
-      if (snapshot.positionQtySigned != null && snapshot.positionQtySigned !== 0
-          && (snapshot.positionQtySigned > 0) !== trade.isLong) {
-        console.error(`[${nowStr()}] ⚠⚠ ${row.symbol}（${row.id}）方向不符：`
-          + `DB 記 ${row.direction}（entry ${row.entry}、qty ${row.entry_qty ?? '?'}），`
-          + `交易所實際部位 ${snapshot.positionQtySigned} @ ${snapshot.markPrice}。`
-          + (snapshot.protectiveOrderCount === 0
-            ? ` 那個部位沒有任何保護單——自動市價平掉。`
-            : ` 交易所端還有 ${snapshot.protectiveOrderCount} 張保護單，不去碰它；需要人工確認。`));
-      }
-
-      const action = decideTradeAction(trade, snapshot, risk);
-
-      // 2026-08-11：資金安全缺口——checkLiquidationSafety（tradeBridge.ts
-      // 第1步風控閘門）整套強平價公式是為 isolated margin + 這裡算好的
-      // leverage 設計的（見 src/engine/liquidation.ts 頂部說明，含
-      // TMM=0/UPNL=0 化簡），但這支從沒真的呼叫過 setMarginType/setLeverage
-      // 讓幣安帳戶端符合這個假設——如果帳戶這個 symbol 預設是 cross margin
-      // 或槓桿倍數對不上，強平價算出來的數字跟真實情況會有落差，實測撞到：
-      // 使用者 ACEUSDT 那筆倉位幣安介面顯示「保證金 11.40 USDT（全倉）」。
-      //
-      // 只在真的要送出第一張進場單那一刻呼叫——setMarginType 有部位/掛單
-      // 時會被幣安拒絕（-4046），這個時間點（action.kind==='place_entry'）
-      // 保證 symbol 還是空手，是唯一安全的呼叫窗口。已經開著的舊倉位（下單
-      // 當時是 cross margin）不會被這裡追溯修正，checkLiquidationSafety
-      // 只在進場前的一次性風控閘門用到，不會對已開部位持續套用，所以舊倉位
-      // 不會被這個公式誤判——只是它們的強平風險本來就沒有被這套系統持續
-      // 追蹤（另一個可以做的加強，這次先只處理「新倉位開始前先鎖定假設
-      // 成立」這一步）。
-      if (action.kind === 'place_entry') {
-        try {
-          await binance.setMarginType(row.symbol, 'ISOLATED');
-        } catch (e) {
-          const code = extractBinanceErrorCode(e);
-          if (code !== -4046) { // -4046 = 已經是 ISOLATED，不算錯誤
-            console.error(`[${nowStr()}] ${row.symbol} setMarginType 失敗，這輪跳過進場（強平價假設不成立前不安全下單）: ${describeError(e)}`);
-            continue;
-          }
-        }
-        try {
-          // 2026-08-12 實測撞到：risk.leverage 是 calcPositionPlan 算出來的
-          // 倉位試算值，刻意留 1 位小數給使用者看（position.ts:31「槓桿, 1
-          // decimal」），從來不是給交易所下單用的整數——幣安 /fapi/v1/leverage
-          // 要求整數，送 7.6 這種小數會被拒絕（-1102 "was not sent, was
-          // empty/null, or malformed"，這個錯誤訊息容易誤導成「沒送出去」，
-          // 其實是型別不符）。無條件進位（不是四捨五入）：幣安這個設定是
-          // 「上限」不是「強制值」，實際使用的槓桿由下單時的保證金/數量決定
-          // 可以 ≤ 這個上限，進位到比試算值大的整數安全，捨去反而可能讓上限
-          // 卡在試算值以下。maxLev 在 calcPositionPlan 裡已經是整數上限，
-          // ceil 後不會超過它。
-          const leverageInt = Math.ceil(risk.leverage);
-          await binance.setLeverage(row.symbol, leverageInt);
-        } catch (e) {
-          console.error(`[${nowStr()}] ${row.symbol} setLeverage(${risk.leverage}) 失敗，這輪跳過進場: ${describeError(e)}`);
-          continue;
-        }
-      }
-
-      const result = await executeTradeAction(client, persist, row.id, action);
-
-      if (result.executed) {
-        console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
-
-        // 整單平倉沒把部位平乾淨——這是「靜默停擺」等級的事故，不能只留一行
-        // log 就算了。2026-09-08 UNIUSDT 少平的 41 張沒有任何東西發現，那個
-        // 殘留部位帶著錯誤數量的止損單裸奔 20 小時（每次觸發都被幣安以
-        // `Reduce only reject` 打回），下游還把它誤判成 TP1 部分停利。
-        // console.error + 推播兩條路都走，因為使用者不會盯著終端機。
-        if (result.closeVerification && !result.closeVerification.flat) {
-          const v = result.closeVerification;
-          console.error(`[${nowStr()}] ⚠⚠ ${row.symbol}（${row.id}）整單平倉沒平乾淨：`
-            + `補送 ${v.extraOrders} 張之後交易所端還留著 ${v.remaining}。`
-            + `這個殘留部位不在系統的管理範圍內，需要人工到幣安確認。`);
-          await sendWebPushToUser(userId, {
-            title: `⚠️ 平倉沒平乾淨 ${row.symbol.replace('USDT', '/USDT')}`,
-            body: `交易所端還留著 ${v.remaining} 的部位（已補送 ${v.extraOrders} 張仍未平掉），請到幣安手動確認`,
-            tag: `residual-${row.id}`,
-          });
-        }
-
-        await notifyIfNeeded(userId, row, action, snapshot.currentStop?.triggerPrice ?? null);
-        // 這筆 trade 生命週期正式結束——見 cleanupAfterTradeClosed 頂部
-        // 說明：撤殘留條件單 + 解 Redis symbol 鎖，避免使用者實測撞到的
-        // 「幣安端還掛著止盈單」「App 誤判持倉中」這兩個善後缺口重演。
-        // cancel_stale_entry（掛單過期主動撤單）跟 entry_never_filled
-        // 同一個語意——從未真的開過倉，一併觸發清理。
-        // result.stillOpen：cancel_stale_entry 撤掉的是一張**部分成交**的
-        // 限價單時，已成交那部分是真實部位。對還開著的部位跑結束善後
-        // （撤殘留條件單 + 解 symbol 鎖）等於把保護單撤掉——比原本那個
-        // 「標成從未開倉」的 bug 更糟。見 tradeExecutor.ts ExecutionResult。
-        if (
-          !result.stillOpen && (
-            action.kind === 'sync_closed_position' || action.kind === 'entry_never_filled'
-            || action.kind === 'cancel_stale_entry'
-          )
-        ) {
-          await cleanupAfterTradeClosed(
-            binance, redis, row,
-            action.kind === 'sync_closed_position',
-            action.kind === 'sync_closed_position' && action.result === 'LOSS',
-          );
-        }
-      }
-      // hold/wait_for_fill 這類 no-op 不印，避免每輪洗版；needs_reconcile 值得看見。
-      else if (action.kind === 'needs_reconcile' || action.kind === 'skip_entry') {
-        console.log(`[${nowStr()}] ${row.symbol} [${action.kind}] ${result.note}`);
-      }
-    } catch (e) {
-      const code = extractBinanceErrorCode(e);
-      // 只有「還沒真的開倉」的推薦單才適合直接標記取消——已經有真實部位的
-      // 話，錯誤原因可能是別的操作（補止損/移動止損）失敗，部位還在，
-      // 亂標成 CANCELLED 會讓帳目跟交易所實際狀態脫鉤，比放著重試更危險。
-      if (code !== undefined && NON_RETRYABLE_BINANCE_CODES.has(code) && row.exchange_entry_order_id === null) {
-        const { error } = await supabase.from('trades').update({
-          status: 'cancelled', result: 'CANCELLED', closed_at: Date.now(), close_reason: 'symbol_unavailable',
-        }).eq('id', row.id);
-        if (error) {
-          console.error(`[${nowStr()}] ${row.symbol}（${row.id}）標記取消失敗: [${error.code}] ${error.message}`);
-        } else {
-          console.log(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 [${code}]，這個 symbol 目前不可交易，標記取消不再重試`);
-          // 2026-08-11：實測撞到——這條路徑是獨立在 executeTradeAction 之外
-          // 的 catch 分支（下單前就撞到 symbol 不可用），不會經過主迴圈那段
-          // 「action.kind 是這三種才清理」的判斷，之前完全沒解鎖，導致這個
-          // symbol 卡在「持倉中」（使用者截圖：PUMP 卡片本身已經顯示「交易
-          // 對目前無法下單」，但幣種監控清單還是跳過持倉中）。
-          // exchange_entry_order_id === null 保證沒下過任何單，不用撤條件單
-          // （跟 entry_never_filled 同一個理由），也不是 LOSS，不用設冷卻。
-          //
-          // 2026-08-26 更正上面這句：「不是 LOSS 所以不用冷卻」在「冷卻＝避免
-          // 追虧損單」的框架下沒錯，但漏掉了另一個用途——**阻止訊號產生器對
-          // 一個根本下不了單的幣重複發訊號**。少了那層記憶，route.ts 每輪都會
-          // 重新發同一個幣：發單 → -4141 → 取消 → 再發，每 5 分鐘燒一次完整
-          // 指標計算加一則推播。使用者實測撞到，而且正是 Vercel CPU 額度爆掉
-          // （4h5m/4h）的原因之一。
-          //
-          // 修在 route.ts：掃描前查 close_reason='symbol_unavailable' 的近期
-          // 紀錄，把那些 symbol 整個剔除（見 src/lib/symbolAvailability.ts）。
-          // 沒有在這裡補 Redis 冷卻是刻意的——Supabase 那條在 Redis 死活兩種
-          // 狀態下都能運作，多一套平行機制只會多一個要維護、要對齊的東西。
-          await cleanupAfterTradeClosed(binance, redis, row, false, false);
-          // 2026-08-13：這條路徑同樣沒有推播——推薦單就這樣無聲消失，使用者
-          // 只會在 App 裡看到卡片變成「交易對目前無法下單」。跟其他「推薦單
-          // 沒進場就結束」的時機（entry_never_filled / cancel_stale_entry）
-          // 一致補上，讓「這張單為什麼不見了」在手機上就答得出來。
-          await sendWebPushToUser(userId, {
-            title: `⚠️ 交易對無法下單 ${row.symbol.replace('USDT', '/USDT')}`,
-            body: `幣安回應 [${code}]，這個交易對目前不可交易，推薦單已取消（未進場）`,
-            tag: `unavailable-${row.id}`,
-          });
-        }
-      } else if (code === -4130) {
-        // 2026-08-17 實測撞到 COTIUSDT：幣安回「An open stop or take profit
-        // order with GTE and closePosition in the direction is existing」，
-        // 但 DB 的 exchange_stop_algo_id/exchange_tp1_algo_id 是 null——多半
-        // 是先前某次 placeOrder 其實在幣安端成功了，但寫回 DB 那一步失敗/
-        // 沒執行到（setStopAlgoId/setTp1AlgoId 只 log 錯誤不會中斷），DB
-        // 從此永久失明，每輪都想再下一張同方向 closePosition 條件單，被
-        // 幣安擋下，卡死重試迴圈。自我修復：去查這個 symbol 現存的 algo
-        // order，撿回它的 algoId 寫回 DB，下一輪 currentStop/tp1 就能正確
-        // 辨識，不用等人工介入。
-        try {
-          // 2026-08-17：第一版傳 symbol 參數給 getOpenAlgoOrders(row.symbol) 過濾，
-          // 結果 COTIUSDT 明明在幣安 App 上看得到兩張條件單，這裡卻查到 0 筆——
-          // 懷疑是這個端點的 symbol 篩選參數沒有正常運作（帳戶級的 watchdog
-          // 呼叫 getOpenAlgoOrders() 不帶 symbol 反而抓得到 XRPUSDT 的孤兒單，
-          // 兩者對照就是這個差異）。改成不帶 symbol、抓全帳戶後自己在這裡篩，
-          // 順便印出原始筆數/內容，這樣如果這次還是抓不到，下次至少留得下
-          // 診斷資料，不用再憑空猜。
-          const all = await binance.getOpenAlgoOrders();
-          const existing = all.filter(a => a.symbol === row.symbol);
-          const closeSide = row.direction === 'LONG' ? 'SELL' : 'BUY';
-          // 2026-08-18 第二次實測（COTIUSDT 還是卡在 -4130）才看清楚真正的
-          // 根因：這裡原本要求 `a.closePosition` 為 true 才納入比對，但只有
-          // 「止損單」跟「策略B的整單止盈」是 closePosition=true——**策略A 的
-          // TP1 是部分減倉**（decideTp1OrderPlacement 用 quantity + reduceOnly，
-          // closePosition 根本沒設，回傳是 false）。結果那張真實存在的 TP1
-          // 條件單永遠被這個過濾條件排除，exchange_tp1_algo_id 永遠補不回來，
-          // 每輪都以為「TP1 還沒掛」而重掛一次，撞回 -4130，迴圈無解。
-          //
-          // 判斷「這張單是不是我們的」只需要兩件事：平倉方向對、觸發價貼近
-          // 我們自己算的 stop_loss/tp1。closePosition 是下單方式的細節（整單
-          // vs 部分減倉），不是身分識別，不該拿來當過濾條件。
-          const closeOrders = existing.filter(a => a.side === closeSide);
-          const stopOrder = closeOrders.find(a => {
-            const p = parseFloat(a.triggerPrice);
-            return Math.abs(p - row.stop_loss) <= Math.abs(p - row.tp1);
-          });
-          const tpOrder = closeOrders.find(a => {
-            const p = parseFloat(a.triggerPrice);
-            return Math.abs(p - row.tp1) < Math.abs(p - row.stop_loss);
-          });
-          const freshPersist = makePersistence(supabase, row);
-          let healed = false;
-          if (stopOrder && row.exchange_stop_algo_id !== stopOrder.algoId) {
-            await freshPersist.setStopAlgoId(row.id, stopOrder.algoId);
-            console.log(`[${nowStr()}] ${row.symbol}（${row.id}）自我修復：撿回既有止損單 algoId=${stopOrder.algoId}`);
-            healed = true;
-          }
-          if (tpOrder && row.exchange_tp1_algo_id !== tpOrder.algoId) {
-            await freshPersist.setTp1AlgoId(row.id, tpOrder.algoId);
-            console.log(`[${nowStr()}] ${row.symbol}（${row.id}）自我修復：撿回既有TP1單 algoId=${tpOrder.algoId}`);
-            healed = true;
-          }
-          if (!healed) {
-            // 2026-08-18：原本這句一律講「查不到條件單」，但 healed=false 有
-            // 兩種完全不同的成因——真的沒查到，或者查到了但 DB 早就記著同一
-            // 個 algoId（不需要更新）。前一輪就是因為這句誤導，讓人以為是查
-            // 詢失敗，實際上止損單早就對上了、卡住的是 TP1。分開講清楚。
-            const stopState = stopOrder ? `止損單已對上（algoId=${stopOrder.algoId}，DB 記錄相同）` : '找不到止損單';
-            const tpState   = tpOrder   ? `TP1單已對上（algoId=${tpOrder.algoId}，DB 記錄相同）` : '找不到TP1單';
-            console.error(`[${nowStr()}] ${row.symbol}（${row.id}）幣安回應 -4130，但自我修復沒有可更新的欄位——${stopState}；${tpState}: ${describeError(e)}`);
-            console.error(`[${nowStr()}]   診斷：全帳戶 algo order 共 ${all.length} 筆，這個 symbol 共 ${existing.length} 筆，預期方向 ${closeSide}，DB: stop=${row.exchange_stop_algo_id} tp1=${row.exchange_tp1_algo_id}`);
-            for (const a of existing) {
-              console.error(`[${nowStr()}]   → symbol=${a.symbol} side=${a.side} orderType=${a.orderType} closePosition=${a.closePosition} algoId=${a.algoId} triggerPrice=${a.triggerPrice}`);
-            }
-          }
-        } catch (e2) {
-          console.error(`[${nowStr()}] ${row.symbol}（${row.id}）-4130 自我修復查詢失敗: ${String(e2).slice(0, 150)}`);
-        }
-      } else {
-        console.error(`[${nowStr()}] ${row.symbol}（${row.id}）這筆處理失敗，不影響其他筆: ${describeError(e)}`);
-      }
-    }
-  }
-}
-
-// axios 錯誤的 String(e) 只會印出 "AxiosError: Request failed with status
-// code 400" 這種泛用訊息——幣安真正的錯誤代碼/訊息在 err.response.data
-// 裡（比如 -1013 精度錯誤、-4164 低於最小名目值、-1121 symbol 不存在），
-// 不解開來看永遠不知道是哪一種。
-function describeError(e: unknown): string {
-  const resp = (e as { response?: { data?: { code?: number; msg?: string } } })?.response;
-  if (resp?.data) {
-    return `幣安回應 [${resp.data.code}] ${resp.data.msg}`;
-  }
-  return String(e).slice(0, 200);
-}
-
 async function main() {
   if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
     console.error('❌ UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN 未設定');
@@ -1413,29 +210,14 @@ async function main() {
     console.error('❌ TRADING_USER_ID 未設定（Supabase profiles.id）');
     process.exit(1);
   }
-  // 2026-08-12：實測撞到（使用者第二次回報「只收得到推薦單通知」）——
-  // 2026-08-10 幫這支補上 Web Push（notifyFilled/notifyTp1Hit/notifyIfNeeded）
-  // 時，只加了呼叫端程式碼，**沒有把 VAPID 金鑰列進上面的必要環境變數，也
-  // 沒有做任何啟動檢查**。結果：使用者照著檔頭文件設好那 5 組變數，這支跑
-  // 起來一切正常（下單、監控、關單都對），但 sendWebPushToUser 一進去就撞到
-  // 「VAPID keys not configured」直接 return []，每一則進場/出場/TP1 通知
-  // 全部靜默失敗。而「推薦單」通知是 Vercel 的 route.ts 發的（那邊 VAPID 設
-  // 在 Vercel 環境變數裡），所以照樣會到——這就是「只收得到推薦單」的成因，
-  // 不是推播機制壞掉，是這支的環境變數缺一半。
-  //
-  // 刻意**不** process.exit(1)：推播是輔助功能，不該讓它擋掉真倉監控（那會
-  // 讓已開的倉位失去管理，比收不到通知嚴重得多）。改成啟動時大聲印出狀態，
-  // 有設就明確說「已啟用」，沒設就印出完整補救指令——讓這件事不可能再被
-  // 默默忽略一次。
+  // 2026-08-12：VAPID 沒設時這支的推播全部靜默失敗（「只收得到推薦單」事件）。刻意不 exit：
+  // 推播是輔助，不該擋掉真倉監控；改成啟動時大聲講。
   if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
     console.error('');
     console.error('⚠️  ════════════════════════════════════════════════════════');
     console.error('⚠️   VAPID 金鑰未設定 —— 這支不會發出任何推播通知');
-    console.error('⚠️   （進場成交／TP1達標／移動止損／出場／推薦單失效 全部收不到）');
-    console.error('⚠️   注意：「新推薦單」通知由 Vercel 發送，不受影響——所以');
-    console.error('⚠️   「只收得到推薦單」正是這個狀況，不是推播壞了。');
-    console.error('⚠️');
-    console.error('⚠️   補救：把 Vercel 專案裡這兩個環境變數設到本機再重啟這支');
+    console.error('⚠️   （S3 進場／止盈／加碼／移動止損／出場 全部收不到）');
+    console.error('⚠️   補救：把 Vercel 專案裡這兩個環境變數設到這台機器再重啟');
     console.error('⚠️     NEXT_PUBLIC_VAPID_PUBLIC_KEY');
     console.error('⚠️     VAPID_PRIVATE_KEY');
     console.error('⚠️   （必須跟 Vercel 上同一組——換一組會讓手機既有訂閱失效）');
@@ -1449,23 +231,11 @@ async function main() {
   const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-  const config = loadBinanceConfigFromEnv(true); // testnet 固定 true，直到 --live 開放
-  const binance = new BinanceFuturesClient(config);
+  const binance = new BinanceFuturesClient(loadBinanceConfigFromEnv(true)); // testnet 固定 true，直到 --live 開放
   const userId = process.env.TRADING_USER_ID;
 
   console.log(`[${nowStr()}] live-runner 啟動（testnet，${CYCLE_MS / 1000}秒/輪，會真的下單）`);
-  console.log(`[${nowStr()}] S3-A＋S3-B：${process.env.S3A_DRY_RUN === '1' ? '試跑模式（S3A_DRY_RUN=1，只印出動作、不下單）' : '真的下單（testnet）'}；舊策略：只管理既有持倉，不再接新單`);
-
-  // 沒設就要講出來。這是唯一一道用「錢」衡量的上限，其餘（MAX_TOTAL_RISK_PCT、
-  // MAX_DRAWDOWN_R、熔斷）都是 R 或百分比，而 R 的分母會隨波動浮動——沒有這道
-  // 就沒有任何以金額為單位的下檔保護。沉默地不啟用，會讓人以為有。
-  const capAtBoot = readDailyLossCapFromEnv();
-  if (capAtBoot === null) {
-    console.warn(`[${nowStr()}] ⚠ MAX_DAILY_LOSS_USDT 未設定——沒有任何「絕對金額」的日虧損上限。`
-      + ` 現有上限都是 R 倍數或百分比，而 R 的分母（止損距離）會隨波動浮動。`);
-  } else {
-    console.log(`[${nowStr()}] 日虧損上限 ${capAtBoot} USDT（達標後暫停開新倉至 UTC 隔日，既有部位不動）`);
-  }
+  console.log(`[${nowStr()}] S3-A＋S3-B：${process.env.S3A_DRY_RUN === '1' ? '試跑模式（S3A_DRY_RUN=1，只印出動作、不下單）' : '真的下單（testnet）'}`);
 
   let stopped = false;
   const stop = () => {
@@ -1479,19 +249,16 @@ async function main() {
   while (!stopped) {
     const cycleStart = Date.now();
     try {
-      await runCycle(supabase, binance, redis, userId);
+      await runAccountWatch(binance, redis, supabase, userId);
     } catch (e) {
-      console.log(`[${nowStr()}] ❌ 這輪整個失敗（不影響下一輪）: ${String(e)}`);
+      console.log(`[${nowStr()}] ❌ 心跳／對帳這輪失敗（不影響 S3、不影響下一輪）: ${describeError(e)}`);
     }
     try {
       await runS3aCycle(binance, redis, userId);
     } catch (e) {
-      console.log(`[${nowStr()}] ❌ S3 這輪失敗（不影響下一輪、不影響舊策略）: ${String(e).slice(0, 200)}`);
+      console.log(`[${nowStr()}] ❌ S3 這輪失敗（不影響下一輪）: ${String(e).slice(0, 200)}`);
     }
-
-    const elapsed = Date.now() - cycleStart;
-    const wait = Math.max(0, CYCLE_MS - elapsed);
-    await new Promise(r => setTimeout(r, wait));
+    await new Promise(r => setTimeout(r, Math.max(0, CYCLE_MS - (Date.now() - cycleStart))));
   }
 }
 
