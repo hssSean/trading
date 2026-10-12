@@ -104,6 +104,16 @@ async function printS3(
   }).join('  ');
   console.log(`\n模擬帳本（各 100 起）  ${ledgerLine}`);
 
+  // 分數影子追蹤：被分數擋掉的訊號後來怎麼了（驗證分數門檻唯一的方法，見 shadow.ts）
+  try {
+    const { summarizeShadow } = await import('../src/lib/s3s1/shadow');
+    const sx = Object.values((await r.hgetall<Record<string, unknown>>('s3s1:s3x')) ?? {}).map(v => parse<import('../src/lib/s3s1/shadow').ShadowTrade>(v));
+    const sm = summarizeShadow(sx);
+    const g = (x: typeof sm.score2) => (x.n ? `${x.n} 筆 平均 ${x.avgR! >= 0 ? '+' : ''}${x.avgR!.toFixed(2)}R 勝率 ${(x.winRate! * 100).toFixed(0)}%` : '0 筆');
+    console.log(`分數影子  2 分：${g(sm.score2)}｜被擋：${g(sm.blocked)}｜未出場 ${sm.open}（樣本少於 30 筆前不要下結論）`);
+  } catch (e) {
+    console.log(`分數影子  讀取失敗：${String(e).slice(0, 80)}`);
+  }
   const xr = Object.values(xc).map(v => parse<{ X: number; day: string; ok: boolean; checkedAt: number }>(v));
   const lastXc = xr.length ? Math.max(...xr.map(x => x.checkedAt)) : null;
   const recentBad = xr.filter(x => !x.ok && x.X >= X - 7 * DAYMS).map(x => x.day).sort();

@@ -9,6 +9,7 @@
 //   s3  ：UTC 01:05 後（要等 00:00 那根 1H 收盤才知道進場價 E）。S3-A、S3-B 的出場結算＋新訊號。
 //   s1  ：UTC 01:05 後處理 00:00 收盤的 12H、13:05 後處理 12:00 收盤的 12H。
 // 第一次執行只記起點，不回補歷史。
+import { pickShadows, type ShadowTrade } from './shadow';
 import {
   DAY, H, H12, FUNDING_MAX, BREADTH_MAX, MIN_RISK_FRAC,
   dailyFeatures, h12Features, s3SignalAt, s1SignalAt, s3Score, btcOk, btcExt, breadthAt, universeOn,
@@ -340,6 +341,7 @@ export async function runS3(store: Store, deps: Deps, now: number): Promise<Reco
   const fundOf = memo(async s => deps.funding(s, firstEntry - 2 * DAY));
   const hourlyOf = memo(async s => hourlyFrom(deps, s, firstEntry, now)); // 只用來取進場那根的開盤價
   const out: Record<string, unknown> = {};
+  let s3aLogs: SignalLog[] = [];
   for (const k of ['s3a', 's3b'] as const) {
     const { state, open } = await loadAcct(store, k);
     const before = new Set(open.keys());
@@ -364,10 +366,43 @@ export async function runS3(store: Store, deps: Deps, now: number): Promise<Reco
     });
     const r = await stepAccount(k, state, open, decisions, simOf, filters, fundOf, hourlyOf, now);
     await saveAcct(store, k, state, before, open, r.done, r.logs);
+    if (k === 's3a') s3aLogs = r.logs;
     out[k] = { opened: r.logs.filter(l => l.decision === 'open').length, signals: r.logs.length, closed: r.done.length, equity: state.equity, open: open.size };
   }
   await store.hset('s3s1:meta', { 's3.lastDay': String(days.length ? days[days.length - 1] : last), 's3.lastRunDay': String(X) });
+  try {
+    out.shadow = await runS3Shadow(store, deps, now, s3aLogs, dailyOf);
+  } catch (e) {
+    out.shadow = `失敗：${String(e).slice(0, 120)}`; // 影子追蹤不能拖垮帳本
+  }
   return { days: days.length, missingPrep: days.filter(d => !snaps.has(d)).length, ...out };
+}
+
+/**
+ * S3 分數影子追蹤（src/lib/s3s1/shadow.ts）：把這次 s3a 紀錄裡算到分數的候選加進 s3s1:s3x，
+ * 再把所有未出場的用同一套 S3 規則（不加碼）模擬，出場了就寫入 netR。
+ */
+export async function runS3Shadow(store: Store, deps: Deps, now: number, logs: SignalLog[],
+  dailyOf: (s: string) => Promise<DailyFeat>): Promise<{ added: number; closed: number; open: number }> {
+  const all = new Map(Object.entries((await store.hgetall('s3s1:s3x')) ?? {}).map(([id, v]) => [id, parse<ShadowTrade>(v)]));
+  const changed: Record<string, string> = {};
+  const added = pickShadows(logs, new Set(all.keys()));
+  for (const t of added) all.set(t.id, t);
+  let closed = 0;
+  for (const t of Array.from(all.values())) {
+    if (t.status !== 'open') continue;
+    if (t.entryT + H > now) { if (added.includes(t)) changed[t.id] = JSON.stringify(t); continue; }
+    const sim = simulateTrade({ kind: 'S3', entryT: t.entryT, stop: t.stop, hourly: await hourlyFrom(deps, t.symbol, t.entryT, now),
+      daily: await dailyOf(t.symbol), fund: await deps.funding(t.symbol, t.entryT - DAY), withAddon: false });
+    const u: ShadowTrade = { ...t, entry: sim?.entry };
+    if (sim && sim.exitReason !== 'open') {
+      Object.assign(u, { status: 'done', exitT: sim.exitT, exitReason: sim.exitReason, netR: sim.netR });
+      closed++;
+    }
+    if (added.includes(t) || u.status !== t.status || u.entry !== t.entry) changed[t.id] = JSON.stringify(u);
+  }
+  if (Object.keys(changed).length) await store.hset('s3s1:s3x', changed);
+  return { added: added.length, closed, open: Array.from(all.values()).filter(t => t.status === 'open').length - closed };
 }
 
 // ════════════════════════════════════════════════════════════════════
