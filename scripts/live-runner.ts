@@ -128,7 +128,19 @@ async function pollKillSwitch(redis: Redis): Promise<KillSwitchState> {
 //     等那個幣下次進場，它會用舊價位把新部位平掉。撤掉不會讓任何部位失去保護（定義上沒有持倉）。
 //   - 舊策略的殘留進場單（clientOrderId `trade-…-entry`）：2026-09-23 SOL/ZEC 兩張從 09-01 掛到 09-23，
 //     成交就是沒人管的裸倉。舊策略已移除，這種格式的單一律是孤兒。手動下的單格式不同，不碰。
-//   - position_without_stop：只記 log（S3 自己會補止損；手動部位不該被自動處理）。
+//     2026-11-11：只自動撤「平倉用（reduceOnly／closePosition）或 S3 自己的（s3a-）」孤兒；
+//     手機 App 手動掛的條件進場單（沒持倉、非 reduceOnly）只記 log，不替使用者撤單。
+//   - position_without_stop：不自動處理（S3 自己會補止損；手動部位不該被自動處理），
+//     但 2026-11-11 起會推播（同幣 6 小時一次）——下單逾時／程式在下單與存檔之間掛掉時，
+//     交易所上會有一個 S3 不認得的裸倉，以前只有 log、沒人看得到。
+const NAKED_ALERT_MS = 6 * 3_600_000;
+const nakedAlertAt = new Map<string, number>();
+async function alertNaked(userId: string, symbol: string, detail: string): Promise<void> {
+  if (Date.now() - (nakedAlertAt.get(symbol) ?? 0) < NAKED_ALERT_MS) return;
+  nakedAlertAt.set(symbol, Date.now());
+  await sendWebPushToUser(userId, { title: `⚠ ${symbol.replace(/USDT$/, '')} 有倉沒止損`, body: detail.slice(0, 150), tag: 'naked' }).catch(() => undefined);
+}
+
 async function runAccountWatch(binance: BinanceFuturesClient, redis: Redis, supabase: SupabaseClient, userId: string): Promise<void> {
   await writeHeartbeat(redis, supabase, userId);
   const ks = await pollKillSwitch(redis);
@@ -144,7 +156,9 @@ async function runAccountWatch(binance: BinanceFuturesClient, redis: Redis, supa
     console.log(`[${nowStr()}] ⚠ 全帳戶對帳異常 ${anomalies.length} 筆:`);
     for (const a of anomalies) console.log(`   ${JSON.stringify(a)}`);
     for (const a of anomalies) {
+      if (a.kind === 'position_without_stop') { await alertNaked(userId, a.symbol, a.detail); continue; }
       if (a.kind !== 'orphan_stop_order' || a.orderId === undefined) continue;
+      if (!a.cancellable) continue; // 可能是手動條件進場單：只記 log（上面已印）
       try {
         await binance.cancelOrder(a.symbol, a.orderId, true);
         console.log(`[${nowStr()}] 🧹 已撤銷孤兒條件單 ${a.symbol} orderId=${a.orderId}（沒有對應持倉）`);
@@ -235,6 +249,20 @@ async function main() {
   const userId = process.env.TRADING_USER_ID;
 
   console.log(`[${nowStr()}] live-runner 啟動（testnet，${CYCLE_MS / 1000}秒/輪，會真的下單）`);
+  // 啟動檢查（2026-11-11）：帳戶設定由程式驗證，不依賴「帳戶剛好是對的」。
+  // 雙向持倉模式下 S3 的單（沒帶 positionSide、止損 reduceOnly）全部會被拒——不 exit：
+  // 既有部位的交易所止損仍在，心跳照寫，只是大聲講＋推播。
+  try {
+    const mode = await binance.getPositionMode();
+    if (mode.dualSidePosition) {
+      console.error('⚠️  帳戶是「雙向持倉」模式——S3 的進場、止損、止盈單都會被拒絕。請到幣安改成單向持倉再重啟。');
+      await sendWebPushToUser(userId, { title: '⚠ live-runner：帳戶是雙向持倉模式', body: 'S3 的單會全部被拒，請改成單向持倉', tag: 'mode' }).catch(() => undefined);
+    } else {
+      console.log(`[${nowStr()}] ✅ 持倉模式：單向`);
+    }
+  } catch (e) {
+    console.error(`[${nowStr()}] ⚠ 讀不到持倉模式（不影響執行）: ${describeError(e)}`);
+  }
   console.log(`[${nowStr()}] S3-A＋S3-B：${process.env.S3A_DRY_RUN === '1' ? '試跑模式（S3A_DRY_RUN=1，只印出動作、不下單）' : '真的下單（testnet）'}`);
 
   let stopped = false;
@@ -256,7 +284,7 @@ async function main() {
     try {
       await runS3aCycle(binance, redis, userId);
     } catch (e) {
-      console.log(`[${nowStr()}] ❌ S3 這輪失敗（不影響下一輪）: ${String(e).slice(0, 200)}`);
+      console.log(`[${nowStr()}] ❌ S3 這輪失敗（不影響下一輪）: ${describeError(e)}`);
     }
     await new Promise(r => setTimeout(r, Math.max(0, CYCLE_MS - (Date.now() - cycleStart))));
   }

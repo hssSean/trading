@@ -153,6 +153,24 @@ export function legUpdate(meta: Record<string, unknown>, leg: Leg, net: number):
   return { kv, halted };
 }
 
+/**
+ * 市價進場後確認部位（2026-11-11）。送單逾時（axios 10 秒）、網路斷線或交易所回報延遲時，
+ * 單可能已經成交——以前查一次沒看到就略過、丟錯就放棄，交易所上會留下一個沒有止損、S3 也不認得的部位。
+ * 現在不管送單成功或丟錯都重查最多 attempts 次；查到多單就回傳（呼叫端接手管理），查不到回 null。
+ */
+export async function confirmEntry(
+  query: () => Promise<{ amt: number; entry: number } | null>, waitMs: number, attempts = 3,
+): Promise<{ amt: number; entry: number } | null> {
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0 && waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+    try {
+      const r = await query();
+      if (r && r.amt > 0 && r.entry > 0) return r;
+    } catch { /* 查詢失敗也重試 */ }
+  }
+  return null;
+}
+
 export type PosCheck =
   | { kind: 'closed' }
   | { kind: 'fills'; tp: boolean; add: boolean; newStop: number }
@@ -285,8 +303,12 @@ export interface S3aCtx {
   dryRun: boolean;
   killSwitch: boolean;
   now: number;
+  /** 進場後重查持倉的間隔（測試用 0）；預設 1000ms */
+  entryConfirmWaitMs?: number;
 }
 
+/** 幣安錯誤代碼（axios 錯誤的 response.data.code） */
+export const binanceCode = (e: unknown): number | undefined => (e as { response?: { data?: { code?: number } } })?.response?.data?.code;
 const parse = <T>(v: unknown): T => (typeof v === 'string' ? JSON.parse(v) : v) as T;
 const ev = (p: LivePos, kind: string, x: { px?: number; qty?: number; note?: string } = {}) => { (p.events ??= []).push({ t: Date.now(), kind, ...x }); };
 const fmt = (x: number) => (Math.abs(x) >= 100 ? x.toFixed(2) : x.toPrecision(5));
@@ -558,18 +580,32 @@ export async function runS3aLive(ctx: S3aCtx): Promise<void> {
       const total = +((legs.A?.qty0 ?? 0) + (legs.B?.qty0 ?? 0)).toFixed(decimals(flt.stepSize));
       const lev = leverageFor(px, c.stop);
       if (!ctx.dryRun) {
-        try { await client.setMarginType(c.symbol, 'ISOLATED'); } catch { /* 已經是逐倉 */ }
+        // 只吞 -4046（已經是逐倉）。其他錯誤（例如有掛單時不能改）照丟：用全倉進場，槓桿／強平的設計就不成立了（2026-11-11）
+        try { await client.setMarginType(c.symbol, 'ISOLATED'); } catch (e) { if (binanceCode(e) !== -4046) throw e; }
         await client.setLeverage(c.symbol, lev);
       }
       const who = LEG_KEYS.filter(k => legs[k]).map(k => `${LEGS[k].name} ${legs[k]!.qty0}`).join('＋');
       ctx.log(`${tag}：市價買進 ${total}（${who}；槓桿 ${lev}x、止損 ${fmt(c.stop)}、分數 2）`);
-      await place(ctx, { symbol: c.symbol, side: 'BUY', type: 'MARKET', quantity: total, newClientOrderId: `s3a-in-${c.symbol}-${X / 1000}`.slice(0, 36) });
+      let sendErr: unknown = null;
+      try {
+        await place(ctx, { symbol: c.symbol, side: 'BUY', type: 'MARKET', quantity: total, newClientOrderId: `s3a-in-${c.symbol}-${X / 1000}`.slice(0, 36) });
+      } catch (e) { sendErr = e; }
       let E = px, qty0 = total;
       if (!ctx.dryRun) {
-        const pr = (await client.getPositionRisk(c.symbol)).find(r => r.symbol === c.symbol);
-        if (!pr || +pr.positionAmt <= 0) { log(`${tag}：市價單送出但沒有持倉，略過`); continue; }
-        E = +pr.entryPrice; qty0 = +pr.positionAmt;
-      }
+        // 上面已確認這個幣下單前沒有持倉，所以現在查到的部位一定是這張單成交的
+        const pr = await confirmEntry(async () => {
+          const r = (await client.getPositionRisk(c.symbol)).find(x => x.symbol === c.symbol);
+          return r ? { amt: +r.positionAmt, entry: +r.entryPrice } : null;
+        }, ctx.entryConfirmWaitMs ?? 1000);
+        if (!pr) {
+          if (sendErr) throw sendErr;
+          log(`${tag}：市價單送出但重查 3 次都沒有持倉，略過`);
+          await ctx.notify(`S3 ⚠ ${coin(c.symbol)} 進場單沒有成交`, '市價單送出成功但查不到持倉，請到交易所確認');
+          continue;
+        }
+        if (sendErr) ctx.log(`${tag}：送單回報錯誤但部位已成交，接手管理（${String(sendErr).slice(0, 100)}）`);
+        E = pr.entry; qty0 = pr.amt;
+      } else if (sendErr) throw sendErr;
       const R1 = E - c.stop;
       const tpQty = +((legs.A?.tpQty ?? 0) + (legs.B?.tpQty ?? 0)).toFixed(decimals(flt.stepSize));
       // 加碼數量 = B 權益 × 3% ÷ 1R（文件 §3.2，以觸發價 E＋1R 估）；不足最小下單量就不掛

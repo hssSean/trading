@@ -81,12 +81,14 @@ describe('reconcilePositionsAndOrders', () => {
     expect(anomalies[0].kind).toBe('orphan_stop_order');
   });
 
-  it('does not treat a TAKE_PROFIT_MARKET order as satisfying the requirement differently from STOP_MARKET', () => {
+  // 2026-11-11：只有止盈單、沒有止損單的部位，價格往下時沒有任何保護——要報出來。
+  it('flags a position protected only by a TAKE_PROFIT_MARKET order', () => {
     const anomalies = reconcilePositionsAndOrders(
       [position()],
       [stopOrder({ type: 'TAKE_PROFIT_MARKET', orderId: 2 })],
     );
-    expect(anomalies).toEqual([]);
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].kind).toBe('position_without_stop');
   });
 
   it('does not flag a plain LIMIT entry order as satisfying the stop requirement (it is not protective)', () => {
@@ -123,11 +125,37 @@ describe('reconcilePositionsAndOrders — openAlgoOrders (2025-12 遷移後的�
     expect(anomalies[0].kind).toBe('position_without_stop');
   });
 
-  it('does not treat a TAKE_PROFIT_MARKET algo order as satisfying the requirement differently from STOP_MARKET', () => {
+  it('flags a position protected only by a TAKE_PROFIT_MARKET algo order', () => {
     const anomalies = reconcilePositionsAndOrders(
       [position()], [], [algoStopOrder({ orderType: 'TAKE_PROFIT_MARKET', algoId: 2 })],
     );
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].kind).toBe('position_without_stop');
+  });
+
+  // S3-B 加碼單是 BUY STOP_MARKET：多單的止損不見時，它不能讓部位看起來有保護。
+  it('does not count a same-side BUY STOP_MARKET (S3-B add-on) as protection for a long', () => {
+    const anomalies = reconcilePositionsAndOrders(
+      [position()], [], [algoStopOrder({ side: 'BUY', closePosition: false, reduceOnly: false, clientAlgoId: 's3a-add-BTCUSDT-1', algoId: 5 })],
+    );
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].kind).toBe('position_without_stop');
+  });
+
+  it('accepts a BUY STOP_MARKET as protection for a short', () => {
+    const anomalies = reconcilePositionsAndOrders(
+      [position({ positionAmt: '-0.01' })], [], [algoStopOrder({ side: 'BUY' })],
+    );
     expect(anomalies).toEqual([]);
+  });
+
+  it('marks orphan reduceOnly / s3a- orders as cancellable, manual conditional entries as not', () => {
+    const anomalies = reconcilePositionsAndOrders([], [], [
+      algoStopOrder({ algoId: 1, closePosition: false, reduceOnly: true, clientAlgoId: 'x1' }),
+      algoStopOrder({ algoId: 2, side: 'BUY', closePosition: false, reduceOnly: false, clientAlgoId: 's3a-add-BTCUSDT-1' }),
+      algoStopOrder({ algoId: 3, side: 'BUY', closePosition: false, reduceOnly: false, clientAlgoId: 'ios_abc' }),
+    ]);
+    expect(anomalies.map(a => [a.orderId, a.cancellable])).toEqual([[1, true], [2, true], [3, false]]);
   });
 
   it('flags an orphan algo stop order whose symbol has no open position', () => {

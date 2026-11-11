@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import path from 'path';
 
 // Mirrors tsconfig.json's "@/*": ["./src/*"] — without this, vitest (no
@@ -10,6 +10,8 @@ export default defineConfig({
   // tsconfig 的 jsx 是 Next.js 要的 "preserve"；vitest 沒有 Next 的編譯器，要自己把 .tsx 轉成 React 呼叫
   // （2026-10-04 為元件測試加的；該測試已隨紙上策略於 2026-10-07 移除，設定保留給之後的元件測試）。
   oxc: { jsx: { runtime: 'automatic' } },
+  // .claude/worktrees/ 底下是 Claude Code 的舊 worktree 副本，不排除會連它們的測試一起跑（2026-11-11）
+  test: { exclude: [...configDefaults.exclude, '.claude/**'] },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

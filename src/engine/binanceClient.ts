@@ -179,6 +179,7 @@ export interface OpenOrder {
   executedQty: string;
   stopPrice: string;
   closePosition: boolean;
+  reduceOnly?: boolean;
 }
 
 // GET /fapi/v1/openAlgoOrders 回傳的條件單快照——2025-12 遷移後，STOP_MARKET/
@@ -195,6 +196,7 @@ export interface AlgoOrder {
   triggerPrice: string;
   quantity: string;
   closePosition: boolean;
+  reduceOnly?: boolean;
 }
 
 // GET /fapi/v1/allAlgoOrders 回傳的條件單**歷史**（含已觸發、已取消）。比
@@ -376,14 +378,20 @@ export class BinanceFuturesClient {
     return this.signedRequest('GET', '/v1/leverageBracket', { symbol });
   }
 
+  // GET /fapi/v1/positionSide/dual —— 持倉模式。true = 雙向（hedge），false = 單向。
+  // S3 的單都沒帶 positionSide、止損用 reduceOnly，只能在單向模式運作（2026-11-11 啟動檢查）。
+  async getPositionMode(): Promise<{ dualSidePosition: boolean }> {
+    return this.signedRequest('GET', '/v1/positionSide/dual');
+  }
+
   // ── State-changing — every call here can move real money ────────────────
 
   async setLeverage(symbol: string, leverage: number): Promise<{ leverage: number; symbol: string }> {
     return this.signedRequest('POST', '/v1/leverage', { symbol, leverage });
   }
 
-  // Binance rejects this with -4046 if there's an open position on the symbol —
-  // callers must set margin type BEFORE placing the first order, not after.
+  // -4046 = 已經是這個模式（No need to change margin type），可以當成功。
+  // 有持倉或掛單時改不了（-4047／-4048）——呼叫端要在第一張單之前設好。
   async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED'): Promise<{ code: number; msg: string }> {
     return this.signedRequest('POST', '/v1/marginType', { symbol, marginType });
   }

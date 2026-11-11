@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { trailedStop, sizePosition, leverageFor, checkPosition, floorTo, type LivePos } from '../src/engine/s3aLive';
+import { trailedStop, sizePosition, leverageFor, checkPosition, floorTo, confirmEntry, type LivePos } from '../src/engine/s3aLive';
 
 const pos = (over: Partial<LivePos> = {}): LivePos => ({
   symbol: 'AUSDT', signalDay: 0, entryDay: 100, entryAt: 0, entry: 10, stop0: 9, stop: 9, qty0: 30, tpQty: 10,
@@ -69,5 +69,30 @@ describe('checkPosition', () => {
   });
   it('已平 1/3 後止盈單本來就不在，不算 tp_missing', () => {
     expect(checkPosition(pos({ partial: true, tpAlgoId: null }), 20, new Set([1]), 10).kind).toBe('ok');
+  });
+});
+
+describe('confirmEntry（2026-11-11：送單逾時或回報延遲時不留下沒人管的部位）', () => {
+  it('第一次查不到、第二次查到 → 回傳部位', async () => {
+    const seq = [null, { amt: 5, entry: 10 }];
+    let i = 0;
+    await expect(confirmEntry(async () => seq[i++] ?? null, 0)).resolves.toEqual({ amt: 5, entry: 10 });
+  });
+  it('查詢丟錯也重試', async () => {
+    let i = 0;
+    await expect(confirmEntry(async () => { if (i++ === 0) throw new Error('timeout'); return { amt: 1, entry: 2 }; }, 0)).resolves.toEqual({ amt: 1, entry: 2 });
+  });
+  it('3 次都是 0 → null', async () => {
+    let n = 0;
+    await expect(confirmEntry(async () => { n++; return { amt: 0, entry: 0 }; }, 0)).resolves.toBeNull();
+    expect(n).toBe(3);
+  });
+});
+
+describe('binanceCode', () => {
+  it('讀 axios 錯誤裡的幣安代碼', async () => {
+    const { binanceCode } = await import('../src/engine/s3aLive');
+    expect(binanceCode({ response: { data: { code: -4046, msg: 'No need to change margin type.' } } })).toBe(-4046);
+    expect(binanceCode(new Error('x'))).toBeUndefined();
   });
 });
