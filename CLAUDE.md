@@ -44,6 +44,8 @@
 - **幣池只收加密貨幣合約**（2026-11-12）：幣安 2026 年上了 237 個股票／商品／外匯合約（`contractType = TRADIFI_PERPETUAL`）與數個指數合約。`src/api/binance.ts` `isCryptoPerp`：`PERPETUAL`＋USDT 計價＋`underlyingType` 是 `COIN`／`PREMARKET` 才算；研究端 `s3_xcheck.perp_symbols` 是同一個條件，**要改兩邊一起改**，否則廣度分母不同、對帳會報不一致。研究端延伸資料集用 `data/ext/skip_extra.json`（`data_update.py` 從 exchangeInfo 產生）。
 - **絕對金額的硬閘**（2026-11-12，`s3aLive.ts` `S3aCtx.limits`）：live-runner 的環境變數 `S3_MAX_DAILY_LOSS_USDT`（近 24 小時帳戶淨損益 ≤ −這個數就不開新倉；讀不到流水就不開、下一輪再試）、`S3_MAX_NOTIONAL_USDT`（單一部位名目超過就不做）。testnet 沒設 = 不檢查；**主網必設**。
 - **緊急全平**：`ENV_FILE=env.txt npm run flatten`（預覽）→ `-- --yes`（啟動 kill switch → 市價平掉整個帳戶的部位 → 撤所有掛單與條件單）→ 確認後 `-- --resume` 解除 kill switch。範圍是整個帳戶（含手動單）。順序刻意是先平倉再撤單（理由在 `src/engine/flatten.ts`）。還沒在有持倉時演練過。
+- **研究端新資料追蹤**（2026-11-12）：`C:\trading_stratage\run_monthly.cmd`（`monthly_update.py`）把資料補到上個月底、三個策略規則原樣重跑、S3 分數 2 跟回測分布比（`s3_fresh_check.py`），摘要寫 Redis `s3s1:fresh`，`npm run status` 會印一行「研究端新資料」。已涵蓋的月份會跳過，多跑無害。**工作排程器還沒註冊**（Claude 的權限不允許建立排程，指令在 `docs/TODO.md`）。目前（到 2026-10）：S3 分數 2 有 11 筆 −0.36R、5 個進場日；若回測為真，這麼差的機率約 4～5%，若沒有優勢約 45%——**警訊但非定論，主網的決定要等新資料累積**。
+- **EC2 的 live-runner 更新／重啟／自動重啟**：`docs/EC2-live-runner.md`，systemd 設定在 `deploy/`（寫的時候沒登入過那台機器，使用者名稱與路徑要照實際改）。
 - 首頁「今天」卡片有一行白話的市場狀態（`view.ts` `regimeNote`）：BTC 在 EMA50 之下時直接寫「空頭期不開新倉，這是設計不是故障」。
 - **分數影子追蹤**（2026-10-12，`src/lib/s3s1/shadow.ts`）：S3 帳本工作每天把「通過所有濾網、算到分數」的候選（2 分的也收，當對照組）記進 Redis `s3s1:s3x`，用同一套 S3 規則（不加碼、不受持倉上限）模擬到出場。這是驗證分數門檻唯一的方法；`npm run status` 印「2 分 vs 被擋」的平均 R。每月約 2～4 筆，**少於 30 筆前不要拿它下結論**。
 - 停用條件（文件 §8）程式會自己判、自己停開新倉（真倉 A、B 各自判）：S3-A 回撤 > 35% 或連虧 7；S3-B > 40% 或連虧 15；S1 > 60% 或近 50 筆勝率 < 45%。

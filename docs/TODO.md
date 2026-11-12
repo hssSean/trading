@@ -11,7 +11,16 @@
      設逐倉只吞 -4046、啟動檢查持倉模式、有倉沒止損推播。
    - 2026-11-12：絕對金額硬閘（`S3_MAX_DAILY_LOSS_USDT`、`S3_MAX_NOTIONAL_USDT`，testnet 可不設）、
      幣池只收加密貨幣合約（`isCryptoPerp`）。
-2. **換 webhook secret**：舊文件記錄它是 `abc123`，而且放在 cron 網址的 query string。testnet 期間沒有
+2. **註冊「研究端新資料追蹤」排程**（Claude 的權限不允許建立排程）。用系統管理員身分開 PowerShell 貼上：
+   ```powershell
+   $a = New-ScheduledTaskAction -Execute 'C:	rading_stratageun_monthly.cmd'
+   $t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 10:30
+   $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+   Register-ScheduledTask -TaskName '研究端新資料追蹤' -Action $a -Trigger $t -Settings $s
+   ```
+   沒註冊的話每月初手動雙擊 `C:	rading_stratageun_monthly.cmd` 也可以。
+3. **EC2 改用 systemd 讓 live-runner 自動重啟**：照 `docs/EC2-live-runner.md`（可以跟第 1 項的重啟一起做）。
+4. **換 webhook secret**：舊文件記錄它是 `abc123`，而且放在 cron 網址的 query string。testnet 期間沒有
    財務風險；轉主網前換成隨機長字串並改用 `x-webhook-secret` header。順序：先設 Vercel 環境變數 →
    等重新部署 → 再改 cron-job.org。
 
@@ -27,7 +36,7 @@
 - [ ] 用 `/fapi/v1/commissionRate` 查實際手續費，對照回測假設（每邊 0.07% 含滑價）。
 - [ ] 換 webhook secret（見上）。
 - [ ] `flatten.ts` 與 `live-runner.ts` 目前都寫死 testnet，主網開放時一起改。
-- [ ] live-runner 在 EC2 上的程序監管（pm2／systemd）沒有記錄在 repo 裡——確認它會自動重啟。
+- [ ] live-runner 在 EC2 上的自動重啟：設定與步驟已寫好（`deploy/`、`docs/EC2-live-runner.md`），**還沒在機器上套用與驗證**。
 
 ## 在等樣本的（不要提前下結論、不要提前調）
 
@@ -40,11 +49,12 @@
 | S1 帳本 | 19 筆 −0.08R；標為實驗性、不轉實盤 | — |
 
 研究端新資料（`fresh_oos.py`，2026-09～10）：S3 分數 2 有 11 筆、平均 −0.36R（9/22 一天 6 筆、5 筆止損）。
-樣本小，但這是 S3 第一批真正的樣本外資料，而且是負的——每月補資料時要接著看。
+`s3_fresh_check.py`：若回測為真，5 個進場日合計 ≤ −4.0R 的機率約 4～5%（回測自己的歷史裡 7% 的時段這麼差）；
+若完全沒有優勢約 45%。**警訊但非定論**——不改規則、testnet 照跑；主網的決定要等新資料累積。`npm run status` 會印最新摘要。
 
 ## 例行
 
-- **每月初**：研究端 `python data_update.py <上個月>` 把資料補到 `data/ext/`，跑 `fresh_oos.py`，把結果加進試驗登記表。
+- **每月初**：研究端 `run_monthly.cmd`（排程註冊後自動）補資料並更新 `s3s1:fresh`；看 `reports/monthly/<月份>.md`，把重點加進試驗登記表。
 - **每月**：`ENV_FILE=env.txt npm run s3s1-report`（月報）。
 - **2027 年 1 月**：核對 `src/lib/s3s1/rules.ts` 的 `FOMC_DAYS`（2027 的日期是憑暫定日程寫的）。
 

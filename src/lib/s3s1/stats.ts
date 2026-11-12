@@ -86,3 +86,18 @@ export function summarizeLive(meta: Record<string, unknown>, closed: LiveDone[],
 
 /** 被擋掉的訊號理由歸類：把數字換成 n，同類的擋單才會合併計數 */
 export const reasonKey = (r: string | undefined) => (r ?? '?').replace(/（.*$/, '').replace(/\d+(\.\d+)?/g, 'n').trim();
+
+/** 研究端 monthly_update.py 寫在 Redis `s3s1:fresh` 的摘要：規則定案後（2026-09 起）新資料的樣本外結果 */
+export interface FreshSummary {
+  month: string; at: number; ok: boolean; dataEnd?: number; error?: string;
+  s3?: { n: number; avgR: number | null }; s1?: { n: number; avgR: number | null }; br?: { n: number; avgR: number | null };
+  s3score2?: { n: number; avgR: number | null; sumR: number; days: number };
+}
+/** status 用的一行字；超過 45 天沒更新或上次失敗時加警告 */
+export function freshLine(f: FreshSummary | null, now: number): string {
+  if (!f) return '研究端新資料  還沒有摘要（研究端跑 run_monthly.cmd）';
+  const r = (x?: { n: number; avgR: number | null }) => (x && x.n ? `${x.n} 筆 ${x.avgR! >= 0 ? '+' : ''}${x.avgR!.toFixed(2)}R` : '0 筆');
+  const days = Math.floor((now - f.at) / 86_400_000);
+  const warn = !f.ok ? '  ⚠ 上次執行失敗' : days > 45 ? `  ⚠ ${days} 天沒更新` : '';
+  return `研究端新資料（2026-09～${f.month}）  S3 分數 2：${r(f.s3score2)}${f.s3score2?.n ? `（${f.s3score2.days} 個進場日）` : ''}｜S1：${r(f.s1)}｜BR：${r(f.br)}${warn}`;
+}

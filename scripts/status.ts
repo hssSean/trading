@@ -118,6 +118,11 @@ async function printS3(
   const lastXc = xr.length ? Math.max(...xr.map(x => x.checkedAt)) : null;
   const recentBad = xr.filter(x => !x.ok && x.X >= X - 7 * DAYMS).map(x => x.day).sort();
   console.log(`每日對帳  最後 ${ago(lastXc)}，近 7 天 ${xr.filter(x => x.X >= X - 7 * DAYMS).length} 天已對、不一致 ${recentBad.length} 天`);
+  try {
+    const { freshLine } = await import('../src/lib/s3s1/stats');
+    const fr = await r.get('s3s1:fresh');
+    console.log(freshLine(fr ? parse<import('../src/lib/s3s1/stats').FreshSummary>(fr) : null, Date.now()));
+  } catch { /* 摘要讀不到不影響其他診斷 */ }
 
   const findings = s3Findings({
     now, lastDay: Number(meta.lastDay ?? 0), mode: meta.mode ? String(meta.mode) : null,

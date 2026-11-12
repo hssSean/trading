@@ -1,0 +1,28 @@
+# systemd 服務：讓 live-runner 當機或主機重開後自己起來。
+# 安裝與操作見 docs/EC2-live-runner.md。User、路徑照 EC2 上的實際情況改（下面假設 ubuntu 與 /home/ubuntu/tradding_app）。
+[Unit]
+Description=Crypto Trader live-runner (S3-A + S3-B, Binance testnet)
+After=network-online.target
+Wants=network-online.target
+# 5 分鐘內連續失敗 10 次就停手（例如環境變數沒設會立刻 exit 1），不要無限重啟洗 log；
+# 這時 Vercel 那側 10 分鐘後會推播「live-runner 停止了」。
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tradding_app
+# 環境變數檔：一行一個 KEY=VALUE，不能有引號以外的 shell 語法。
+# 不要直接指到 env.txt——那個檔混了筆記與指令（CLAUDE.md：env.txt 絕對不要 source）。
+EnvironmentFile=/home/ubuntu/live-runner.env
+ExecStart=/usr/bin/env npm run live-runner
+Restart=always
+RestartSec=10
+# live-runner 收到 SIGTERM 會跑完這一輪再結束（最長 15 秒一輪）
+KillSignal=SIGTERM
+TimeoutStopSec=45
+# log 進 journald：journalctl -u live-runner -f
+
+[Install]
+WantedBy=multi-user.target

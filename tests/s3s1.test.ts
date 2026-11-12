@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { trimPartialFirstBar, s3Score, universeOn, breadthAt, dailyFeatures, S3_TH, DAY, H, H12, type Bar, type FundingPoint, type TradeSim } from '../src/lib/s3s1/rules';
 import { stepAccount, stopCheck, dueS3S1Job, ACCTS, type AcctState, type Candidate, type Position, type SymbolFilter } from '../src/lib/s3s1/engine';
-import { summarizeAcct, summarizeLive, reasonKey } from '../src/lib/s3s1/stats';
+import { summarizeAcct, summarizeLive, reasonKey, freshLine } from '../src/lib/s3s1/stats';
 
 const T0 = Date.UTC(2026, 0, 1);
 const bar = (t: number, c: number, qv = 1): Bar => ({ t, o: c, h: c, l: c, c, qv });
@@ -206,5 +206,18 @@ describe('stats', () => {
   it('reasonKey 把數字收成 n', () => {
     expect(reasonKey('市場過熱（廣度 0.951）')).toBe('市場過熱');
     expect(reasonKey('分數 1')).toBe('分數 n');
+  });
+});
+
+describe('freshLine（研究端新資料摘要）', () => {
+  const now = Date.UTC(2026, 10, 12);
+  const f = { month: '2026-10', at: now - 86_400_000, ok: true, s3score2: { n: 11, avgR: -0.363, sumR: -4, days: 5 }, s1: { n: 143, avgR: 0.089 }, br: { n: 0, avgR: null } };
+  it('印三個策略；0 筆不印平均', () => {
+    expect(freshLine(f, now)).toBe('研究端新資料（2026-09～2026-10）  S3 分數 2：11 筆 -0.36R（5 個進場日）｜S1：143 筆 +0.09R｜BR：0 筆');
+  });
+  it('沒有摘要、太久沒更新、上次失敗', () => {
+    expect(freshLine(null, now)).toContain('還沒有摘要');
+    expect(freshLine({ ...f, at: now - 50 * 86_400_000 }, now)).toContain('⚠ 50 天沒更新');
+    expect(freshLine({ ...f, ok: false }, now)).toContain('⚠ 上次執行失敗');
   });
 });
