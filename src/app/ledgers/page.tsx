@@ -1,9 +1,11 @@
 'use client';
 // 帳本：S3-A／S3-B／S1／BR 四個模擬帳本（不下單，起始各 100 USDT），對照回測基準。BR = 空頭反彈做空（2026-11-12 加）。
 // 資料由 /api/analyze 每天記帳（src/lib/s3s1/engine.ts），這頁透過 /api/s3/ledgers 讀取。
+// 最下方 CTREND 週帳本是 EC2 每週一寫的（research/ctrend/ctrend_forward.py，2026-11-13 加）。
 import { useState } from 'react';
 import { useS3Api } from '@/lib/s3s1/useS3Api';
 import type { LedgerAcct, LedgersResp } from '@/lib/s3s1/apiTypes';
+import type { CtrendSummary } from '@/lib/ctrend/view';
 import { BENCHMARKS } from '@/lib/s3s1/benchmarks';
 import { Card, CardTitle, Empty, ErrorBox, EXIT_LABEL, PageHeader, Row, Stats, coin, fmtD, fmtPct, fmtPx, fmtR, fmtT } from '@/components/s3/ui';
 
@@ -57,6 +59,45 @@ function LedgerCard({ a }: { a: LedgerAcct }) {
   );
 }
 
+function CtrendCard({ c }: { c: CtrendSummary | null }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card>
+      <CardTitle title="CTREND 週帳本" right={c?.openWeek ? <>持倉週 {c.openWeek.slice(5)}</> : '前向驗證'} />
+      {!c ? (
+        <p className="text-[#565E6B] text-[11px] mt-2 leading-4">還沒跑過。EC2 安裝後每週一 09:30（台灣）記一筆：docs/EC2-ctrend.md</p>
+      ) : (
+        <>
+          {c.stale && <p className="text-down text-[11px] mt-1">⚠ 超過 8 天沒更新（EC2 的 ctrend.timer 可能停了）</p>}
+          <Stats items={[
+            ['週數', `${c.weeks}`],
+            ['累積', fmtPct(c.cumNet * 100), c.cumNet],
+            ['平均／週', fmtPct(c.meanNet * 100, 2), c.meanNet],
+            ['t', c.tNet == null ? '—' : c.tNet.toFixed(2)],
+          ]} />
+          <p className="text-[#3A424E] text-[9px] mt-1 num">最後更新 {fmtT(c.lastRun)}・多 {c.topLong.map(coin).join(' ') || '—'}・空 {c.topShort.map(coin).join(' ') || '—'}</p>
+          <div className="flex mt-2 border-t border-[#1B222B]">
+            <button onClick={() => setOpen(o => !o)} className={`flex-1 text-[10px] py-1.5 ${open ? 'text-accent' : 'text-[#8A94A2]'}`}>最近 {c.recent.length} 週</button>
+          </div>
+          {open && (
+            <div className="mt-1 space-y-1">
+              {c.recent.length === 0 && <Empty text="第一週還沒結算" />}
+              {c.recent.map(w => (
+                <Row key={w.wk} left={`${w.wk} 那週`} sub={`多 ${w.nLong}／空 ${w.nShort}（幣池 ${w.nUniverse}）・換手 ${w.turnover.toFixed(2)}・前 100 ${fmtPct(w.top100.net * 100, 2)}`}
+                  right={fmtPct(w.net * 100, 2)} rc={w.net} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <p className="text-[#3A424E] text-[9px] mt-1.5 leading-4">
+        論文 CTREND（28 個技術指標的橫截面趨勢分數）多最高 1/5、空最低 1/5，每週一換倉；扣手續費與資金費。只記帳不下單。
+        前 26 週不看結果；滿 52 週平均 &gt; 0 且 t &gt; 1.5 才考慮下一步，≤ 0 結案。
+      </p>
+    </Card>
+  );
+}
+
 export default function LedgersPage() {
   const { data, error, loading } = useS3Api<LedgersResp>('/api/s3/ledgers');
   return (
@@ -68,6 +109,7 @@ export default function LedgersPage() {
         {loading && !data && <p className="text-[#565E6B] text-xs text-center py-8">載入中…</p>}
         {error && <ErrorBox text={error} />}
         {data?.accounts.map(a => <LedgerCard key={a.summary.key} a={a} />)}
+        {data && <CtrendCard c={data.ctrend ?? null} />}
         {data && (
           <p className="text-[#3A424E] text-[10px] leading-4 px-1 pt-2">
             R ＝ 以止損距離為 1 單位的報酬，已扣手續費與資金費率。權益只算已平倉的單。S3 每月約 2 筆，至少 6 個月才有比較意義；

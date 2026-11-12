@@ -1,0 +1,19 @@
+# systemd 服務：CTREND 前向週帳本（只記帳、不下單）。由 ctrend.timer 每週一觸發，跑完就結束。
+# 不要手動複製這個檔：deploy/install-ctrend.sh 會把 __USER__／__DIR__／__HOME__ 換成實際值再裝。
+# 跟 live-runner 是不同程序，這支失敗不影響真倉。說明見 docs/EC2-ctrend.md。
+[Unit]
+Description=CTREND forward paper ledger (weekly, no orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__DIR__
+# 只有 UPSTASH_REDIS_REST_URL／UPSTASH_REDIS_REST_TOKEN 兩行（install-ctrend.sh 建的，chmod 600）
+EnvironmentFile=__HOME__/ctrend.env
+ExecStart=__DIR__/research/ctrend/.venv/bin/python research/ctrend/ctrend_forward.py
+# 抓 ~500 個幣的日線約 3～5 分鐘；卡住超過 40 分鐘就砍掉，下週一（或手動）會從 lastWeek 補算
+TimeoutStartSec=2400
+Nice=10
+# log：journalctl -u ctrend -n 60 --no-pager

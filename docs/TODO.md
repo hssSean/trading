@@ -13,14 +13,16 @@
      幣池只收加密貨幣合約（`isCryptoPerp`）。
 2. **註冊「研究端新資料追蹤」排程**（Claude 的權限不允許建立排程）。用系統管理員身分開 PowerShell 貼上：
    ```powershell
-   $a = New-ScheduledTaskAction -Execute 'C:	rading_stratageun_monthly.cmd'
+   $a = New-ScheduledTaskAction -Execute 'C:\trading_stratage\run_monthly.cmd'
    $t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 10:30
    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
    Register-ScheduledTask -TaskName '研究端新資料追蹤' -Action $a -Trigger $t -Settings $s
    ```
-   沒註冊的話每月初手動雙擊 `C:	rading_stratageun_monthly.cmd` 也可以。
+   沒註冊的話每月初手動雙擊 `C:\trading_stratage\run_monthly.cmd` 也可以。
 3. **EC2 改用 systemd 讓 live-runner 自動重啟**：照 `docs/EC2-live-runner.md`（可以跟第 1 項的重啟一起做）。
-4. **換 webhook secret**：舊文件記錄它是 `abc123`，而且放在 cron 網址的 query string。testnet 期間沒有
+4. **EC2 安裝 CTREND 前向週帳本**（2026-11-13）：`cd ~/tradding_app && git pull` → `bash deploy/install-ctrend.sh`，
+   輸出整段貼回來確認（`docs/EC2-ctrend.md`）。不用重啟 live-runner。
+5. **換 webhook secret**：舊文件記錄它是 `abc123`，而且放在 cron 網址的 query string。testnet 期間沒有
    財務風險；轉主網前換成隨機長字串並改用 `x-webhook-secret` header。順序：先設 Vercel 環境變數 →
    等重新部署 → 再改 cron-job.org。
 
@@ -47,6 +49,7 @@
 | BR 空頭反彈做空帳本 | 13 筆 +0.21R | **100 筆**：平均 R > 0 且訊號日 t > 1 才考慮接 testnet 真倉；≤ 0 結案（研究端登記表 2026-11-12） |
 | S3 × FOMC 標記（`ind.fomc`） | 只標記不擋單 | 新資料累積後再看 |
 | S1 帳本 | 19 筆 −0.08R；標為實驗性、不轉實盤 | — |
+| CTREND 前向週帳本（`ctrend:*`，EC2） | 2026-11-13 建好，等 EC2 安裝；起點 2026-10-26 | **前 26 週不看**；52 週：平均淨 > 0 且 t > 1.5 才考慮小額試行（另外設計與登記），≤ 0 結案，中間累積到 104 週（研究端登記表 2026-11-13） |
 
 研究端新資料（`fresh_oos.py`，2026-09～10）：S3 分數 2 有 11 筆、平均 −0.36R（9/22 一天 6 筆、5 筆止損）。
 `s3_fresh_check.py`：若回測為真，5 個進場日合計 ≤ −4.0R 的機率約 4～5%（回測自己的歷史裡 7% 的時段這麼差）；

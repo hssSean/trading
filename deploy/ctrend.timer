@@ -1,0 +1,11 @@
+# 每週一 01:30 UTC（台灣 09:30）跑 ctrend.service。Persistent=true：主機那時關著，開機後補跑。
+[Unit]
+Description=CTREND forward paper ledger, every Monday 01:30 UTC
+
+[Timer]
+OnCalendar=Mon *-*-* 01:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

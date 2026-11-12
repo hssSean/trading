@@ -123,6 +123,11 @@ async function printS3(
     const fr = await r.get('s3s1:fresh');
     console.log(freshLine(fr ? parse<import('../src/lib/s3s1/stats').FreshSummary>(fr) : null, Date.now()));
   } catch { /* 摘要讀不到不影響其他診斷 */ }
+  try {
+    const { ctrendStatusLine } = await import('../src/lib/ctrend/view');
+    const cm = await r.get('ctrend:meta');
+    console.log(ctrendStatusLine(cm ? parse<import('../src/lib/ctrend/view').CtrendMeta>(cm) : null, Date.now()));
+  } catch { /* CTREND 讀不到不影響其他診斷 */ }
 
   const findings = s3Findings({
     now, lastDay: Number(meta.lastDay ?? 0), mode: meta.mode ? String(meta.mode) : null,

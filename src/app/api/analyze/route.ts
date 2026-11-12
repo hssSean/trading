@@ -5,13 +5,14 @@
 // 現在 GET 只做三件事：
 //   1. live-runner 停止告警（src/lib/liveRunnerAlert.ts）
 //   2. S3／S1 模擬帳本工作 prep → s3 → s1（src/lib/s3s1/engine.ts）＋分數影子追蹤
-//   3. 研究端每日對帳的告警（src/lib/s3s1/xcheckAlert.ts）
+//   3. 研究端每日對帳的告警（src/lib/s3s1/xcheckAlert.ts）＋CTREND 週帳本停擺告警（src/lib/ctrend/view.ts）
 // POST（App 撈待推訊號）與 DELETE（清鎖、確認回撤停機）是舊策略設定頁在用的小功能，原樣保留。
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { runPrep, runS3, runS1, runBR, dueS3S1Job } from '@/lib/s3s1/engine';
 import { binanceS3S1Deps } from '@/lib/s3s1/deps';
 import { decideXcheckAlert } from '@/lib/s3s1/xcheckAlert';
+import { decideCtrendAlert, type CtrendMeta } from '@/lib/ctrend/view';
 import type { TradingSignal } from '@/types';
 import { sendWebPushToUser } from '@/lib/webpush';
 import { decideLiveRunnerHandoff } from '@/lib/liveRunnerHandoff';
@@ -190,6 +191,22 @@ async function runS3S1Jobs(profileId: string): Promise<Record<string, unknown>> 
       }
     } catch (e) {
       console.error('[s3s1] xcheck alert failed:', String(e).slice(0, 200));
+    }
+    // CTREND 前向週帳本（EC2 每週一 01:30 UTC 寫 ctrend:meta）超過 9 天沒更新就推播；還沒跑過不吵。
+    try {
+      if (await claimPeriodicSlot('ctrend-stale-alert', 12 * 3600)) {
+        const raw = await rj.get('ctrend:meta');
+        const cm = raw == null ? null : (typeof raw === 'string' ? JSON.parse(raw) : raw) as CtrendMeta;
+        if (decideCtrendAlert(cm, nowJ)) {
+          await sendWebPushToUser(profileId, {
+            title: '⚠ CTREND 週帳本停了',
+            body: `EC2 的 ctrend.timer 超過 9 天沒寫結果（最後持倉週 ${cm?.lastWeek ?? '—'}）。真倉不受影響；到 EC2 看 journalctl -u ctrend。`,
+            tag: 'ctrend-stale',
+          });
+        }
+      }
+    } catch (e) {
+      console.error('[ctrend] stale alert failed:', String(e).slice(0, 200));
     }
   }
   return out;

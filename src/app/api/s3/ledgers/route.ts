@@ -1,8 +1,10 @@
-// 帳本頁用：S3-A／S3-B／S1 三個模擬帳本（/api/analyze 寫的 s3s1:*）的摘要、持倉、近期交易、訊號與擋單統計。唯讀。
+// 帳本頁用：S3-A／S3-B／S1／BR 模擬帳本（/api/analyze 寫的 s3s1:*）的摘要、持倉、近期交易、訊號與擋單統計，
+// 加上 CTREND 前向週帳本（EC2 寫的 ctrend:*）。唯讀。
 import { NextRequest, NextResponse } from 'next/server';
 import { checkUserSession, getRedisOrNull, parseJson } from '@/lib/apiAuth';
 import { ACCTS, type AcctKey, type AcctState, type Position, type SignalLog } from '@/lib/s3s1/engine';
 import { summarizeAcct, reasonKey } from '@/lib/s3s1/stats';
+import { ctrendSummary, type CtrendMeta, type CtrendOpen, type CtrendWeek } from '@/lib/ctrend/view';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 10;
@@ -15,9 +17,12 @@ export async function GET(req: NextRequest) {
   if (!r) return NextResponse.json({ ok: false, reason: 'Redis 未設定' }, { status: 500 });
   const keys = Object.keys(ACCTS) as AcctKey[];
   try {
-    const [meta, sigRaw, ...acctRaw] = await Promise.all([
+    const [meta, sigRaw, ctMeta, ctWeeks, ctOpen, ...acctRaw] = await Promise.all([
       r.hgetall<Record<string, unknown>>('s3s1:meta'),
       r.lrange('s3s1:signals', 0, SIGNALS - 1),
+      r.get('ctrend:meta'),
+      r.hgetall<Record<string, unknown>>('ctrend:weeks'),
+      r.get('ctrend:open'),
       ...keys.flatMap(k => [r.hgetall<Record<string, unknown>>(`s3s1:${k}:open`), r.hgetall<Record<string, unknown>>(`s3s1:${k}:done`)]),
     ]);
     const m = (meta ?? {}) as Record<string, unknown>;
@@ -40,6 +45,12 @@ export async function GET(req: NextRequest) {
       trackStart: { s3: Number(m['trackStart.s3']) || null, s1: Number(m['trackStart.s1']) || null },
       lastRun: { s3: Number(m['s3.lastRunDay']) || null, s1: Number(m['s1.lastRunT']) || null },
       accounts,
+      ctrend: ctMeta == null && !ctWeeks ? null : ctrendSummary(
+        ctMeta == null ? null : parseJson<CtrendMeta>(ctMeta),
+        Object.values(ctWeeks ?? {}).map(x => parseJson<CtrendWeek>(x)),
+        ctOpen == null ? null : parseJson<CtrendOpen>(ctOpen),
+        Date.now(),
+      ),
     });
   } catch (e) {
     return NextResponse.json({ ok: false, reason: `讀取 Redis 失敗：${String(e).slice(0, 120)}` }, { status: 500 });

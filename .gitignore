@@ -49,3 +49,9 @@ npm-debug.log*
 reference/
 # S3／S1 月報匯出（npm run s3s1-report），含實際損益，交回研究端用、不進版控。
 /reports/
+
+# CTREND 前向週帳本（research/ctrend）
+research/ctrend/out/
+research/ctrend/.venv/
+__pycache__/
+.pytest_cache/
