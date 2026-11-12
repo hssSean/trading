@@ -296,11 +296,23 @@ export async function fetchTopCoinsByVolume(limit = 10): Promise<string[]> {
 }
 
 /** 全部 USDT 本位永續（TRADING）與下單限制（S3／S1 帳戶模擬算數量用） */
+/**
+ * 這個合約算不算「加密貨幣永續」（S3／S1／BR 的幣池與市場廣度只收這種）。
+ * 2026 年幣安上了兩百多個股票／商品／外匯合約：目前它們的 contractType 是 TRADIFI_PERPETUAL，
+ * 所以原本只看 contractType 就擋得住——但那是剛好，不是有意為之。這裡明確再看 underlyingType：
+ * 只收 COIN 與 PREMARKET（盤前的加密貨幣）；INDEX（BTCDOM、ALL 綜合指數…）、EQUITY、COMMODITY、FX 都不算。
+ * 沒有 underlyingType 欄位（testnet 或舊格式）時不擋。研究端 s3_xcheck.perp_symbols 是同一個條件，要一起改。
+ */
+export function isCryptoPerp(s: { status?: string; contractType: string; quoteAsset: string; underlyingType?: string }): boolean {
+  if (s.contractType !== 'PERPETUAL' || s.quoteAsset !== 'USDT') return false;
+  return s.underlyingType == null || s.underlyingType === 'COIN' || s.underlyingType === 'PREMARKET';
+}
+
 export async function fetchPerpFilters(): Promise<Map<string, { stepSize: number; minQty: number; minNotional: number }>> {
   const res = await client.get('/exchangeInfo');
   const out = new Map<string, { stepSize: number; minQty: number; minNotional: number }>();
-  for (const s of res.data.symbols as { symbol: string; status: string; contractType: string; quoteAsset: string; filters: { filterType: string; stepSize?: string; minQty?: string; notional?: string }[] }[]) {
-    if (s.status !== 'TRADING' || s.contractType !== 'PERPETUAL' || s.quoteAsset !== 'USDT') continue;
+  for (const s of res.data.symbols as { symbol: string; status: string; contractType: string; quoteAsset: string; underlyingType?: string; filters: { filterType: string; stepSize?: string; minQty?: string; notional?: string }[] }[]) {
+    if (s.status !== 'TRADING' || !isCryptoPerp(s)) continue;
     const lot = s.filters.find(f => f.filterType === 'LOT_SIZE');
     const mn = s.filters.find(f => f.filterType === 'MIN_NOTIONAL');
     out.set(s.symbol, { stepSize: +(lot?.stepSize ?? 0), minQty: +(lot?.minQty ?? 0), minNotional: +(mn?.notional ?? 0) });

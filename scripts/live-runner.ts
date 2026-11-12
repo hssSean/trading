@@ -15,6 +15,8 @@
  *   TRADING_USER_ID：Supabase profiles.id（心跳與推播對象）
  *   NEXT_PUBLIC_VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY（Web Push；必須跟 Vercel 同一組）
  *   S3A_DRY_RUN=1（選用）：S3 只印出會做的動作、不下單
+ *   S3_MAX_DAILY_LOSS_USDT（選用，主網必設）：近 24 小時帳戶淨損益 ≤ −這個數就不開新倉
+ *   S3_MAX_NOTIONAL_USDT（選用，主網必設）：單一部位名目超過這個數就不做
  *
  * ── 每 15 秒一輪做的事 ──────────────────────────────────────────────────
  * 1. 心跳：雙寫 Redis＋Supabase。Vercel 的 /api/analyze 用它判斷這支停了沒，停超過 10 分鐘推播告警。
@@ -45,9 +47,15 @@ import { fetchClosedBars, fetchFundingHistory } from '../src/api/binance';
 
 const isLive = process.argv.includes('--live');
 if (isLive) {
+  // 開放前的必要條件（docs/TODO.md）：S3_MAX_DAILY_LOSS_USDT 與 S3_MAX_NOTIONAL_USDT 必設（開放時在這裡檢查，沒設就 exit）、
+  // API 金鑰關閉提幣並綁 IP、webhook secret 換掉。
   console.error('❌ --live 尚未開放：目前只支援 testnet。');
   process.exit(1);
 }
+
+/** 絕對金額的硬閘（見 s3aLive.ts S3aCtx.limits）。沒設或不是正數 = 不檢查 */
+const posNum = (v: string | undefined) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : undefined; };
+const S3_LIMITS = { maxDailyLossUsdt: posNum(process.env.S3_MAX_DAILY_LOSS_USDT), maxNotionalUsdt: posNum(process.env.S3_MAX_NOTIONAL_USDT) };
 
 const CYCLE_MS = 15_000;
 // 2026-08-23：TTL 240 秒、60 秒寫一次（原本每 15 秒寫、TTL 90 秒，一天吃掉 11,520 次 Redis 指令，
@@ -208,6 +216,7 @@ async function runS3aCycle(binance: BinanceFuturesClient, redis: Redis, userId: 
     dryRun: process.env.S3A_DRY_RUN === '1',
     killSwitch: false,
     now: Date.now(),
+    limits: S3_LIMITS,
   });
 }
 
@@ -249,6 +258,7 @@ async function main() {
   const userId = process.env.TRADING_USER_ID;
 
   console.log(`[${nowStr()}] live-runner 啟動（testnet，${CYCLE_MS / 1000}秒/輪，會真的下單）`);
+  console.log(`[${nowStr()}] 絕對金額上限：單日虧損 ${S3_LIMITS.maxDailyLossUsdt ?? '未設定'}、單筆名目 ${S3_LIMITS.maxNotionalUsdt ?? '未設定'}（USDT；testnet 可不設，主網必設）`);
   // 啟動檢查（2026-11-11）：帳戶設定由程式驗證，不依賴「帳戶剛好是對的」。
   // 雙向持倉模式下 S3 的單（沒帶 positionSide、止損 reduceOnly）全部會被拒——不 exit：
   // 既有部位的交易所止損仍在，心跳照寫，只是大聲講＋推播。

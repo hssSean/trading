@@ -305,6 +305,22 @@ export interface S3aCtx {
   now: number;
   /** 進場後重查持倉的間隔（測試用 0）；預設 1000ms */
   entryConfirmWaitMs?: number;
+  /**
+   * 絕對金額的硬閘（2026-11-12；轉主網前必設，見 docs/TODO.md）。R 與百分比上限的分母（止損距離、權益）都會浮動，
+   * 止損距離趨近 0 時名目會爆炸而那些上限不會有反應——這兩道用 USDT 直接擋。沒設 = 不檢查。
+   */
+  limits?: {
+    /** 近 24 小時帳戶淨損益（已實現＋手續費＋資金費）≤ −這個數 → 今天不開新倉 */
+    maxDailyLossUsdt?: number;
+    /** 單一部位名目（A＋B 合計數量 × 現價）超過這個數 → 這筆不做 */
+    maxNotionalUsdt?: number;
+  };
+}
+
+const LOSS_INCOME_TYPES = new Set(['REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE']);
+/** 帳戶資金流水裡算進「損益」的三種（劃轉、獎勵等不算） */
+export function netIncome(inc: Array<{ incomeType: string; income: string }>): number {
+  return inc.reduce((a, x) => (LOSS_INCOME_TYPES.has(x.incomeType) ? a + +x.income : a), 0);
 }
 
 /** 幣安錯誤代碼（axios 錯誤的 response.data.code） */
@@ -538,6 +554,19 @@ export async function runS3aLive(ctx: S3aCtx): Promise<void> {
     if (!(lm.B.base > 0)) { kv['b.baseEquity'] = String(half); lm.B = { ...lm.B, base: half, equity: half + lm.B.realized }; }
     if (!ctx.dryRun) await store.hset('s3a-live:meta', kv);
   }
+  // 單日虧損上限（絕對金額）。讀不到流水就不寫 lastDay、下一輪再試——不能在看不到虧損的情況下開倉
+  const maxLoss = ctx.limits?.maxDailyLossUsdt;
+  if (maxLoss != null && maxLoss > 0 && snap.s3.length) {
+    let net: number;
+    try { net = netIncome(await client.getIncome({ startTime: now - DAY, limit: 1000 })); }
+    catch (e) { ctx.log(`   S3：讀不到帳戶流水，無法檢查單日虧損上限，下一輪再試：${String(e).slice(0, 100)}`); return; }
+    if (net <= -maxLoss) {
+      const why = `單日虧損上限（近 24 小時 ${net.toFixed(2)} ≤ −${maxLoss} USDT）`;
+      ctx.log(`   S3：${why}，今天不開新倉`);
+      await ctx.notify('S3 ⛔ 單日虧損上限', `近 24 小時淨損益 ${net.toFixed(2)} USDT，今天不開新倉`);
+      return skipAll(why);
+    }
+  }
   ctx.log(`   S3：今天候選 ${snap.s3.length} 個（BTC 條件成立、廣度 ${(snap.breadth * 100).toFixed(0)}%）`);
   const openOrders = await client.getOpenOrders();
   const legCount = (k: Leg) => Array.from(posMap.values()).filter(p => legsOf(p)[k]).length;
@@ -578,6 +607,12 @@ export async function runS3aLive(ctx: S3aCtx): Promise<void> {
       }
       if (!legs.A && !legs.B) { log(`${tag}：A：${sig.legs.A}；B：${sig.legs.B}`); continue; }
       const total = +((legs.A?.qty0 ?? 0) + (legs.B?.qty0 ?? 0)).toFixed(decimals(flt.stepSize));
+      const maxNotional = ctx.limits?.maxNotionalUsdt;
+      if (maxNotional != null && maxNotional > 0 && total * px > maxNotional) {
+        sig.legs = {};
+        log(`${tag}：名目 ${(total * px).toFixed(0)} USDT 超過單筆上限 ${maxNotional}（止損距離 ${(dist * 100).toFixed(2)}%），不做`);
+        continue;
+      }
       const lev = leverageFor(px, c.stop);
       if (!ctx.dryRun) {
         // 只吞 -4046（已經是逐倉）。其他錯誤（例如有掛單時不能改）照丟：用全倉進場，槓桿／強平的設計就不成立了（2026-11-11）

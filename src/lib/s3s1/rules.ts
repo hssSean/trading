@@ -28,6 +28,7 @@ export const S3_TH = { risk: 0.12984220878051442, btc: 2.1041656428039044, ret7:
 // 文件 §2.2 排除清單（baseAsset）
 const EXCLUDED_BASES = new Set([
   'USDC', 'BUSD', 'TUSD', 'USDP', 'FDUSD', 'USDE', 'BTCDOM', 'DEFI', 'BLUEBIRD', 'FOOTBALL',
+  'ALL', // 幣安綜合指數（2026-11-12 補；指數類現在主要靠 src/api/binance.ts 的 isCryptoPerp 用 underlyingType 擋）
   'XAU', 'XAG', 'PAXG', 'XAUT', 'XPD', 'XPT',
   'AAPL', 'AMZN', 'AVGO', 'BABA', 'COIN', 'CRCL', 'EWJ', 'EWY', 'GOOGL', 'HOOD', 'INTC', 'META', 'MSFT', 'MSTR',
   'MU', 'NVDA', 'PLTR', 'QQQ', 'SPY', 'TSLA', 'TSM', 'SNDK', 'CL', 'BZ', 'NATGAS', 'COPPER',

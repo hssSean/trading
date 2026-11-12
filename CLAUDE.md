@@ -37,10 +37,13 @@
 - **每日前向對帳**（2026-10-12）：研究端 `C:\trading_stratage\s3_xcheck.py` 用研究端自己的函數重算最近 7 天的 S3（廣度、BTC 條件、D 與 X 兩天的幣池前 100、突破候選、分數、資金費）與 S1 候選（12H Keltner 突破、止損），跟 `s3s1:prep:<X>`／`s3s1:signals` 比對，結果寫 Redis `s3s1:xcheck`。使用者電腦的工作排程器「S3 每日對帳」每天 09:30 跑（錯過會在開機後補）。route.ts 每天約 UTC 02:00 讀結果，有不一致或超過 3 天沒跑就推播（`src/lib/s3s1/xcheckAlert.ts`）。改 `rules.ts` 後若這支開始報不一致，先確認研究端是否同步改了。
 - **2026-10-12 S1 空幣池事故**：prep 在 UTC 00:05 只有已收盤日線，`universeOn(raw, X)` 卻要求 X 那根存在 → 快照 `uni[X]` 永遠空的，S1 上線 5 天 10 個決策點 0 候選、完全無聲。驗收測試用完整歷史資料所以抓不到。已修（`6c5106b`），快照重建、S1 從追蹤起點重播（`scripts/s1-replay-2026-10-12.ts`，舊快照備份在 `reports/`）。**教訓：「線上當下」與「歷史回放」的資料可得性不同，驗收全過不代表線上對；每日對帳要比線上實際讀的那一份。**
 - 轉實盤（主網）條件已預先登記：`C:\trading_stratage\docs\轉實盤條件_預先登記.md`（主網 500 USDT、只跑 S3-A；監控基準 +0.70R/筆，是套 20% 總風險上限後的數字，不是全部訊號的 +0.96R）。
-- **BR 空頭反彈做空帳本**（2026-11-12，第四個模擬帳本 `s3s1:br:*`，工作 `br` 排在 S1 之後、同樣每 12H）：研究端 `bear_rally.py`「12H 前 50、BTC D−1 收盤 ≤ EMA50」那組（試驗登記表 2026-10-27，8 組裡唯一弱通過）。規則：12H 收盤 EMA20 < EMA50、收盤 < EMA200、RSI3 > 80 的第一根 → 下一根開盤做空，止損 收盤＋2×ATR14，12H 收盤 < EMA20 出場；資金費 > −0.05%；每筆 1%、上限 20 筆。規則在 `rules.ts`（`brSignalAt`／`simulateShort`），驗收 `docs/br-reference-trades.csv` 25 筆（`npm run s3s1-acceptance`）。**只記帳、不下單、沒有停用條件**：回測每筆只有 +0.02～+0.06R（勝率 72%），每邊多 0.05% 滑價就剩 +0.01R；2021／2023／2024 年是負的。起點 2026-10-30（回補 13 天，假說定案後的資料）。**少於 100 筆前不要下結論，也不要因為前幾筆好看就接真倉**。研究端的每日對帳還沒涵蓋它。
+- **BR 空頭反彈做空帳本**（2026-11-12，第四個模擬帳本 `s3s1:br:*`，工作 `br` 排在 S1 之後、同樣每 12H）：研究端 `bear_rally.py`「12H 前 50、BTC D−1 收盤 ≤ EMA50」那組（試驗登記表 2026-10-27，8 組裡唯一弱通過）。規則：12H 收盤 EMA20 < EMA50、收盤 < EMA200、RSI3 > 80 的第一根 → 下一根開盤做空，止損 收盤＋2×ATR14，12H 收盤 < EMA20 出場；資金費 > −0.05%；每筆 1%、上限 20 筆。規則在 `rules.ts`（`brSignalAt`／`simulateShort`），驗收 `docs/br-reference-trades.csv` 25 筆（`npm run s3s1-acceptance`）。**只記帳、不下單、沒有停用條件**：回測每筆只有 +0.02～+0.06R（勝率 72%），每邊多 0.05% 滑價就剩 +0.01R；2021／2023／2024 年是負的。起點 2026-10-30（回補 13 天，假說定案後的資料）。**少於 100 筆前不要下結論，也不要因為前幾筆好看就接真倉**。研究端的每日對帳 2026-11-12 起也比 BR 的訊號與止損。
 - **2026-11-12 查過「五週 0 筆」**：不是故障。BTC 在日線 EMA50 下 1～2.3 ATR、廣度 8～15%，只做多的 S3 設計上就不開倉。同日試了 S3 分數 2 擴大幣池（前 30／50／100）：沒通過（新增交易訊號日 t < 1.5、2025–26 為負，每月只多 0.2～0.6 筆），不要再試。
 - **2026-11-12 研究端一輪盤點**（細節在 `C:\trading_stratage\docs\試驗登記表.md`）：資金費套利（紙上過、但獲利來自沒有現貨可對沖的小幣，大幣近兩年年化 0～1%）、BTC 對沖突破、BR 加分數——都不採用。ICT／SMC／SNR 早已測過 1,800 多組（5 分鐘線，兩期皆正 1 組且等於 0；SNR 故事線修正前視錯誤後只剩 +0.01～+0.07R），**不要再重試**。研究端資料可用 `data_update.py` 延伸到 `data/ext/`（原凍結資料不動），`fresh_oos.py` 看新資料的樣本外結果：2026-09～10 S3 分數 2 有 11 筆、平均 −0.32R（9/22 一天 5 筆全止損）；S1 144 筆 +0.06R——樣本小，但記著。
 - **消息面檢驗**（`event_study.py`）：6 個檢定只有「S3 × FOMC 事件窗」過線（事件內 −0.13／−0.20R vs 其餘 +0.50／+0.34R，但只有 30 筆、t=−2.15）；BTC 衝擊日（市場反應型斷路器）對 S3／S1／BR 都沒用。所以**只標記不擋單**：`rules.ts` 的 `FOMC_DAYS`／`nearFomc`，帳本 S3 訊號記 `ind.fomc`，首頁「今天」卡片會提示。**`FOMC_DAYS` 的 2027 日期是暫定日程，2027 年初要核對更新**。CPI／非農沒測（手上沒有可靠的歷史日曆）。
+- **幣池只收加密貨幣合約**（2026-11-12）：幣安 2026 年上了 237 個股票／商品／外匯合約（`contractType = TRADIFI_PERPETUAL`）與數個指數合約。`src/api/binance.ts` `isCryptoPerp`：`PERPETUAL`＋USDT 計價＋`underlyingType` 是 `COIN`／`PREMARKET` 才算；研究端 `s3_xcheck.perp_symbols` 是同一個條件，**要改兩邊一起改**，否則廣度分母不同、對帳會報不一致。研究端延伸資料集用 `data/ext/skip_extra.json`（`data_update.py` 從 exchangeInfo 產生）。
+- **絕對金額的硬閘**（2026-11-12，`s3aLive.ts` `S3aCtx.limits`）：live-runner 的環境變數 `S3_MAX_DAILY_LOSS_USDT`（近 24 小時帳戶淨損益 ≤ −這個數就不開新倉；讀不到流水就不開、下一輪再試）、`S3_MAX_NOTIONAL_USDT`（單一部位名目超過就不做）。testnet 沒設 = 不檢查；**主網必設**。
+- **緊急全平**：`ENV_FILE=env.txt npm run flatten`（預覽）→ `-- --yes`（啟動 kill switch → 市價平掉整個帳戶的部位 → 撤所有掛單與條件單）→ 確認後 `-- --resume` 解除 kill switch。範圍是整個帳戶（含手動單）。順序刻意是先平倉再撤單（理由在 `src/engine/flatten.ts`）。還沒在有持倉時演練過。
 - 首頁「今天」卡片有一行白話的市場狀態（`view.ts` `regimeNote`）：BTC 在 EMA50 之下時直接寫「空頭期不開新倉，這是設計不是故障」。
 - **分數影子追蹤**（2026-10-12，`src/lib/s3s1/shadow.ts`）：S3 帳本工作每天把「通過所有濾網、算到分數」的候選（2 分的也收，當對照組）記進 Redis `s3s1:s3x`，用同一套 S3 規則（不加碼、不受持倉上限）模擬到出場。這是驗證分數門檻唯一的方法；`npm run status` 印「2 分 vs 被擋」的平均 R。每月約 2～4 筆，**少於 30 筆前不要拿它下結論**。
 - 停用條件（文件 §8）程式會自己判、自己停開新倉（真倉 A、B 各自判）：S3-A 回撤 > 35% 或連虧 7；S3-B > 40% 或連虧 15；S1 > 60% 或近 50 筆勝率 < 45%。
@@ -74,7 +77,8 @@ npm run live-runner  # 真倉常駐腳本（testnet，會真的下單）——�
 npm run s3s1-acceptance   # 改 rules.ts 前後必跑：S3 35 筆、S1 15 筆、廣度 50 天，誤差 1e-6
 ENV_FILE=env.txt npm run s3a-dryrun [-- --at-open | --day=YYYY-MM-DD]   # S3 真倉試跑（讀線上狀態、不下單、不寫 Redis）
 ENV_FILE=env.txt npm run s3s1-report [-- YYYY-MM]   # 月報（文件 §7），寫到 reports/
-npm run s3s1-run     # 手動補跑帳本工作（prep → s3 → s1）
+npm run s3s1-run     # 手動補跑帳本工作（prep → s3 → s1 → br）
+ENV_FILE=env.txt npm run flatten [-- --yes | --resume]   # 緊急全平（不加參數只預覽）
 ```
 
 ### 診斷
@@ -115,7 +119,7 @@ Supabase 心跳與交易所部位。舊策略只在還有未平倉時展開（`-
 | `src/engine/binanceClient.ts`、`precision.ts` | 幣安 API 與數量／價格取整 |
 | `docs/strategy-deploy-2026-10-06.md` | 研究端交付的 S3／S1 部署規格 |
 | `docs/LEGACY-v2.1-教訓.md` | 舊策略測過、沒用的東西與量測陷阱 |
-| `docs/TODO.md` | 待辦與優先級。已完成的搬到 `docs/TODO-archive.md` |
+| `docs/TODO.md` | 待辦與優先級（2026-11-12 重寫，只留 S3／S1／BR）。舊策略時期的在 `docs/TODO-legacy-v2.1.md`、`docs/TODO-archive.md` |
 
 ## 專案慣例
 

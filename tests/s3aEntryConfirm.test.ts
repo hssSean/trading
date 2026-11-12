@@ -2,7 +2,7 @@
 // 以前：丟錯 → 「下單失敗」→ 交易所上留下沒有止損、S3 也不認得的部位。
 // 現在：重查持倉，查到就接手（存進 s3a-live:pos、掛止損）。
 import { describe, it, expect } from 'vitest';
-import { runS3aLive, type S3aClient, type S3aStore } from '../src/engine/s3aLive';
+import { runS3aLive, netIncome, type S3aClient, type S3aStore, type S3aCtx } from '../src/engine/s3aLive';
 
 const DAY = 86_400_000;
 const X = 2000 * DAY;
@@ -22,7 +22,8 @@ function memStore(init: Record<string, unknown>): S3aStore & { h: Record<string,
   };
 }
 
-function client(opts: { marketThrows: boolean; filled: boolean }) {
+interface Opts { marketThrows: boolean; filled: boolean; income?: Array<{ incomeType: string; income: string; time: number }> | 'throw'; limits?: S3aCtx['limits'] }
+function client(opts: Opts) {
   const placed: { type: string; side: string; quantity?: number }[] = [];
   let bought = false;
   const c: S3aClient = {
@@ -35,7 +36,7 @@ function client(opts: { marketThrows: boolean; filled: boolean }) {
     async getOpenOrders() { return []; },
     async getOpenAlgoOrders() { return []; },
     async getUserTrades() { return []; },
-    async getIncome() { return []; },
+    async getIncome() { if (opts.income === 'throw') throw new Error('timeout'); return opts.income ?? []; },
     async setLeverage() { return {}; },
     async setMarginType() { return {}; },
     async placeOrder(p) {
@@ -56,7 +57,7 @@ const snap = {
   s3: [{ symbol: 'AUSDT', close: 10, hh20: 9.9, atr14: 0.5, stop: 9.5, ret7: 0, vol: 1e9 }],
 };
 
-async function run(opts: { marketThrows: boolean; filled: boolean }) {
+async function run(opts: Opts) {
   const store = memStore({ [`s3s1:prep:${X}`]: JSON.stringify(snap) });
   const { c, placed } = client(opts);
   const notes: string[] = [];
@@ -67,7 +68,7 @@ async function run(opts: { marketThrows: boolean; filled: boolean }) {
     ensurePrep: async () => undefined,
     notify: async (t) => { notes.push(t); },
     log: () => undefined,
-    dryRun: false, killSwitch: false, now: X + 60_000, entryConfirmWaitMs: 0,
+    dryRun: false, killSwitch: false, now: X + 60_000, entryConfirmWaitMs: 0, limits: opts.limits,
   });
   return { store, placed, notes };
 }
@@ -88,5 +89,38 @@ describe('S3 進場確認', () => {
   it('正常成交 → 照舊', async () => {
     const { store } = await run({ marketThrows: false, filled: true });
     expect(JSON.parse(store.h['s3a-live:pos'].AUSDT).qty0).toBe(20);
+  });
+});
+
+describe('S3 絕對金額的硬閘（2026-11-12）', () => {
+  const ok = { marketThrows: false, filled: true };
+  const inc = (type: string, v: number) => ({ incomeType: type, income: String(v), time: X });
+  it('netIncome 只算已實現損益、手續費、資金費', () => {
+    expect(netIncome([inc('REALIZED_PNL', -80), inc('COMMISSION', -5), inc('FUNDING_FEE', 2), inc('TRANSFER', 1000)])).toBeCloseTo(-83, 9);
+  });
+  it('近 24 小時虧損達上限 → 不開新倉、記 lastDay、推播', async () => {
+    const { store, placed, notes } = await run({ ...ok, income: [inc('REALIZED_PNL', -120), inc('COMMISSION', -3)], limits: { maxDailyLossUsdt: 100 } });
+    expect(placed).toEqual([]);
+    expect(store.h['s3a-live:pos']?.AUSDT).toBeUndefined();
+    expect(store.h['s3a-live:meta'].lastDay).toBe(String(X));
+    expect(notes.some(n => n.includes('單日虧損上限'))).toBe(true);
+  });
+  it('沒到上限 → 照常進場；沒設上限 → 不查流水', async () => {
+    const a = await run({ ...ok, income: [inc('REALIZED_PNL', -50)], limits: { maxDailyLossUsdt: 100 } });
+    expect(JSON.parse(a.store.h['s3a-live:pos'].AUSDT).qty0).toBe(20);
+    const b = await run({ ...ok, income: 'throw' });
+    expect(JSON.parse(b.store.h['s3a-live:pos'].AUSDT).qty0).toBe(20);
+  });
+  it('讀不到流水 → 不開倉，也不記 lastDay（下一輪再試）', async () => {
+    const { store, placed } = await run({ ...ok, income: 'throw', limits: { maxDailyLossUsdt: 100 } });
+    expect(placed).toEqual([]);
+    expect(store.h['s3a-live:meta']?.lastDay).toBeUndefined();
+  });
+  it('單筆名目超過上限 → 這筆不做', async () => {
+    // 權益各 500：A 4% ÷ 0.5 = 40 顆、B 3% ÷ 0.5 = 30 顆，合計 70 顆 × 10 = 700 USDT
+    const over = await run({ ...ok, limits: { maxNotionalUsdt: 600 } });
+    expect(over.placed).toEqual([]);
+    const under = await run({ ...ok, limits: { maxNotionalUsdt: 800 } });
+    expect(under.placed.some(p => p.type === 'MARKET' && p.quantity === 70)).toBe(true);
   });
 });
