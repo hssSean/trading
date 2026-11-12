@@ -7,7 +7,7 @@
 // 驗收：scripts/s3s1-acceptance.ts 對文件第 10 節的參考交易逐筆比對。
 //
 // 全部只用已收盤 K 線；時間一律 UTC 毫秒；K 棒時間 t = 開盤時間。
-import { emaSpan, wilderAtr } from './ind';
+import { emaSpan, wilderAtr, wilderRsi } from './ind';
 
 export interface Bar { t: number; o: number; h: number; l: number; c: number; qv?: number }
 export interface FundingPoint { t: number; rate: number }
@@ -334,4 +334,76 @@ function addonR(hourly: Bar[], h0: number, exitT: number, entry: number, risk: n
   let fr = 0;
   for (const x of fund) if (x.t > hourly[j].t && x.t < tEx + H) fr += x.rate;
   return (ex - px) / arisk - COST * (px + ex) / arisk - fr * px / arisk;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// BR：空頭反彈做空（12H；研究端 bear_rally.py「12H 前50 BTC<EMA50」，試驗登記表 2026-10-27 弱通過）
+// 只做模擬帳本前向驗證，不下單。參考實作：strategies.pullback(side=-1)、engine.simulate／_walk。
+// ════════════════════════════════════════════════════════════════════
+/** 資金費下限：> −0.05% 才做空（空方不擁擠） */
+export const BR_FUNDING_MIN = -0.0005;
+export interface BRFeat { bars: Bar[]; ema20: number[]; ema50: number[]; ema200: number[]; atr14: number[]; rsi3: number[] }
+export function brFeatures(bars: Bar[]): BRFeat {
+  const c = bars.map(b => b.c);
+  return { bars, ema20: emaSpan(c, 20), ema50: emaSpan(c, 50), ema200: emaSpan(c, 200),
+    atr14: wilderAtr(bars.map(b => b.h), bars.map(b => b.l), c, 14), rsi3: wilderRsi(c, 3) };
+}
+
+export interface BRSignal { symbol: string; barT: number; close: number; ema20: number; ema50: number; ema200: number; rsi3: number; atr14: number; stop: number }
+
+/**
+ * 12H 收盤：EMA20 < EMA50、收盤 < EMA200、RSI3 > 80，且前一根不符合（只取連續符合的第一根）；
+ * 至少第 206 根（trend_n + 5）。止損 = 收盤 + 2×ATR14。
+ */
+export function brSignalAt(symbol: string, f: BRFeat, barT: number): BRSignal | null {
+  const i = idxOf(f.bars, barT);
+  if (i < 205) return null;
+  const raw = (k: number) => f.ema20[k] < f.ema50[k] && f.bars[k].c < f.ema200[k] && f.rsi3[k] > 80;
+  if (!raw(i) || raw(i - 1)) return null;
+  const c = f.bars[i].c;
+  return { symbol, barT, close: c, ema20: f.ema20[i], ema50: f.ema50[i], ema200: f.ema200[i], rsi3: f.rsi3[i], atr14: f.atr14[i], stop: c + 2 * f.atr14[i] };
+}
+
+/**
+ * 做空單筆模擬：下一根 12H 開盤市價做空；1H 最高 ≥ 止損 → 以 max(開盤, 止損) 出場；
+ * 12H 收盤 < EMA20（含進場那根）→ 下一根 12H 開盤出場。沒有分批、沒有移動止損。
+ * 成本每邊 0.07%；空方收取正的資金費（engine：fund × side）。
+ */
+export function simulateShort(opts: {
+  entryT: number; stop: number; hourly: Bar[]; h12: BRFeat; fund: FundingPoint[]; dataEnd?: number; forceCloseAtEnd?: boolean;
+}): TradeSim | null {
+  const { entryT, stop, hourly, fund } = opts;
+  const h0 = idxOf(hourly, entryT);
+  if (h0 < 0) return null;
+  const entry = hourly[h0].o;
+  const risk = stop - entry;
+  if (!Number.isFinite(risk) || risk <= entry * MIN_RISK_FRAC) return null;
+  const end = opts.dataEnd ?? Infinity;
+  const f = opts.h12;
+  let sigExitT = Infinity;
+  const e = idxOf(f.bars, entryT);
+  if (e >= 0) for (let j = e; j < f.bars.length; j++) if (f.bars[j].c < f.ema20[j]) { sigExitT = f.bars[j].t + H12; break; }
+
+  const open: TradeSim = { entry, risk, partial: false, partialT: null, exitT: NaN, exitPx: NaN, exitReason: 'open', grossR: NaN, netR: NaN, addR: null };
+  let exitPx = 0, exitT = NaN, reason: TradeSim['exitReason'] = 'open', lastJ = h0;
+  for (let j = h0; j < hourly.length && hourly[j].t < end; j++) {
+    const b = hourly[j];
+    if (b.t >= sigExitT) break;
+    lastJ = j;
+    if (b.h >= stop) { exitPx = Math.max(b.o, stop); exitT = b.t; reason = 'stop'; break; }
+  }
+  if (reason === 'open') {
+    if (sigExitT !== Infinity && sigExitT < end) {
+      const xb = idxOf(hourly, sigExitT);
+      if (xb < 0) return open;
+      exitPx = hourly[xb].o; exitT = sigExitT - H; reason = 'ema';
+    } else if (opts.forceCloseAtEnd) {
+      exitPx = hourly[lastJ].c; exitT = hourly[lastJ].t;
+    } else return open;
+  }
+  const grossR = (entry - exitPx) / risk;
+  let fr = 0;
+  for (const x of fund) if (x.t > entryT && x.t < exitT + H) fr += x.rate;
+  const netR = grossR - (2 * COST * entry - fr * entry) / risk;
+  return { entry, risk, partial: false, partialT: null, exitT, exitPx, exitReason: reason, grossR, netR, addR: null };
 }

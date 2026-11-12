@@ -15,6 +15,7 @@ import { fetchBars, fetchFunding, getJson, type QvBar } from './lib/binanceData'
 import {
   DAY, H, H12, dailyFeatures, h12Features, s3SignalAt, s1SignalAt, s3Score, btcExt, fundingAt, idxOf,
   breadthAt, simulateTrade, isExcludedSymbol, trimPartialFirstBar, BREADTH_MAX, type DailyFeat,
+  brFeatures, brSignalAt, simulateShort,
 } from '../src/lib/s3s1/rules';
 
 const END = Date.UTC(2026, 8, 1);          // 參考資料到 2026-08-31 23:00 為止
@@ -137,6 +138,23 @@ async function main(): Promise<void> {
       msg += ` 廣度 ${b.toFixed(4)}（參考 ${(+r['市場廣度']).toFixed(4)}）${same ? '' : ' ❌判斷不同'}`;
     }
     console.log(`  ${msg.includes('❌') ? '❌' : '✅'} ${r['訊號K開盤UTC']} ${sym.padEnd(12)} R ${sim.netR.toFixed(3)}${msg}`);
+  }
+
+  // ── BR（空頭反彈做空；docs/br-reference-trades.csv 取自研究端 results/bear_rally.pkl「12H 前50 BTC<EMA50」最後 25 筆）──
+  console.log('\n── BR（空頭反彈做空）');
+  for (const r of csv('docs/br-reference-trades.csv')) {
+    const sym = r['合約'], barT = parseMin(r['訊號K開盤UTC']);
+    const f = brFeatures(await bars12(sym));
+    const sig = brSignalAt(sym, f, barT);
+    if (!sig) { fails++; console.log(`  ❌ ${sym} ${r['訊號K開盤UTC']} 沒有產生訊號`); continue; }
+    const hourly = await fetchBars(sym, '1h', H_FROM, END);
+    const fund = await fetchFunding(sym, H_FROM, END);
+    const sim = simulateShort({ entryT: barT + H12, stop: sig.stop, hourly, h12: f, fund, dataEnd: END, forceCloseAtEnd: true });
+    if (!sim) { fails++; console.log(`  ❌ ${sym} ${r['訊號K開盤UTC']} 無法模擬`); continue; }
+    let msg = check('止損', sig.stop, +r['止損']) + check('進場', sim.entry, +r['進場價']);
+    if (fmtMin(sim.exitT) !== r['出場UTC']) { fails++; msg += ` ❌出場(${fmtMin(sim.exitT)} vs ${r['出場UTC']})`; }
+    msg += check('毛R', sim.grossR, +r['毛R']) + check('R', sim.netR, +r['R']);
+    console.log(`  ${msg.includes('❌') ? '❌' : '✅'} ${r['訊號K開盤UTC']} ${sym.padEnd(14)} R ${sim.netR.toFixed(3)}${msg}`);
   }
   void H;
 

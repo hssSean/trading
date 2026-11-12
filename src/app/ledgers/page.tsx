@@ -1,5 +1,5 @@
 'use client';
-// 帳本：S3-A／S3-B／S1 三個模擬帳本（不下單，起始各 100 USDT），對照文件 §9 回測基準。
+// 帳本：S3-A／S3-B／S1／BR 四個模擬帳本（不下單，起始各 100 USDT），對照回測基準。BR = 空頭反彈做空（2026-11-12 加）。
 // 資料由 /api/analyze 每天記帳（src/lib/s3s1/engine.ts），這頁透過 /api/s3/ledgers 讀取。
 import { useState } from 'react';
 import { useS3Api } from '@/lib/s3s1/useS3Api';
@@ -36,10 +36,10 @@ function LedgerCard({ a }: { a: LedgerAcct }) {
         <div className="mt-1 space-y-1">
           {a.open.length + a.recent.length === 0 && <Empty text="還沒有交易" />}
           {a.open.map(p => (
-            <Row key={p.id} left={`${coin(p.symbol)}・持倉中`} sub={`${fmtT(p.entryT)} 進 ${fmtPx(p.entry)}・止損 ${fmtPx(p.stop)}・風險 ${p.riskUsdt.toFixed(2)}U`} right="持倉" />
+            <Row key={p.id} left={`${coin(p.symbol)}${p.side === -1 ? '（空）' : ''}・持倉中`} sub={`${fmtT(p.entryT)} 進 ${fmtPx(p.entry)}・止損 ${fmtPx(p.stop)}・風險 ${p.riskUsdt.toFixed(2)}U`} right="持倉" />
           ))}
           {a.recent.map(p => (
-            <Row key={p.id} left={`${coin(p.symbol)}・${fmtD(p.entryT)}→${fmtD(p.exitT)}・${EXIT_LABEL[p.exitReason ?? ''] ?? p.exitReason ?? ''}${p.partial ? '（已平 1/3）' : ''}`}
+            <Row key={p.id} left={`${coin(p.symbol)}${p.side === -1 ? '（空）' : ''}・${fmtD(p.entryT)}→${fmtD(p.exitT)}・${EXIT_LABEL[p.exitReason ?? ''] ?? p.exitReason ?? ''}${p.partial ? '（已平 1/3）' : ''}`}
               sub={`進 ${fmtPx(p.entry)} 出 ${fmtPx(p.exitPx)}・${(p.pnlUsdt ?? 0) >= 0 ? '+' : ''}${(p.pnlUsdt ?? 0).toFixed(2)}U${p.addR != null ? `・加碼 ${fmtR(p.addR)}` : ''}`}
               right={fmtR(p.netR)} rc={p.netR} />
           ))}
@@ -72,7 +72,8 @@ export default function LedgersPage() {
           <p className="text-[#3A424E] text-[10px] leading-4 px-1 pt-2">
             R ＝ 以止損距離為 1 單位的報酬，已扣手續費與資金費率。權益只算已平倉的單。S3 每月約 2 筆，至少 6 個月才有比較意義；
             短期內主要是確認「做的跟回測一模一樣」。停用條件：S3-A 回撤 &gt; 35% 或連虧 7 筆；S3-B 回撤 &gt; 40% 或連虧 15 筆；
-            S1 回撤 &gt; 60% 或近 50 筆勝率 &lt; 45%。
+            S1 回撤 &gt; 60% 或近 50 筆勝率 &lt; 45%。BR（空頭反彈做空）是前向驗證用：回測每筆只有 +0.02～+0.06R，
+            滑價稍大就歸零，所以只記帳、不下單，也不設停用條件；至少累積 100 筆再判斷。
           </p>
         )}
       </div>

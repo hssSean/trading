@@ -15,18 +15,22 @@ import {
   dailyFeatures, h12Features, s3SignalAt, s1SignalAt, s3Score, btcOk, btcExt, breadthAt, universeOn,
   fundingAt, idxOf, simulateTrade, trimPartialFirstBar, isExcludedSymbol,
   type Bar, type FundingPoint, type DailyFeat, type TradeSim,
- S3_TH,} from './rules';
+  S3_TH, BR_FUNDING_MIN, brFeatures, brSignalAt, simulateShort,
+} from './rules';
 
 // ════════════════════════════════════════════════════════════════════
 // 設定（文件 §3、§4、§5、§8）
 // ════════════════════════════════════════════════════════════════════
-export type AcctKey = 's3a' | 's3b' | 's1';
+export type AcctKey = 's3a' | 's3b' | 's1' | 'br';
+export type AcctKind = 'S3' | 'S1' | 'BR';
 export const ACCTS: Record<AcctKey, {
-  name: string; kind: 'S3' | 'S1'; f: number; heat: number; cap: number; addon: boolean; initial: number;
+  name: string; kind: AcctKind; f: number; heat: number; cap: number; addon: boolean; initial: number;
 }> = {
   s3a: { name: 'S3-A｜唐奇安趨勢＋分數（主力）', kind: 'S3', f: 0.04, heat: 0.20, cap: 10, addon: false, initial: 100 },
   s3b: { name: 'S3-B｜唐奇安＋1R 加碼（對照組）', kind: 'S3', f: 0.03, heat: 0.20, cap: 10, addon: true, initial: 100 },
   s1:  { name: 'S1｜12H Keltner 短線（實驗性）', kind: 'S1', f: 0.01, heat: 0.20, cap: 20, addon: false, initial: 100 },
+  // 2026-11-12：空頭反彈做空（研究端 bear_rally.py，弱通過）。只做前向驗證，沒有停用條件——要的是完整樣本。
+  br:  { name: 'BR｜空頭反彈做空（前向驗證）', kind: 'BR', f: 0.01, heat: 0.20, cap: 20, addon: false, initial: 100 },
 };
 const ADDON_F = 0.03;
 const MIN_QTY_RISK_MULT = 1.5;
@@ -69,7 +73,9 @@ const ceilStep = (q: number, step: number) => (step > 0 ? fixStep(Math.ceil(q / 
 // 紀錄格式
 // ════════════════════════════════════════════════════════════════════
 export interface Position {
-  id: string; acct: AcctKey; symbol: string; kind: 'S3' | 'S1';
+  id: string; acct: AcctKey; symbol: string; kind: AcctKind;
+  /** −1 = 做空（BR）；沒有 = 做多 */
+  side?: 1 | -1;
   signalT: number; entryT: number; stop: number; entry: number;
   f: number; equityAtEntry: number; qty: number; riskUsdt: number; minQtyUsed: boolean;
   vol: number; score?: number; dist: number; btcExt?: number; ret7?: number; breadth: number; funding: number;
@@ -137,6 +143,8 @@ export interface Candidate {
   btcExtV?: number; ret7?: number;
   /** S1：該幣 D−1 日線收盤 > EMA50（文件 §4）；S3 不適用 */
   coinUp?: boolean;
+  /** −1 = 做空（BR）。btcOk 一律表示「這個策略的 BTC 條件成立」（BR：BTC D−1 收盤 ≤ EMA50） */
+  side?: 1 | -1;
 }
 
 /**
@@ -170,11 +178,12 @@ export async function stepAccount(k: AcctKey, s: AcctState, open: Map<string, Po
       const skip = (reason: string) => { log.reason = reason; };
       if (s.halted) { skip(`帳戶已停用：${s.halted}`); continue; }
       if (!c.btcOk) { skip('BTC 條件不成立'); continue; }
-      if (!(c.breadth < BREADTH_MAX)) { skip(`市場過熱（廣度 ${c.breadth.toFixed(3)}）`); continue; }
+      const sd = c.side ?? 1;
+      if (cfg.kind !== 'BR' && !(c.breadth < BREADTH_MAX)) { skip(`市場過熱（廣度 ${c.breadth.toFixed(3)}）`); continue; }
       const fund = await fundOf(c.symbol);
       const fr = fundingAt(fund, c.entryT);
       log.funding = fr;
-      if (!(fr < FUNDING_MAX)) { skip(`資金費擁擠（${fr}）`); continue; }
+      if (sd === 1 ? !(fr < FUNDING_MAX) : !(fr > BR_FUNDING_MIN)) { skip(`資金費擁擠（${fr}）`); continue; }
       if (c.coinUp === false) { skip('該幣 D−1 日線收盤 ≤ EMA50'); continue; }
       if (Array.from(open.values()).some(p => p.symbol === c.symbol)) { skip('持倉中'); continue; }
       if ((s.lastExit[c.symbol] ?? -Infinity) >= c.signalT) { skip('上一筆在訊號 K 線期間才出場'); continue; }
@@ -182,7 +191,8 @@ export async function stepAccount(k: AcctKey, s: AcctState, open: Map<string, Po
       const hi = idxOf(hourly, c.entryT);
       if (hi < 0) { skip('缺進場那根 1H'); continue; }
       const E = hourly[hi].o;
-      const dist = (E - c.stop) / E;
+      const riskPx = sd * (E - c.stop);
+      const dist = riskPx / E;
       log.entry = E; log.dist = dist;
       if (!(dist > MIN_RISK_FRAC)) { skip('止損距離 ≤ 0.2%'); continue; }
       if (cfg.kind === 'S3') {
@@ -197,16 +207,17 @@ export async function stepAccount(k: AcctKey, s: AcctState, open: Map<string, Po
       // 數量（文件 §2.6）
       const flt = filters.get(c.symbol) ?? { stepSize: 0, minQty: 0, minNotional: 0 };
       const riskBudget = s.equity * cfg.f;
-      let qty = floorStep(riskBudget / (E - c.stop), flt.stepSize);
+      let qty = floorStep(riskBudget / riskPx, flt.stepSize);
       let minQtyUsed = false;
       if (qty < flt.minQty || qty * E < flt.minNotional) {
         const qMin = Math.max(flt.minQty, ceilStep(flt.minNotional / E, flt.stepSize));
-        if (qMin * (E - c.stop) <= MIN_QTY_RISK_MULT * riskBudget) { qty = qMin; minQtyUsed = true; }
-        else { skip(`低於最小下單量（最小量風險 ${(qMin * (E - c.stop)).toFixed(2)} > 1.5×${riskBudget.toFixed(2)} USDT）`); continue; }
+        if (qMin * riskPx <= MIN_QTY_RISK_MULT * riskBudget) { qty = qMin; minQtyUsed = true; }
+        else { skip(`低於最小下單量（最小量風險 ${(qMin * riskPx).toFixed(2)} > 1.5×${riskBudget.toFixed(2)} USDT）`); continue; }
       }
       const p: Position = {
         id: `${c.symbol}:${c.signalT}`, acct: k, symbol: c.symbol, kind: cfg.kind, signalT: c.signalT, entryT: c.entryT,
-        stop: c.stop, entry: E, f: cfg.f, equityAtEntry: s.equity, qty, riskUsdt: qty * (E - c.stop), minQtyUsed,
+        stop: c.stop, entry: E, f: cfg.f, equityAtEntry: s.equity, qty, riskUsdt: qty * riskPx, minQtyUsed,
+        ...(sd === -1 ? { side: -1 as const } : {}),
         vol: c.vol, score: log.score, dist, btcExt: c.btcExtV, ret7: c.ret7, breadth: c.breadth, funding: fr, status: 'open',
       };
       open.set(p.id, p);
@@ -474,9 +485,70 @@ export async function runS1(store: Store, deps: Deps, now: number): Promise<Reco
 }
 
 // ════════════════════════════════════════════════════════════════════
+// br：空頭反彈做空（12H；前 50；BTC D−1 收盤 ≤ EMA50；資金費 > −0.05%）
+// ════════════════════════════════════════════════════════════════════
+/** 第一次執行往回補的 12H 時點數：prep 快照只留 14 天。假說在 2026-10-27 已定案，之後的資料都是樣本外 */
+const BR_BACKFILL = 26;
+export async function runBR(store: Store, deps: Deps, now: number): Promise<Record<string, unknown>> {
+  const meta = (await store.hgetall('s3s1:meta')) ?? {};
+  const latest = Math.floor((now - H) / H12) * H12;
+  let last = Number(meta['br.lastT']);
+  const init = !Number.isFinite(last);
+  if (init) last = latest - (BR_BACKFILL + 1) * H12;
+  const times: number[] = [];
+  for (let t = Math.max(last + H12, latest - BR_BACKFILL * H12); t <= latest; t += H12) times.push(t);
+  if (!times.length) return { times: 0 };
+
+  const snapOf = memo(async (x: string) => { const v = await store.get(`s3s1:prep:${x}`); return v ? parse<PrepSnapshot>(v) : null; });
+  const filters = await deps.exchange();
+  const firstT = times[0];
+  // EMA200 要夠長才收斂：1000 根 12H（約 500 天），起始值的殘差 < 1e-4
+  const brOf = memo(async s => brFeatures(await deps.klines(s, '12h', 1000)));
+  const fundOf = memo(async s => deps.funding(s, firstT - 2 * DAY));
+  const hourlyOf = memo(async s => hourlyFrom(deps, s, firstT, now));
+
+  const decisions: { t: number; cands: Candidate[] }[] = [];
+  let missing = 0;
+  for (const t of times) {
+    const B = t - H12, D = Math.floor(B / DAY) * DAY;
+    const sn = (await snapOf(String(D))) ?? (await snapOf(String(D + DAY)));
+    const btcUp = sn?.btcOk[String(D)];
+    if (!sn || btcUp === undefined) { missing++; decisions.push({ t, cands: [] }); continue; }
+    const uni = (sn.uni[String(D)] ?? []).slice(0, 50);
+    const cands: Candidate[] = [];
+    await inChunks(uni, 8, async u => {
+      try {
+        const f = await brOf(u.symbol);
+        const sig = brSignalAt(u.symbol, f, B);
+        if (!sig) return;
+        cands.push({ symbol: u.symbol, signalT: B, entryT: t, stop: sig.stop, close: sig.close, vol: u.vol, side: -1,
+          breadth: sn.breadth, btcOk: btcUp === false,
+          ind: { ema20: sig.ema20, ema50: sig.ema50, ema200: sig.ema200, rsi3: sig.rsi3, atr14: sig.atr14 } });
+      } catch { /* 單一幣失敗不影響其他 */ }
+    });
+    decisions.push({ t, cands });
+  }
+
+  const { state, open } = await loadAcct(store, 'br');
+  const before = new Set(open.keys());
+  const sims = new Map<string, TradeSim | null>();
+  const simOf = async (p: Position) => {
+    if (!sims.has(p.id)) {
+      sims.set(p.id, simulateShort({ entryT: p.entryT, stop: p.stop, hourly: await hourlyFrom(deps, p.symbol, p.entryT, now),
+        h12: await brOf(p.symbol), fund: await deps.funding(p.symbol, p.entryT - DAY) }));
+    }
+    return sims.get(p.id)!;
+  };
+  const r = await stepAccount('br', state, open, decisions, simOf, filters, fundOf, hourlyOf, now);
+  await saveAcct(store, 'br', state, before, open, r.done, r.logs);
+  await store.hset('s3s1:meta', { 'br.lastT': String(times[times.length - 1]), 'br.lastRunT': String(now), ...(init ? { 'trackStart.br': String(times[0]) } : {}) });
+  return { times: times.length, missingPrep: missing, opened: r.logs.filter(l => l.decision === 'open').length, signals: r.logs.length, closed: r.done.length, equity: state.equity, open: open.size };
+}
+
+// ════════════════════════════════════════════════════════════════════
 // 排程
 // ════════════════════════════════════════════════════════════════════
-export type S3S1Job = 'prep' | 's3' | 's1';
+export type S3S1Job = 'prep' | 's3' | 's1' | 'br';
 /** 依時間與 meta 決定這次掃描該跑哪個工作（一次只跑一個，分散負擔）；都不用跑回 null */
 export function dueS3S1Job(meta: Record<string, unknown>, now: number): S3S1Job | null {
   const X = Math.floor(now / DAY) * DAY;
@@ -484,6 +556,8 @@ export function dueS3S1Job(meta: Record<string, unknown>, now: number): S3S1Job 
   if (since >= 5 * 60_000 && Number(meta['prep.lastDay'] ?? 0) < X) return 'prep';
   if (since >= H + 5 * 60_000 && Number(meta['prep.lastDay'] ?? 0) >= X && Number(meta['s3.lastRunDay'] ?? 0) < X) return 's3';
   const latest = Math.floor((now - H - 5 * 60_000) / H12) * H12;
-  if (Number(meta['prep.lastDay'] ?? 0) >= Math.floor(latest / DAY) * DAY && Number(meta['s1.lastT'] ?? 0) < latest) return 's1';
+  const prepOk = Number(meta['prep.lastDay'] ?? 0) >= Math.floor(latest / DAY) * DAY;
+  if (prepOk && Number(meta['s1.lastT'] ?? 0) < latest) return 's1';
+  if (prepOk && Number(meta['br.lastT'] ?? 0) < latest) return 'br';
   return null;
 }

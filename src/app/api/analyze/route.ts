@@ -9,7 +9,7 @@
 // POST（App 撈待推訊號）與 DELETE（清鎖、確認回撤停機）是舊策略設定頁在用的小功能，原樣保留。
 import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
-import { runPrep, runS3, runS1, dueS3S1Job } from '@/lib/s3s1/engine';
+import { runPrep, runS3, runS1, runBR, dueS3S1Job } from '@/lib/s3s1/engine';
 import { binanceS3S1Deps } from '@/lib/s3s1/deps';
 import { decideXcheckAlert } from '@/lib/s3s1/xcheckAlert';
 import type { TradingSignal } from '@/types';
@@ -154,7 +154,8 @@ async function runS3S1Jobs(profileId: string): Promise<Record<string, unknown>> 
     if (job && await claimPeriodicSlot(`s3s1-job:${job}`, 600)) {
       const res = job === 'prep' ? await runPrep(rj, binanceS3S1Deps, nowJ)
         : job === 's3' ? await runS3(rj, binanceS3S1Deps, nowJ)
-        : await runS1(rj, binanceS3S1Deps, nowJ);
+        : job === 's1' ? await runS1(rj, binanceS3S1Deps, nowJ)
+        : await runBR(rj, binanceS3S1Deps, nowJ);
       out[job] = res;
       console.log(`[s3s1] ${job} ${JSON.stringify(res).slice(0, 300)}`);
     }

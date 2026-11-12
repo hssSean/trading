@@ -98,7 +98,7 @@ async function printS3(
   }
 
   const L = ACCTS;
-  const ledgerLine = (['s3a', 's3b', 's1'] as const).map(k => {
+  const ledgerLine = (['s3a', 's3b', 's1', 'br'] as const).map(k => {
     const st = ledger[`acct.${k}`] ? parse<{ equity: number; trades: number; halted: string | null }>(ledger[`acct.${k}`]) : null;
     return `${L[k].name.split('｜')[0]} ${st ? `${num(st.equity)}（${st.trades} 筆）${st.halted ? '⛔' : ''}` : '—'}`;
   }).join('  ');

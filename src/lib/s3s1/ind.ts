@@ -23,3 +23,20 @@ export function wilderAtr(h: number[], l: number[], c: number[], n: number): num
   }
   return out;
 }
+
+/**
+ * Wilder RSI（strategies.rsi）：dlt[0] = 0；漲、跌各自 ewm(alpha=1/n, adjust=False)；
+ * 跌幅平均為 0 時參考實作得到 NaN 再 fillna(50)——照做（不是 100）。
+ */
+export function wilderRsi(c: number[], n: number): number[] {
+  const out = new Array<number>(c.length);
+  let up = 0, dn = 0;
+  for (let i = 0; i < c.length; i++) {
+    const d = i === 0 ? 0 : c[i] - c[i - 1];
+    const u = Math.max(d, 0), w = Math.max(-d, 0);
+    up = i === 0 ? u : up + (u - up) / n;
+    dn = i === 0 ? w : dn + (w - dn) / n;
+    out[i] = dn === 0 ? 50 : 100 - 100 / (1 + up / dn);
+  }
+  return out;
+}

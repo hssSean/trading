@@ -9,7 +9,7 @@
  */
 import { Redis } from '@upstash/redis';
 import { loadEnvFile, reportEnvLoad } from './loadEnvFile';
-import { runPrep, runS3, runS1, dueS3S1Job, type Store } from '../src/lib/s3s1/engine';
+import { runPrep, runS3, runS1, runBR, dueS3S1Job, type Store } from '../src/lib/s3s1/engine';
 import { binanceS3S1Deps } from '../src/lib/s3s1/deps';
 
 async function main(): Promise<void> {
@@ -22,7 +22,7 @@ async function main(): Promise<void> {
     const job = dueS3S1Job((await store.hgetall('s3s1:meta')) ?? {}, now);
     if (!job) { console.log(i ? '都跑完了。' : '目前沒有該跑的工作（prep 在 UTC 00:05 後、S3 在 01:05 後、S1 在每個 12H 收盤 1 小時 5 分後）。'); return; }
     const t0 = Date.now();
-    const fn = job === 'prep' ? runPrep : job === 's3' ? runS3 : runS1;
+    const fn = job === 'prep' ? runPrep : job === 's3' ? runS3 : job === 's1' ? runS1 : runBR;
     const r = await fn(store, binanceS3S1Deps, now);
     console.log(`── ${job}：${((Date.now() - t0) / 1000).toFixed(1)} 秒 ${JSON.stringify(r)}`);
   }

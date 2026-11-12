@@ -93,7 +93,7 @@ describe('dueS3S1Job', () => {
     expect(dueS3S1Job({}, X + 6 * 60_000)).toBe('prep');
   });
   it('prep 完成、01:05 後跑 s3；s3 做完換 s1', () => {
-    const m: Record<string, unknown> = { 'prep.lastDay': X };
+    const m: Record<string, unknown> = { 'prep.lastDay': X, 'br.lastT': X + H12 };   // br 已記到最新，這裡只看 s3／s1
     expect(dueS3S1Job(m, X + 30 * 60_000)).toBe('s1');   // s3 還沒到時間，但前一個 12H 時點還沒記帳
     m['s1.lastT'] = X - H12;
     expect(dueS3S1Job(m, X + 30 * 60_000)).toBe(null);

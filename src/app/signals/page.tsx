@@ -8,8 +8,8 @@ import type { SignalsResp } from '@/lib/s3s1/apiTypes';
 import { reasonKey } from '@/lib/s3s1/stats';
 import { Card, Empty, ErrorBox, PageHeader, Seg, coin, fmtPx, fmtT } from '@/components/s3/ui';
 
-type Src = 'live' | 's3a' | 's3b' | 's1';
-const SRC_LABEL: Record<Src, string> = { live: '真倉 S3-A＋B', s3a: '帳本 S3-A', s3b: '帳本 S3-B', s1: '帳本 S1' };
+type Src = 'live' | 's3a' | 's3b' | 's1' | 'br';
+const SRC_LABEL: Record<Src, string> = { live: '真倉 S3-A＋B', s3a: '帳本 S3-A', s3b: '帳本 S3-B', s1: '帳本 S1', br: '帳本 BR' };
 
 interface Item {
   src: Src; symbol: string; t: number; decision: 'open' | 'skip'; reason?: string;
@@ -69,7 +69,7 @@ export default function SignalsPage() {
     <div className="min-h-screen bg-[#0A0D11] text-[#E8ECF1]">
       <PageHeader title="訊號" sub={data ? `顯示 ${shown.length} 筆・開倉 ${opens}・擋掉 ${shown.length - opens}` : 'S3／S1 每一個突破訊號，含被擋掉的'} />
       <div className="px-3 py-3 space-y-2 pb-20">
-        <Seg value={src} onChange={setSrc} options={[['all', '全部'], ['live', '真倉'], ['s3a', '帳本 S3-A'], ['s3b', '帳本 S3-B'], ['s1', '帳本 S1']]} />
+        <Seg value={src} onChange={setSrc} options={[['all', '全部'], ['live', '真倉'], ['s3a', '帳本 S3-A'], ['s3b', '帳本 S3-B'], ['s1', '帳本 S1'], ['br', '帳本 BR']]} />
         <Seg value={dec} onChange={setDec} options={[['all', '全部'], ['open', '開倉'], ['skip', '擋掉']]} />
         {loading && !data && <p className="text-[#565E6B] text-xs text-center py-8">載入中…</p>}
         {error && <ErrorBox text={error} />}
