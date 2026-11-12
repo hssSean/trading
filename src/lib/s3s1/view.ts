@@ -1,5 +1,6 @@
 // App 畫面用的 S3 計算（首頁、紀錄頁）。純函數，有單元測試（tests/s3View.test.ts）。
 import { LEGS, legMeta, type Leg } from '../../engine/s3aLive';
+import { S3_TH, BREADTH_MAX } from './rules';
 const DAY = 86_400_000;
 const DECISION_OFFSET_MS = 30_000; // live-runner 在 UTC 00:00:30 之後做每日決策（s3aLive.ts）
 
@@ -77,4 +78,19 @@ export function todaySummary(
     opened: mine.filter(s => s.decision === 'open').map(s => s.symbol),
     blocked: mine.filter(s => s.decision === 'skip').map(s => ({ symbol: s.symbol, reason: s.reason ?? '' })),
   };
+}
+
+/**
+ * 用白話說明「現在的市場狀態下 S3 會不會開倉」（首頁用）。2026-11-12：使用者連續五週沒單以為是故障，
+ * 其實是 BTC 在 EMA50 之下——只做多的策略空頭期本來就不開倉。tone：bad = 不會開、warn = 很難開、ok = 會開。
+ */
+export function regimeNote(btcOk: boolean | null, btcExt: number | null | undefined, breadth: number | null): { tone: 'ok' | 'warn' | 'bad'; text: string } | null {
+  if (btcOk == null) return null;
+  const ext = btcExt != null && Number.isFinite(btcExt) ? `${btcExt >= 0 ? '+' : ''}${btcExt.toFixed(1)} ATR` : null;
+  if (!btcOk) return { tone: 'bad', text: `BTC 在日線 EMA50 之下${ext ? `（${ext}）` : ''}。S3 只做多，空頭期不開新倉——這是設計，不是故障。` };
+  if (breadth != null && !(breadth < BREADTH_MAX)) return { tone: 'bad', text: `市場過熱（廣度 ${(breadth * 100).toFixed(0)}% ≥ 93%），今天不開新倉。` };
+  if (btcExt != null && Number.isFinite(btcExt) && btcExt < S3_TH.btc) {
+    return { tone: 'warn', text: `BTC 站上 EMA50 但還不夠強（${ext}，要 ≥ +${S3_TH.btc.toFixed(1)} ATR 才給分）。有突破也多半拿不到 2 分，進場機會少。` };
+  }
+  return { tone: 'ok', text: `BTC 趨勢強${ext ? `（${ext}）` : ''}。出現突破且止損距離 ≤ ${(S3_TH.risk * 100).toFixed(0)}%、7 日漲幅 < ${(S3_TH.ret7 * 100).toFixed(0)}% 就會進場。` };
 }

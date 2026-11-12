@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { usePrice } from '@/store/usePriceStore';
 import { LEGS, LEG_KEYS, legMeta, legsOf, type LivePos } from '@/engine/s3aLive';
-import { HEARTBEAT_STALE_MS, haltProgress, legUnrealizedR, nextDecisionAt, unrealizedR, type TodaySummary } from '@/lib/s3s1/view';
+import { HEARTBEAT_STALE_MS, haltProgress, legUnrealizedR, nextDecisionAt, regimeNote, unrealizedR, type TodaySummary } from '@/lib/s3s1/view';
+import { nearFomc } from '@/lib/s3s1/rules';
 import { Card, CardTitle, Empty, Meter, Stats, coin, color, fmtCountdown, fmtPct, fmtPx, fmtR, fmtT, fmtU } from './ui';
 
 /** 每秒更新的現在時間（倒數用） */
@@ -28,9 +29,11 @@ export function StatusStrip({ heartbeatAt, meta, now }: { heartbeatAt: number | 
   );
 }
 
-export function TodayCard({ today, now }: { today: TodaySummary; now: number }) {
+export function TodayCard({ today, now, btcExt }: { today: TodaySummary; now: number; btcExt?: number | null }) {
   const next = nextDecisionAt(now);
   const inWindow = now - today.X < 2 * 3_600_000;
+  const note = regimeNote(today.btcOk, btcExt, today.breadth);
+  const fomc = nearFomc(today.X);
   return (
     <Card>
       <CardTitle title="今天" right={<>下次決策 {fmtCountdown(next - now)}（台灣 08:00）</>} />
@@ -43,6 +46,8 @@ export function TodayCard({ today, now }: { today: TodaySummary; now: number }) 
             ['市場廣度', today.breadth == null ? '—' : `${(today.breadth * 100).toFixed(0)}% / 93%`, today.breadth != null && today.breadth < 0.93 ? 1 : -1],
             ['候選', `${today.candidates} 個`],
           ]} />
+          {note && <p className={`mt-2 text-[11px] leading-5 ${note.tone === 'ok' ? 'text-up' : note.tone === 'warn' ? 'text-[#D9A441]' : 'text-[#8A94A2]'}`}>{note.text}</p>}
+          {fomc && <p className="mt-1 text-[10px] leading-4 text-[#D9A441]">這兩天有 FOMC 利率決議：回測中這個時段進場的 S3 單較差（樣本少，只標記、不擋單）。</p>}
           <div className="mt-2.5 space-y-1 text-[11px] leading-5">
             {today.opened.length > 0 && <p className="text-up">開倉：{today.opened.map(coin).join('、')}</p>}
             {today.blocked.map(b => (

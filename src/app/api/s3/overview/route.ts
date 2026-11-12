@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
       ok: true, now,
       meta: meta ?? {},
       positions: Object.values(pos ?? {}).map(v => parseJson<LivePos>(v)).sort((a, b) => b.entryAt - a.entryAt),
-      snapshot: snap ? { X: snap.X, breadth: snap.breadth, btcOk: snap.btcOk, s3: snap.s3.map(c => ({ symbol: c.symbol })) } : null,
+      snapshot: snap ? { X: snap.X, breadth: snap.breadth, btcOk: snap.btcOk, btcExt: snap.btcExt, s3: snap.s3.map(c => ({ symbol: c.symbol })) } : null,
       heartbeatAt: hb ? Number(hb) : null,
       signals: (sig ?? []).map(v => parseJson<LiveSignal>(v)),
     });

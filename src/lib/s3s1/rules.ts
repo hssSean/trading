@@ -407,3 +407,20 @@ export function simulateShort(opts: {
   const netR = grossR - (2 * COST * entry - fr * entry) / risk;
   return { entry, risk, partial: false, partialT: null, exitT, exitPx, exitReason: reason, grossR, netR, addR: null };
 }
+
+// ════════════════════════════════════════════════════════════════════
+// 事件標記（只標記、不擋單）
+// 研究端 event_study.py（試驗登記表 2026-11-12）：S3 在 FOMC 事件窗內進場的單，回測兩期都明顯較差
+// （−0.13／−0.20R vs +0.50／+0.34R），但只有 30 筆、16 個進場日，t=−2.15，6 個檢定裡只有這一個過線——
+// 不足以改規則。所以先在訊號紀錄記 ind.fomc，累積新資料再判斷。
+// ════════════════════════════════════════════════════════════════════
+/** FOMC 利率決議日（UTC 日期；美東下午公布 = UTC 18:00／19:00）。2027 是聯準會的暫定日程，年初要核對 */
+export const FOMC_DAYS: number[] = [
+  '2026-01-28', '2026-03-18', '2026-04-29', '2026-06-17', '2026-07-29', '2026-09-16', '2026-10-28', '2026-12-09',
+  '2027-01-27', '2027-03-17', '2027-04-28', '2027-06-09', '2027-07-28', '2027-09-15', '2027-10-27', '2027-12-08',
+].map(d => Date.parse(d + 'T00:00:00Z'));
+
+/** 進場時間落在「決議日前一天 00:00 ～ 決議日隔天 00:00」（持倉會跨過公布）。與 event_study.in_fomc 相同 */
+export function nearFomc(entryT: number, days: number[] = FOMC_DAYS): boolean {
+  return days.some(d => entryT >= d - DAY && entryT < d + DAY);
+}

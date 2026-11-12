@@ -15,7 +15,7 @@ import {
   dailyFeatures, h12Features, s3SignalAt, s1SignalAt, s3Score, btcOk, btcExt, breadthAt, universeOn,
   fundingAt, idxOf, simulateTrade, trimPartialFirstBar, isExcludedSymbol,
   type Bar, type FundingPoint, type DailyFeat, type TradeSim,
-  S3_TH, BR_FUNDING_MIN, brFeatures, brSignalAt, simulateShort,
+  S3_TH, BR_FUNDING_MIN, brFeatures, brSignalAt, simulateShort, nearFomc,
 } from './rules';
 
 // ════════════════════════════════════════════════════════════════════
@@ -371,7 +371,7 @@ export async function runS3(store: Store, deps: Deps, now: number): Promise<Reco
       const cands: Candidate[] = (sn?.s3 ?? []).map(c => ({
         symbol: c.symbol, signalT: D, entryT: d, stop: c.stop, close: c.close, vol: c.vol,
         breadth: sn!.breadth, btcOk: !!sn!.btcOk[String(D)], btcExtV: sn!.btcExt[String(D)], ret7: c.ret7,
-        ind: { hh20: c.hh20, atr14: c.atr14, ret7: c.ret7, btcExt: sn!.btcExt[String(D)] },
+        ind: { hh20: c.hh20, atr14: c.atr14, ret7: c.ret7, btcExt: sn!.btcExt[String(D)], fomc: nearFomc(d) ? 1 : 0 },
       }));
       return { t: d, cands };
     });
@@ -515,6 +515,10 @@ export async function runBR(store: Store, deps: Deps, now: number): Promise<Reco
     const btcUp = sn?.btcOk[String(D)];
     if (!sn || btcUp === undefined) { missing++; decisions.push({ t, cands: [] }); continue; }
     const uni = (sn.uni[String(D)] ?? []).slice(0, 50);
+    // 決策當下最新一根已收盤日線的 BTC 離 EMA50（ATR）：研究端 br_score.py 裡唯一兩期都較好的條件（BTC 越弱越好），
+    // 沒通過檢定，只記錄供之後前向比較
+    const Xt = Math.floor(t / DAY) * DAY;
+    const bx = (await snapOf(String(Xt)))?.btcExt[String(Xt - DAY)];
     const cands: Candidate[] = [];
     await inChunks(uni, 8, async u => {
       try {
@@ -523,7 +527,8 @@ export async function runBR(store: Store, deps: Deps, now: number): Promise<Reco
         if (!sig) return;
         cands.push({ symbol: u.symbol, signalT: B, entryT: t, stop: sig.stop, close: sig.close, vol: u.vol, side: -1,
           breadth: sn.breadth, btcOk: btcUp === false,
-          ind: { ema20: sig.ema20, ema50: sig.ema50, ema200: sig.ema200, rsi3: sig.rsi3, atr14: sig.atr14 } });
+          ind: { ema20: sig.ema20, ema50: sig.ema50, ema200: sig.ema200, rsi3: sig.rsi3, atr14: sig.atr14,
+            ...(typeof bx === 'number' && Number.isFinite(bx) ? { btcExt: bx } : {}) } });
       } catch { /* 單一幣失敗不影響其他 */ }
     });
     decisions.push({ t, cands });

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { nextDecisionAt, haltProgress, unrealizedR, legUnrealizedR, todaySummary } from '../src/lib/s3s1/view';
+import { nextDecisionAt, haltProgress, unrealizedR, legUnrealizedR, todaySummary, regimeNote } from '../src/lib/s3s1/view';
+import { nearFomc } from '../src/lib/s3s1/rules';
 
 const DAY = 86_400_000;
 const X = Date.UTC(2026, 9, 7);
@@ -69,5 +70,32 @@ describe('haltProgress（S3-B）', () => {
   it('B 用 b. 前綴、門檻 40%／15 筆', () => {
     const h = haltProgress({ 'b.baseEquity': '1000', 'b.realized': '-100', 'b.lossStreak': '4' }, 'B');
     expect(h).toEqual({ ddPct: 10, ddLimit: 40, streak: 4, streakLimit: 15, halted: null });
+  });
+});
+
+describe('regimeNote（首頁：現在會不會開倉）', () => {
+  it('BTC 在 EMA50 之下：說明是設計不是故障', () => {
+    const n = regimeNote(false, -1.9, 0.08)!;
+    expect(n.tone).toBe('bad');
+    expect(n.text).toContain('-1.9 ATR');
+    expect(n.text).toContain('不是故障');
+  });
+  it('站上但不夠強：warn；夠強：ok；過熱：bad；沒資料：null', () => {
+    expect(regimeNote(true, 0.8, 0.5)!.tone).toBe('warn');
+    expect(regimeNote(true, 2.5, 0.5)!.tone).toBe('ok');
+    expect(regimeNote(true, 2.5, 0.95)!.tone).toBe('bad');
+    expect(regimeNote(null, null, null)).toBeNull();
+    expect(regimeNote(true, undefined, 0.5)!.tone).toBe('ok');   // 舊快照沒有 btcExt
+  });
+});
+
+describe('nearFomc（只標記）', () => {
+  const d = Date.parse('2026-12-09T00:00:00Z');
+  it('決議日前一天 00:00 到決議日隔天 00:00', () => {
+    expect(nearFomc(d - 86_400_000)).toBe(true);
+    expect(nearFomc(d)).toBe(true);
+    expect(nearFomc(d + 86_400_000 - 1)).toBe(true);
+    expect(nearFomc(d + 86_400_000)).toBe(false);
+    expect(nearFomc(d - 86_400_000 - 1)).toBe(false);
   });
 });

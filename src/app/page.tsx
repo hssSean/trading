@@ -38,7 +38,7 @@ export default function HomePage() {
         {data && today && (
           <>
             <StatusStrip heartbeatAt={data.heartbeatAt} meta={data.meta} now={now} />
-            <TodayCard today={today} now={now} />
+            <TodayCard today={today} now={now} btcExt={data.snapshot?.btcExt?.[String(today.X - 86_400_000)] ?? null} />
             <LiveAccountCard meta={data.meta} />
             <p className="text-[#565E6B] text-[10px] px-1 pt-2">持倉（{data.positions.length}）</p>
             {data.positions.length === 0 ? (

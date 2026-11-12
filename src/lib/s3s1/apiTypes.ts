@@ -7,7 +7,7 @@ export interface OverviewResp {
   ok: boolean; reason?: string; now: number;
   meta: Record<string, unknown>;
   positions: LivePos[];
-  snapshot: { X: number; breadth: number; btcOk: Record<string, boolean>; s3: { symbol: string }[] } | null;
+  snapshot: { X: number; breadth: number; btcOk: Record<string, boolean>; btcExt?: Record<string, number>; s3: { symbol: string }[] } | null;
   heartbeatAt: number | null;
   signals: LiveSignal[];
 }
