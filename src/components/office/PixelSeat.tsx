@@ -16,12 +16,12 @@ export function PixelSeat({ seat, t, look, onClick, big = false }: {
   const blink = (t + phase(seat.id)) % 4.2 < 0.15;
   return (
     <button type="button" onClick={onClick}
-      className="group relative flex flex-col items-center pt-1 pb-2 rounded-md bg-[#3b2a1e]/40 hover:bg-[#3b2a1e]/70 transition-colors text-left">
+      className="group relative w-full flex flex-col items-center pt-1 pb-2 rounded-md bg-[#3b2a1e]/40 hover:bg-[#3b2a1e]/70 transition-colors text-left">
       <span className={`max-w-full truncate px-1.5 py-0.5 mb-1 text-[10px] leading-4 font-mono rounded-sm border
         ${seat.state === 'alert' ? 'bg-[#3a1212] border-[#ff3b30]/60 text-[#ffb4ae]' : 'bg-[#f4f1e8] border-[#2a1d14] text-[#2a1d14]'}`}>
         {seat.bubble}
       </span>
-      <Clawd state={seat.state} accessory={seat.accessory} t={t} look={look} blink={blink} size={big ? 104 : 76} />
+      <Clawd state={seat.state} accessory={seat.accessory} t={t} look={look} blink={blink} size={big ? 128 : 96} />
       <div className="w-full h-3 -mt-1 bg-[#7a5232] border-t-2 border-[#a5744a] shadow-[0_3px_0_#4a301d]" />
       <div className="mt-2 flex items-center gap-1.5">
         <span className="w-2 h-2 rounded-[1px]" style={{ background: LAMP[seat.state], boxShadow: seat.state === 'alert' ? '0 0 6px #ff3b30' : undefined }} />

@@ -792,7 +792,10 @@ export function StoreHydration({ children }: { children: React.ReactNode }) {
   // ── Redirect to /login if not authenticated ──────────────────────
   useEffect(() => {
     if (!authReady) return;
-    if (!userId && pathname !== '/login') router.replace('/login');
+    // 開發環境的 /office?demo=1 吃假資料、不需要登入（只在非 production 生效）
+    const demoPreview = process.env.NODE_ENV !== 'production' && pathname === '/office'
+      && new URLSearchParams(window.location.search).get('demo') === '1';
+    if (!userId && pathname !== '/login' && !demoPreview) router.replace('/login');
   }, [authReady, userId, pathname, router]);
 
   // ── Initial load from Supabase after auth ─────────────────────────

@@ -90,7 +90,7 @@ export function clawdRects(o: { state: SeatState; accessory: Accessory; palette:
   // 配件
   switch (o.accessory) {
     case 'tie': px(5.5, 4.5, 1, 0.5, '#2b4c7e'); px(5.25, 5, 1.5, 1.5, '#2b4c7e'); break;
-    case 'scope': px(10.5, -1.5, 3, 1, '#3a3a46'); px(13, -1.75, 0.75, 1.5, '#7fb2ff'); break;
+    case 'scope': px(9, -1.5, 4.5, 1.25, '#4a4a5a'); px(9, -1.5, 4.5, 0.4, '#6a6a7e'); px(13.25, -1.75, 0.75, 1.75, '#7fb2ff'); break;
     case 'badgeA': case 'badgeB':
       px(4.5, 4.5, 3, 2, '#f4f1e8');
       px(5.5, 5, 1, 1, o.accessory === 'badgeA' ? '#d9534f' : '#2b7bd9'); break;
