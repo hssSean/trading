@@ -13,7 +13,7 @@ bash deploy/install-ctrend.sh
 ```
 
 腳本會：建 venv（`research/ctrend/.venv`）→ 裝套件 → 跑單元測試 → 建 `~/ctrend.env`（只放 UPSTASH 兩行，
-從 `~/live-runner.env` 或執行中的 live-runner 的環境變數複製，不印值）→ 安裝並啟用 `ctrend.timer` →
+從目前 shell、`~/live-runner.env` 或執行中的 live-runner 的環境變數複製，不印值）→ 安裝並啟用 `ctrend.timer` →
 立刻跑一次（第一次從 2026-10-26 補算到最近的週一）。**不碰 live-runner、不需要重啟它。**
 最後印出 log 與 timer 狀態，整段貼回來確認。
 

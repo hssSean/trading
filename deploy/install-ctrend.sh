@@ -36,7 +36,11 @@ echo "== 4/7 單元測試"
 echo "== 5/7 Redis 金鑰（$ENVF，只放 UPSTASH 兩行，不印值）"
 if [ ! -s "$ENVF" ]; then
   SRC=""
-  if [ -r "$HOMEDIR/live-runner.env" ] && grep -q '^UPSTASH_REDIS_REST_TOKEN=' "$HOMEDIR/live-runner.env"; then
+  if [ -n "${UPSTASH_REDIS_REST_URL:-}" ] && [ -n "${UPSTASH_REDIS_REST_TOKEN:-}" ]; then
+    ( umask 077; printf 'UPSTASH_REDIS_REST_URL=%s\nUPSTASH_REDIS_REST_TOKEN=%s\n' \
+        "$UPSTASH_REDIS_REST_URL" "$UPSTASH_REDIS_REST_TOKEN" > "$ENVF" )
+    SRC="目前 shell 的環境變數"
+  elif [ -r "$HOMEDIR/live-runner.env" ] && grep -q '^UPSTASH_REDIS_REST_TOKEN=' "$HOMEDIR/live-runner.env"; then
     SRC="$HOMEDIR/live-runner.env"
     grep -E '^UPSTASH_REDIS_REST_(URL|TOKEN)=' "$SRC" > "$ENVF"
   else
@@ -53,7 +57,9 @@ if [ ! -s "$ENVF" ]; then
   fi
   if [ ! -s "$ENVF" ]; then
     rm -f "$ENVF"
-    echo "   找不到 UPSTASH 金鑰（~/live-runner.env 沒有、執行中的 live-runner 也讀不到）。"
+    echo "   找不到 UPSTASH 金鑰（目前 shell、~/live-runner.env、執行中的 live-runner 都沒有）。"
+    echo "   最簡單：切到當初啟動 live-runner 的那個 tmux 視窗（那裡的 shell 有設金鑰）再跑一次這支。"
+    echo "   或者手動建立："
     echo "   請手動建立 $ENVF，內容兩行（值跟 live-runner 用的一樣）："
     echo "     UPSTASH_REDIS_REST_URL=https://..."
     echo "     UPSTASH_REDIS_REST_TOKEN=..."
