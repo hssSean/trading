@@ -112,8 +112,9 @@ def http_json(url, tries=6):
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            if e.code in (429, 418):
-                wait = int(e.headers.get("Retry-After") or 60)
+            if e.code in (429, 418, 403) and k < tries - 1:
+                # 403 = Binance WAF (e.g. fundingRate's 500/5min/IP limit): back off and retry
+                wait = int(e.headers.get("Retry-After") or (120 if e.code == 403 else 60))
                 print(f"  rate limited ({e.code}), sleep {wait}s", flush=True)
                 time.sleep(wait)
                 continue
@@ -148,12 +149,24 @@ def fetch_daily(sym):
     return pd.DataFrame({"o": a[:, 1], "h": a[:, 2], "l": a[:, 3], "c": a[:, 4], "qv": a[:, 5]}, index=idx)
 
 
-def fetch_funding(sym, start, end):
-    """Sum of funding rates with fundingTime in [start, end)."""
+_FUNDING = {}
+
+
+def fetch_funding(sym, start, end, since):
+    """Sum of funding rates with fundingTime in [start, end). One request per symbol per run (cached from `since`):
+    /fapi/v1/fundingRate has its own limit of 500 requests / 5 min / IP, above which Binance's WAF answers 403."""
+    if sym not in _FUNDING:
+        s0, got = int(since.value // 10 ** 6), []
+        while True:  # 1000 rows ≈ 41 days for coins with hourly funding: page through long catch-ups
+            rows = http_json(f"{FAPI}/fapi/v1/fundingRate?symbol={urllib.parse.quote(sym)}&startTime={s0}&limit=1000")
+            time.sleep(0.7)
+            got += [(int(r["fundingTime"]), float(r["fundingRate"])) for r in rows]
+            if len(rows) < 1000:
+                break
+            s0 = got[-1][0] + 1
+        _FUNDING[sym] = got
     s_ms, e_ms = int(start.value // 10 ** 6), int(end.value // 10 ** 6)
-    rows = http_json(f"{FAPI}/fapi/v1/fundingRate?symbol={urllib.parse.quote(sym)}&startTime={s_ms}&endTime={e_ms - 1}&limit=1000")
-    time.sleep(0.25)
-    return float(sum(float(r["fundingRate"]) for r in rows if s_ms <= int(r["fundingTime"]) < e_ms))
+    return float(sum(fr for t, fr in _FUNDING[sym] if s_ms <= t < e_ms))
 
 
 class Upstash:
@@ -242,7 +255,7 @@ def run(dry, start=START):
                 ret, no_price = week_returns(P, syms, held_wk, m)
                 if no_price:
                     print(f"  WARNING week {held_wk.date()}: no price for {no_price}, counted as 0", flush=True)
-                f = pd.Series({s: fetch_funding(s, held_wk, m) for s in syms}, dtype=float)
+                f = pd.Series({s: fetch_funding(s, held_wk, m, since=todo[0] - WEEK) for s in syms}, dtype=float)
                 res = {}
                 for lab in ("all", "top100"):
                     wgt, turn = held[lab]
