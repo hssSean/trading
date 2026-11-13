@@ -1,6 +1,7 @@
 'use client';
 // 首頁的四張卡：狀態列、今天、帳戶、持倉（docs/superpowers/specs/2026-10-07-s3-app-redesign-design.md「首頁」）。
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { usePrice } from '@/store/usePriceStore';
 import { LEGS, LEG_KEYS, legMeta, legsOf, type LivePos } from '@/engine/s3aLive';
 import { HEARTBEAT_STALE_MS, haltProgress, legUnrealizedR, nextDecisionAt, regimeNote, unrealizedR, type TodaySummary } from '@/lib/s3s1/view';
@@ -36,7 +37,7 @@ export function TodayCard({ today, now, btcExt }: { today: TodaySummary; now: nu
   const fomc = nearFomc(today.X);
   return (
     <Card>
-      <CardTitle title="今天" right={<>下次決策 {fmtCountdown(next - now)}（台灣 08:00）</>} />
+      <CardTitle title="今天" right={<><Link href="/office" className="text-[#7fb2ff] mr-2">🏢 辦公室</Link>下次決策 {fmtCountdown(next - now)}（台灣 08:00）</>} />
       {!today.ready ? (
         <Empty text="今天的市場資料在 UTC 00:05（台灣 08:05）後產生" />
       ) : (

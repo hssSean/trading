@@ -10,6 +10,7 @@ export function useS3Api<T extends { ok: boolean; reason?: string }>(path: strin
   const busy = useRef(false);
 
   const load = useCallback(async () => {
+    if (!path) { setLoading(false); return; }   // /office ?demo=1：不抓資料
     if (busy.current) return;
     busy.current = true;
     try {
