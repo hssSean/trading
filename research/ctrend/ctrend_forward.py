@@ -120,7 +120,8 @@ def http_json(url, tries=6):
             if e.code >= 500 and k < tries - 1:
                 time.sleep(5 * (k + 1))
                 continue
-            raise
+            body = e.read().decode("utf-8", "replace")[:200]
+            raise RuntimeError(f"Binance {url.split('?')[0]} HTTP {e.code}: {body}") from None
         except (urllib.error.URLError, TimeoutError):
             if k == tries - 1:
                 raise
@@ -163,9 +164,15 @@ class Upstash:
     def cmd(self, *args):
         req = urllib.request.Request(self.url, data=json.dumps([str(a) for a in args]).encode("utf-8"),
                                      headers={"Authorization": f"Bearer {self.token}",
-                                              "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            out = json.loads(resp.read().decode("utf-8"))
+                                              "Content-Type": "application/json",
+                                              # urllib 預設的 Python-urllib/x.y 會被 Upstash 前面的 Cloudflare 擋成 403
+                                              "User-Agent": "ctrend-forward/1"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                out = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")[:200]
+            raise RuntimeError(f"Upstash {args[0]} HTTP {e.code}: {body}") from None
         if "error" in out:
             raise RuntimeError(f"Upstash {args[0]}: {out['error']}")
         return out["result"]
