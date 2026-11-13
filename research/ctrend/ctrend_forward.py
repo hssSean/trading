@@ -159,7 +159,7 @@ def fetch_funding(sym, start, end, since):
         s0, got = int(since.value // 10 ** 6), []
         while True:  # 1000 rows ≈ 41 days for coins with hourly funding: page through long catch-ups
             rows = http_json(f"{FAPI}/fapi/v1/fundingRate?symbol={urllib.parse.quote(sym)}&startTime={s0}&limit=1000")
-            time.sleep(0.7)
+            time.sleep(1.2)
             got += [(int(r["fundingTime"]), float(r["fundingRate"])) for r in rows]
             if len(rows) < 1000:
                 break
