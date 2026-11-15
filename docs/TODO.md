@@ -6,20 +6,10 @@
 
 ## 🔴 需要人工執行（Claude 做不到）
 
-1. **EC2：`git pull` 並重啟 live-runner**（避開台灣 08:00～10:00）。還沒生效的修正：
-   - 2026-11-11 稽核：進場送單逾時仍接手管理、止損判定只認平倉方向的止損單、孤兒條件單只撤自己的、
-     設逐倉只吞 -4046、啟動檢查持倉模式、有倉沒止損推播。
-   - 2026-11-12：絕對金額硬閘（`S3_MAX_DAILY_LOSS_USDT`、`S3_MAX_NOTIONAL_USDT`，testnet 可不設）、
-     幣池只收加密貨幣合約（`isCryptoPerp`）。
-2. **註冊「研究端新資料追蹤」排程**（Claude 的權限不允許建立排程）。用系統管理員身分開 PowerShell 貼上：
-   ```powershell
-   $a = New-ScheduledTaskAction -Execute 'C:\trading_stratage\run_monthly.cmd'
-   $t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 10:30
-   $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-   Register-ScheduledTask -TaskName '研究端新資料追蹤' -Action $a -Trigger $t -Settings $s
-   ```
-   沒註冊的話每月初手動雙擊 `C:\trading_stratage\run_monthly.cmd` 也可以。
-3. **EC2 改用 systemd 讓 live-runner 自動重啟**：照 `docs/EC2-live-runner.md`（可以跟第 1 項的重啟一起做）。
+- ~~EC2 `git pull` 並重啟 live-runner（含 11-11 稽核修正與 11-12 硬閘、`isCryptoPerp`）~~、
+  ~~EC2 改用 systemd 自動重啟~~：2026-11-16 使用者回報已完成。
+- ~~註冊「研究端新資料追蹤」排程~~：2026-11-16 已註冊（每週一 10:30，`run_monthly.cmd`，已涵蓋的月份會跳過）。
+
 4. **換 webhook secret**：舊文件記錄它是 `abc123`，而且放在 cron 網址的 query string。testnet 期間沒有
    財務風險；轉主網前換成隨機長字串並改用 `x-webhook-secret` header。順序：先設 Vercel 環境變數 →
    等重新部署 → 再改 cron-job.org。
@@ -36,7 +26,7 @@
 - [ ] 用 `/fapi/v1/commissionRate` 查實際手續費，對照回測假設（每邊 0.07% 含滑價）。
 - [ ] 換 webhook secret（見上）。
 - [ ] `flatten.ts` 與 `live-runner.ts` 目前都寫死 testnet，主網開放時一起改。
-- [ ] live-runner 在 EC2 上的自動重啟：設定與步驟已寫好（`deploy/`、`docs/EC2-live-runner.md`），**還沒在機器上套用與驗證**。
+- [x] live-runner 在 EC2 上的自動重啟（2026-11-16 使用者回報已套用）。
 
 ## 在等樣本的（不要提前下結論、不要提前調）
 
