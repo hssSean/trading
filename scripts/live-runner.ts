@@ -32,6 +32,7 @@
  * --live 旗標刻意 exit(1)：確保這支目前只會碰 testnet 帳戶。
  */
 
+import { execSync } from 'child_process';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Redis } from '@upstash/redis';
 import { BinanceFuturesClient, loadBinanceConfigFromEnv } from '../src/engine/binanceClient';
@@ -273,6 +274,11 @@ async function main() {
   } catch (e) {
     console.error(`[${nowStr()}] ⚠ 讀不到持倉模式（不影響執行）: ${describeError(e)}`);
   }
+  // 2026-11-16：把這支跑的 git 版本寫進 s3a-live:meta，首頁與 npm run status 就能確認 EC2 有沒有 git pull 並重啟
+  let version = 'unknown';
+  try { version = execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* 不是 git 目錄 */ }
+  try { await redis.hset('s3a-live:meta', { version, startedAt: String(Date.now()) }); } catch (e) { console.error(`[${nowStr()}] ⚠ 寫入版本失敗（不影響執行）: ${describeError(e)}`); }
+  console.log(`[${nowStr()}] 版本 ${version}`);
   console.log(`[${nowStr()}] S3-A＋S3-B：${process.env.S3A_DRY_RUN === '1' ? '試跑模式（S3A_DRY_RUN=1，只印出動作、不下單）' : '真的下單（testnet）'}`);
 
   let stopped = false;

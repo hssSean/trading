@@ -3,11 +3,9 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { usePriceStore, useTick } from '@/store/usePriceStore';
-import { SignalCard } from '@/components/SignalCard';
 import { CandlestickChart } from '@/components/CandlestickChart';
 import { fetchCandles, fetchTicker24h } from '@/api/binance';
 import { computeIndicators } from '@/analysis/indicators';
-import { generateSignals, unifySignalDirection } from '@/analysis/signals';
 import { findOrderBlocks, findFairValueGaps } from '@/analysis/smc';
 import { findSRLevels } from '@/analysis/snr';
 import { Candle, TechnicalIndicators, Timeframe, OrderBlock, FairValueGap, SRLevel } from '@/types';
@@ -18,7 +16,7 @@ const TFS: Timeframe[] = ['5m', '15m', '1h', '4h', '1d'];
 export default function AnalysisPage({ params }: { params: { symbol: string } }) {
   const { symbol } = params;
   const router = useRouter();
-  const { coins, addSignals } = useStore();
+  const { coins } = useStore();
   const coin = coins.find((c) => c.symbol === symbol);
 
   const [tf, setTf] = useState<Timeframe>('4h');
@@ -31,15 +29,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
   const [htfLabel, setHtfLabel] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [unlockFlash, setUnlockFlash] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-
-  const handleUnlock = () => {
-    const store  = useStore.getState();
-    fetch(`/api/analyze?symbol=${symbol}`, { method: 'DELETE', headers: { 'x-webhook-secret': store.webhookSecret } }).catch(() => {});
-    setUnlockFlash(true);
-    setTimeout(() => setUnlockFlash(false), 2500);
-  };
 
   const analyze = useCallback(
     async (timeframe: Timeframe) => {
@@ -73,14 +63,9 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         let bias: 'LONG' | 'SHORT' | null = null;
         let biasLabel = '';
 
-        // Candle cache to avoid duplicate fetches across TF loop
-        const candleCache = new Map<string, Candle[]>();
-        candleCache.set(timeframe, candles);
-
         if (htfTf) {
           try {
             const htfCandles = await fetchCandles(symbol, htfTf, 250);
-            candleCache.set(htfTf, htfCandles);
             const htfInd   = computeIndicators(htfCandles);
             const htfPrice = htfCandles[htfCandles.length - 1].close;
             const htfE200  = htfInd.ema200;
@@ -103,42 +88,6 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         // shows a number immediately instead of waiting for PriceFeed's next tick.
         usePriceStore.getState().setTickers24h(new Map([[symbol, ticker]]));
 
-        // Generate signals for all coin timeframes — compute proper HTF bias per TF
-        const currentCoins = useStore.getState().coins;
-        const thisCoin = currentCoins.find((c) => c.symbol === symbol);
-        const coinTfs = thisCoin?.timeframes ?? [timeframe];
-        const allSig: ReturnType<typeof generateSignals> = [];
-        for (const t of coinTfs) {
-          try {
-            if (!candleCache.has(t)) candleCache.set(t, await fetchCandles(symbol, t, 200));
-            const c = candleCache.get(t)!;
-
-            // Compute HTF bias specific to this TF
-            let tBias: 'LONG' | 'SHORT' | null = null;
-            const tHtfTf = htfMap[t as Timeframe] ?? null;
-            if (tHtfTf) {
-              if (!candleCache.has(tHtfTf)) {
-                try {
-                  candleCache.set(tHtfTf, await fetchCandles(symbol, tHtfTf, 250));
-                } catch {
-                  candleCache.set(tHtfTf, []); // Cache empty to avoid re-fetching repeatedly
-                }
-              }
-              const htfC = candleCache.get(tHtfTf);
-              if (htfC) {
-                const htfI  = computeIndicators(htfC);
-                const htfPx = htfC[htfC.length - 1].close;
-                const e200  = htfI.ema200;
-                if (!isNaN(e200) && e200 > 0) {
-                  const near = Math.abs(htfPx - e200) / e200 < 0.015;
-                  if (!near) tBias = htfPx > e200 ? 'LONG' : 'SHORT';
-                }
-              }
-            }
-            allSig.push(...generateSignals(symbol, t, c, tBias));
-          } catch { /* skip failed TF */ }
-        }
-        addSignals(symbol, unifySignalDirection(allSig));
       } catch (e: unknown) {
         if (e instanceof Error && e.name === 'CanceledError') return;
         setError('無法取得資料，請確認網路連線後重試');
@@ -146,7 +95,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         setLoading(false);
       }
     },
-    [symbol, addSignals],
+    [symbol],
   );
 
   useEffect(() => {
@@ -192,17 +141,6 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         </div>
         <div className="flex gap-1.5 shrink-0">
           <button
-            onClick={handleUnlock}
-            className={`text-[11px] border rounded-full px-2.5 py-1 transition-colors active:opacity-70 ${
-              unlockFlash
-                ? 'text-up border-up/50'
-                : 'text-text-m border-white/[0.08]'
-            }`}
-            title="解除 LINE 推播鎖定，允許此幣種再次推薦新信號"
-          >
-            {unlockFlash ? '已解鎖' : '解鎖推播'}
-          </button>
-          <button
             onClick={() => analyze(tf)}
             disabled={loading}
             className="text-accent text-[11px] border border-accent/40 rounded-full px-2.5 py-1 disabled:opacity-40 active:opacity-70"
@@ -245,7 +183,7 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
         )}
         <CandlestickChart
           candles={chartCandles}
-          signals={coin?.signals ?? []}
+          signals={[]}
           srLevels={srLevels}
           orderBlocks={orderBlocks}
           height={280}
@@ -387,33 +325,10 @@ export default function AnalysisPage({ params }: { params: { symbol: string } })
           </Section>
         )}
 
-        {/* ── Trading Signals ── */}
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-text-p text-sm font-medium">
-            交易信號 {coin?.signals.length ? `(${coin.signals.length})` : ''}
-          </h3>
-          {coin?.signals.length ? (
-            <span className="text-text-m text-xs num">{tf} 週期</span>
-          ) : null}
-        </div>
-
-        {loading && !coin?.signals.length ? (
-          <div className="space-y-3">
-            {[1, 2].map((k) => (
-              <div key={k} className="bg-card-2 rounded-xl h-32 animate-pulse" />
-            ))}
-          </div>
-        ) : coin?.signals.length ? (
-          coin.signals.map((s) => <SignalCard key={s.id} signal={s} />)
-        ) : (
-          !loading && (
-            <div className="bg-card-2 rounded-xl text-center py-8">
-              <p className="text-text-m text-xl mb-2 num">?</p>
-              <p className="text-text-s text-sm">此時間週期暫無符合條件的信號</p>
-              <p className="text-text-m text-xs mt-1">需要：得分 ≥9 且風險回報比 ≥2.0:1</p>
-            </div>
-          )
-        )}
+        {/* 2026-11-16：舊 v2.1 策略的進場／止損／止盈與「交易信號」已移除（那是已停用策略算的，容易被當成現在的建議） */}
+        <p className="text-text-m text-xs leading-5 mt-2">
+          這頁只看行情與技術指標。S3／S1／BR 的訊號在「訊號」頁。
+        </p>
 
         <div className="h-6" />
       </div>

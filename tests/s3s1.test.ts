@@ -203,9 +203,16 @@ describe('stats', () => {
     expect(summarizeLive({}, [])).toMatchObject({ retPct: null, ddPct: null, trades: 0, avgR: null });
     expect(summarizeLive({ baseEquity: '1000', realized: '50', peakRealized: '100' }, []).ddPct).toBeCloseTo(50 / 1100 * 100, 9);
   });
-  it('reasonKey 把數字收成 n', () => {
+  it('reasonKey 去掉括號裡的變動數值，規則裡的數字照原樣顯示', () => {
     expect(reasonKey('市場過熱（廣度 0.951）')).toBe('市場過熱');
-    expect(reasonKey('分數 1')).toBe('分數 n');
+    expect(reasonKey('低於最小下單量（最小量風險 3.37 > 1.5×1.03 USDT）')).toBe('低於最小下單量');
+    expect(reasonKey('分數 1')).toBe('分數 1');
+    expect(reasonKey('分數 0')).toBe('分數 0');
+    expect(reasonKey('分數 1 < 2')).toBe('分數 1');
+    expect(reasonKey('該幣 D−1 日線收盤 ≤ EMA50')).toBe('該幣 D−1 日線收盤 ≤ EMA50');
+    expect(reasonKey('持倉上限 20 筆')).toBe('持倉上限 20 筆');
+    expect(reasonKey('帳戶已停用：回撤 36.2% > 35%')).toBe('帳戶已停用');
+    expect(reasonKey(undefined)).toBe('?');
   });
 });
 

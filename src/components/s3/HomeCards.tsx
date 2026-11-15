@@ -25,6 +25,7 @@ export function StatusStrip({ heartbeatAt, meta, now }: { heartbeatAt: number | 
         ● live-runner {alive ? '運作中' : heartbeatAt ? `沒在跑（最後 ${fmtT(heartbeatAt)}）` : '沒在跑'}
       </span>
       <span className={meta.mode === 'dry' ? 'text-[#F0B90B]' : 'text-[#8A94A2]'}>{mode}</span>
+      {typeof meta.version === 'string' && <span className="text-[#565E6B]">版本 {meta.version}{meta.startedAt ? `・${fmtT(Number(meta.startedAt))} 啟動` : ''}</span>}
       {halted.map(([k, h]) => <span key={k} className="text-down">⛔ {LEGS[k].name} 已停用：{h}</span>)}
     </div>
   );
@@ -44,7 +45,7 @@ export function TodayCard({ today, now, btcExt }: { today: TodaySummary; now: nu
         <>
           <Stats items={[
             ['BTC 條件', today.btcOk ? '✓ 站上 EMA50' : '✗ 不成立', today.btcOk ? 1 : -1],
-            ['市場廣度', today.breadth == null ? '—' : `${(today.breadth * 100).toFixed(0)}% / 93%`, today.breadth != null && today.breadth < 0.93 ? 1 : -1],
+            ['市場廣度', today.breadth == null ? '—' : `${(today.breadth * 100).toFixed(0)}%（上限 93%）`, today.breadth != null && today.breadth < 0.93 ? 1 : -1],
             ['候選', `${today.candidates} 個`],
           ]} />
           {note && <p className={`mt-2 text-[11px] leading-5 ${note.tone === 'ok' ? 'text-up' : note.tone === 'warn' ? 'text-[#D9A441]' : 'text-[#8A94A2]'}`}>{note.text}</p>}
@@ -89,6 +90,13 @@ export function LiveAccountCard({ meta }: { meta: Record<string, unknown> }) {
           </div>
         );
       })}
+      {Number.isFinite(wallet) && wallet > 0 && (() => {
+        // 錢包 − 兩個策略的權益：S3 起算之後不屬於 S3 的損益（手動單、未平倉損益、資金費、testnet 調整等）
+        const rest = wallet - LEG_KEYS.reduce((a, k) => a + legMeta(meta, k).equity, 0);
+        return Math.abs(rest) >= 1
+          ? <p className="text-[#565E6B] text-[10px] mt-3 pt-2.5 border-t border-[#1B222B] num">不屬於 S3 的部分 <span className={rest >= 0 ? 'text-up' : 'text-down'}>{fmtU(rest, 0)}</span>（錢包 − S3-A − S3-B；手動單、未平倉損益、資金費、testnet 調整等）</p>
+          : null;
+      })()}
       <p className="text-[#3A424E] text-[9px] mt-2 leading-4">兩個策略的起始權益各算錢包的一半；同一個幣只開一個部位、共用止損，出場時依成交紀錄分帳。達到停用條件會自動停止那個策略開新倉。</p>
     </Card>
   );

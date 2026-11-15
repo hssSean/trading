@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { supabase } from '@/lib/supabase';
-import { setIsResetting, clearSessionDeletedIds, removeCoinPermanently } from '@/components/StoreHydration';
+import { removeCoinPermanently } from '@/components/StoreHydration';
 import { SignalStrength, Timeframe } from '@/types';
 import { FormField } from '@/components/ui/FormField';
 import { ToggleChip } from '@/components/ui/ToggleChip';
@@ -76,7 +76,7 @@ interface AnalyzeResult {
 export default function SettingsPage() {
   const {
     coins, settings, webhookSecret,
-    clearSignals, updateSettings, setWebhookSecret,
+    updateSettings, setWebhookSecret,
   } = useStore();
   const router = useRouter();
 
@@ -101,10 +101,6 @@ export default function SettingsPage() {
   const [copied, setCopied]         = useState(false);
   const [diagResult, setDiagResult] = useState<AnalyzeResult | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
-  const [resetting, setResetting] = useState(false);
-  const [resetMsg,    setResetMsg]    = useState('');
-  const [fullResetting, setFullResetting] = useState(false);
-  const [fullResetMsg,  setFullResetMsg]  = useState('');
   const [ackBusy, setAckBusy] = useState(false);
   const [ackMsg,  setAckMsg]  = useState('');
   // Local string state so the field can be cleared while typing — committing
@@ -274,71 +270,6 @@ export default function SettingsPage() {
   useEffect(() => {
     if (typeof window !== 'undefined') setAppUrl(window.location.origin);
   }, []);
-
-  const handleResetAllLocks = async () => {
-    if (!confirm('確定要重置所有幣種的推播鎖定嗎？\n（解除後，下次分析達到條件即可重新推播）')) return;
-    setResetting(true); setResetMsg('');
-    try {
-      const res  = await fetch('/api/analyze', { method: 'DELETE', headers: { 'x-webhook-secret': secret.trim() || 'abc123' } });
-      const data = await res.json();
-      setResetMsg(`已重置 ${data.cleared ?? 0} 個鎖定`);
-    } catch {
-      setResetMsg('重置失敗，請重試');
-    } finally {
-      setResetting(false);
-      setTimeout(() => setResetMsg(''), 4000);
-    }
-  };
-
-  const handleFullReset = async () => {
-    if (!confirm(
-      '警告：此操作將永久刪除全部交易紀錄與推薦單，無法復原，且所有已登入的裝置都會同步清空。\n\n確定要清空所有紀錄並重置嗎？'
-    )) return;
-
-    setFullResetting(true);
-    setFullResetMsg('');
-
-    try {
-      // Block all background syncs so in-flight saves can't resurrect old data
-      setIsResetting(true);
-      clearSessionDeletedIds();
-
-      // Wipe local state immediately (persist middleware synchronously clears localStorage)
-      useStore.setState({ trades: [] });
-      useStore.getState().clearSignals();
-
-      // Get Supabase JWT for server-side user verification
-      const { data: { session } } = await supabase.auth.getSession();
-      const jwt = session?.access_token ?? '';
-
-      const res = await fetch('/api/reset', {
-        method: 'POST',
-        headers: {
-          'x-webhook-secret': secret.trim() || 'abc123',
-          ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-        },
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(err.error ?? `HTTP ${res.status}`);
-      }
-
-      const data = await res.json() as { deletedTrades: number; clearedKeys: number; resetAt: number };
-
-      // Stamp the local store with the server reset time so other open devices
-      // detect the change on their next 2-min sync and also wipe their local cache.
-      useStore.getState().setLastResetAt(data.resetAt);
-
-      setFullResetMsg(`已清空 ${data.deletedTrades} 筆交易、解除 ${data.clearedKeys} 個 Redis 鎖定`);
-    } catch (e) {
-      setFullResetMsg(`重置失敗：${String(e).slice(0, 80)}`);
-    } finally {
-      setIsResetting(false);
-      setFullResetting(false);
-      setTimeout(() => setFullResetMsg(''), 8000);
-    }
-  };
 
   const saveWebhookSecret = () => {
     setWebhookSecret(secret.trim() || 'abc123');
@@ -524,75 +455,14 @@ export default function SettingsPage() {
           )}
 
           <p className="text-text-m text-xs mt-3 leading-5">
-            推播從伺服器每小時自動掃描後觸發至此裝置
+            S3 真倉的進場、止盈、加碼、移動止損、出場由 live-runner 當下推播；live-runner 停止或每日對帳不一致由伺服器推播
           </p>
         </Section>
 
-        {/* Cloud Sync */}
-        <Section title="雲端同步（Supabase）">
-          <div className="border border-up/20 rounded-[10px] px-4 py-3 mb-3">
-            <p className="text-up text-xs mb-1">自動同步已啟用</p>
-            <p className="text-text-m text-xs leading-5">
-              交易紀錄、自選幣種、通知設定均自動同步至 Supabase。<br />
-              任何裝置登入同一帳號，資料即時一致。
-            </p>
-          </div>
-          <p className="text-text-m text-xs leading-5">
-            同步時機：資料變動後 4 秒自動儲存，以及每 10 分鐘定期備份。<br />
-            首次登入新裝置時自動從雲端載入所有紀錄。
-          </p>
-        </Section>
-
-        {/* Data */}
-        <Section title="資料管理">
-          {/* Reset all signal notification locks */}
-          {resetMsg && (
-            <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
-              resetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
-            }`}>{resetMsg}</div>
-          )}
-          <button
-            onClick={handleResetAllLocks}
-            disabled={resetting}
-            className="w-full py-3 rounded-full border border-[#C99A2E]/30 text-[#C99A2E] text-sm mb-3 disabled:opacity-40"
-          >
-            {resetting ? '重置中…' : '重置所有推播鎖定'}
-          </button>
-          <p className="text-text-m text-xs mb-4 -mt-1">解除所有幣種的 24 小時推播鎖定，讓下次分析可以重新推播</p>
-          <button
-            onClick={() => { if (confirm('確定清除所有歷史信號？')) clearSignals(); }}
-            className="w-full py-3 rounded-full border border-down/30 text-down text-sm"
-          >
-            清除所有歷史信號
-          </button>
-
-          {/* Full atomic reset */}
-          <div className="mt-5 pt-4 border-t border-white/[0.06]">
-            {fullResetMsg && (
-              <div className={`mb-3 px-3 py-2 rounded-[10px] text-xs ${
-                fullResetMsg.includes('失敗') ? 'border border-down/30 text-down' : 'border border-up/30 text-up'
-              }`}>{fullResetMsg}</div>
-            )}
-            <button
-              onClick={handleFullReset}
-              disabled={fullResetting}
-              className="w-full py-3 rounded-full border border-down/50 text-down text-sm disabled:opacity-40"
-            >
-              {fullResetting ? (
-                <span className="flex items-center justify-center gap-2">
-                  <span className="w-4 h-4 border-2 border-down border-t-transparent rounded-full animate-spin" />
-                  重置中…
-                </span>
-              ) : '清空所有紀錄並重置'}
-            </button>
-            <p className="text-text-m text-xs mt-2 leading-5">
-              永久刪除全部交易紀錄、推薦單與 Redis 鎖定，所有裝置同步清空，無法復原
-            </p>
-          </div>
-
-          <p className="text-text-m text-xs mt-4 text-center leading-6">
+        <Section title="關於">
+          <p className="text-text-m text-xs text-center leading-6">
             行情：Binance 正式站公開資料・下單：Binance testnet<br />
-            策略：S3-A 真倉、S3-A／S3-B／S1 模擬帳本（研究端 2026-10-06 部署文件）<br />
+            策略：S3-A＋S3-B 真倉；S3-A／S3-B／S1／BR 模擬帳本、CTREND 週帳本<br />
             <span className="text-down/70">本 App 僅供參考，不構成投資建議</span>
           </p>
         </Section>

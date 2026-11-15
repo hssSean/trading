@@ -154,7 +154,7 @@ Supabase 心跳與交易所部位。舊策略只在還有未平倉時展開（`-
 | 要新增功能／重構／「要不要重做」 | `superpowers:brainstorming` | 2026-09-03「策略要不要重建」那次我直接跳到數據分析，跳過了發散階段 |
 | 動任何策略參數之前 | 讀 `docs/ANALYSIS-*` 最新那份 | 四個層面都測過了，很多「看起來該改」的已驗證無效 |
 | 宣稱某個統計結論 | 先看**樣本量、顯著性、涵蓋率**三個 | 這一個月抓到七個量測錯誤，每個在被抓到前都長得像結論 |
-| 要理解跨檔呼叫關係 | `/graphify .` 或 `claude-mem:smart-explore` | `route.ts` 超過 3500 行，整檔讀既慢又容易漏 |
+| 要理解跨檔呼叫關係 | `/graphify .` 或 `claude-mem:smart-explore` | `s3aLive.ts`、`engine.ts` 各數百行、跨檔呼叫多，整檔讀既慢又容易漏 |
 | 查「這個之前做過嗎」 | `claude-mem:mem-search` | 避免重跑已經做過的分析 |
 | 抓外部網頁／API 文件 | `WebFetch`／`WebSearch` | firecrawl MCP 已於 2026-09-05 從 `.mcp.json` 移除（無 key，呼叫一律回 `Unauthorized: Invalid token`）。要復用：`.mcp.json` 加回 `firecrawl` server + 設 user 環境變數 `FIRECRAWL_API_KEY` |
 

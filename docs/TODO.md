@@ -8,6 +8,8 @@
 
 - ~~EC2 `git pull` 並重啟 live-runner（含 11-11 稽核修正與 11-12 硬閘、`isCryptoPerp`）~~、
   ~~EC2 改用 systemd 自動重啟~~：2026-11-16 使用者回報已完成。
+- **EC2 再 `git pull` 並重啟一次 live-runner**（2026-11-16 新增：啟動時把 git 版本寫進 `s3a-live:meta`，
+  首頁狀態列與 `npm run status` 會顯示「版本 xxx」，之後就能從遠端確認 EC2 有沒有更新）。
 - ~~註冊「研究端新資料追蹤」排程~~：2026-11-16 已註冊（每週一 10:30，`run_monthly.cmd`，已涵蓋的月份會跳過）。
 
 4. **換 webhook secret**：舊文件記錄它是 `abc123`，而且放在 cron 網址的 query string。testnet 期間沒有
@@ -54,8 +56,11 @@
 
 - 研究端：CPI／非農的事件檢驗（需要可靠的歷史公布日曆；FOMC 與「BTC 衝擊日」已測，見登記表 2026-11-12）。
 - 研究端：對 S3-A 算依試驗次數調整後的門檻（累計試驗已超過 2,000 組）。
-- 再清一輪舊策略殘留：`/api/reset`、`/api/scan-status`、`/api/trade-status`、`/api/trade-export`、`/api/reject-funnel`
+- 再清一輪舊策略殘留：`/api/scan-status`、`/api/trade-status`、`/api/trade-export`、`/api/reject-funnel`
   只剩 `/legacy` 頁與設定頁在用；`src/lib/drawdownHalt.ts` 已沒有任何地方引用（只剩測試）。
+  （`/api/reset` 與設定頁「資料管理」三個按鈕 2026-11-16 已移除。）
+- `StoreHydration.tsx` `pickupServerSignals`：每個頁面都 `POST /api/analyze` 撿舊策略的 `pending_signals`
+  （唯讀，但每次開頁多一次 Redis 讀取，而且用 client 端存的 webhook secret）。舊策略已不產生訊號，可以整段拿掉。
 - 稽核任務書（`docs/trading-system-audit.md`）第 14 節的事件行事曆／斷路器：FOMC 只夠做標記；
   市場反應型斷路器（BTC 衝擊日）回測對三個策略都沒用，**不做**。
 

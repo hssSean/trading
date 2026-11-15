@@ -85,7 +85,9 @@ export function summarizeLive(meta: Record<string, unknown>, closed: LiveDone[],
 }
 
 /** 被擋掉的訊號理由歸類：把數字換成 n，同類的擋單才會合併計數 */
-export const reasonKey = (r: string | undefined) => (r ?? '?').replace(/（.*$/, '').replace(/\d+(\.\d+)?/g, 'n').trim();
+/** 擋單理由分組用：變動的數值都放在括號或冒號後面（去掉），規則本身的數字（分數 1、EMA50、上限 20 筆）留著 */
+export const reasonKey = (r: string | undefined) =>
+  (r ?? '?').replace(/（.*$/, '').replace(/：.*$/, '').replace(/^(分數 -?\d+) < \d+$/, '$1').trim();
 
 /** 研究端 monthly_update.py 寫在 Redis `s3s1:fresh` 的摘要：規則定案後（2026-09 起）新資料的樣本外結果 */
 export interface FreshSummary {

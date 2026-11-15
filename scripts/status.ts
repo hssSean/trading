@@ -19,6 +19,7 @@
  * S3 部分另外需要 UPSTASH_REDIS_REST_URL／TOKEN，交易所部分需要 BINANCE_TESTNET_API_KEY／SECRET。
  */
 
+import { execSync } from 'child_process';
 import { createClient } from '@supabase/supabase-js';
 import { loadEnvFile, reportEnvLoad } from './loadEnvFile';
 
@@ -72,6 +73,7 @@ async function printS3(
   const signals = sigRaw.map(v => parse<LiveSignal>(v));
 
   console.log(`模式 ${meta.mode ?? '?'}｜testnet 錢包 ${num(meta.wallet)} USDT（${ago(meta.walletAt ? Number(meta.walletAt) : null)}）`);
+  console.log(runnerVersionLine(meta));
   for (const k of LEG_KEYS) {
     const m = legMeta(meta, k);
     console.log(`  ${LEGS[k].name}  權益 ${num(m.equity)}（起始 ${num(m.base)}、已實現 ${m.realized >= 0 ? '+' : ''}${num(m.realized)}）`
@@ -369,3 +371,20 @@ main().catch(e => {
   console.error('查詢失敗：', e instanceof Error ? e.message : String(e));
   process.exitCode = 1;
 });
+
+/** live-runner 寫在 meta 的 git 版本，跟本機 HEAD 比：只有 live-runner 會用到的檔案不同才警告（docs 之類的 commit 不算） */
+function runnerVersionLine(meta: Record<string, unknown>): string {
+  const v = typeof meta.version === 'string' ? meta.version : null;
+  const started = meta.startedAt ? `、${ago(Number(meta.startedAt))}啟動` : '';
+  if (!v) return 'live-runner 版本 ⚠ 未回報（2026-11-16 之前的版本，到 EC2 git pull 並重啟後就會有）';
+  if (v === 'unknown') return `live-runner 版本 ? （EC2 讀不到 git${started}）`;
+  try {
+    execSync(`git cat-file -e ${v}^{commit}`, { stdio: 'ignore' });
+    const changed = execSync(`git diff --name-only ${v} HEAD -- scripts/live-runner.ts src/engine src/lib src/api`, { encoding: 'utf-8' }).trim();
+    return changed
+      ? `live-runner 版本 ${v}${started} ⚠ 落後本機：${changed.split(/\r?\n/).length} 個它會用到的檔案有改，要到 EC2 git pull 並重啟`
+      : `live-runner 版本 ${v}${started} ✅ 跟本機一致`;
+  } catch {
+    return `live-runner 版本 ${v}${started}（本機沒有這個 commit，先 git pull）`;
+  }
+}
